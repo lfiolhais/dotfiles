@@ -1,0 +1,93 @@
+tap "chipsalliance/verible"
+tap "homebrew/bundle"
+tap "homebrew/cask-fonts"
+tap "homebrew/services"
+brew "boost"
+brew "asciidoc"
+brew "bash"
+brew "bat"
+brew "bottom"
+brew "chezmoi"
+brew "cmake"
+brew "coreutils"
+brew "cunit"
+brew "dust"
+brew "eza"
+brew "fd"
+brew "ffmpeg"
+brew "fish"
+brew "fzf"
+brew "gawk"
+brew "gh"
+brew "git"
+brew "git-delta"
+brew "git-extras"
+brew "handbrake"
+brew "imagemagick"
+brew "internetarchive"
+brew "latexdiff"
+brew "mas"
+brew "neovim"
+brew "node"
+brew "poppler"
+brew "qemu"
+brew "reattach-to-user-namespace"
+brew "ripgrep"
+brew "rust-analyzer"
+brew "rustup-init"
+brew "starship"
+brew "texlive"
+brew "tmux"
+brew "youtube-dl"
+brew "yt-dlp"
+brew "chipsalliance/verible/verible"
+cask "adguard"
+cask "adobe-acrobat-reader"
+cask "airbuddy"
+cask "alacritty"
+cask "alt-tab"
+cask "audacity"
+cask "bartender"
+cask "craft"
+cask "discord"
+cask "drawio"
+cask "firefox"
+cask "font-awesome-terminal-fonts"
+cask "font-fira-code-nerd-font"
+cask "font-fontawesome"
+cask "iterm2"
+cask "libreoffice"
+cask "obs"
+cask "orion"
+cask "protonmail-bridge"
+cask "protonvpn"
+cask "raycast"
+cask "rectangle"
+cask "signal"
+cask "skype"
+cask "tailscale"
+cask "thunderbird"
+cask "tor-browser"
+cask "transmission"
+cask "tunnelblick"
+cask "vlc"
+cask "wezterm"
+cask "xpra"
+cask "zoom"
+mas "AdGuard for Safari", id: 1440147259
+mas "DeArrow", id: 6451469297
+mas "GarageBand", id: 682658836
+mas "Goodnotes", id: 1444383602
+mas "Ice Cubes", id: 6444915884
+mas "iMovie", id: 408981434
+mas "Ivory", id: 6444602274
+mas "Keynote", id: 409183694
+mas "Noir", id: 1592917505
+mas "Numbers", id: 409203825
+mas "Pages", id: 409201541
+mas "Prime Video", id: 545519333
+mas "Reeder", id: 1529448980
+mas "SponsorBlock", id: 1573461917
+mas "Super Agent", id: 1568262835
+mas "uBlacklist for Safari", id: 1547912640
+mas "WhatsApp", id: 1147396723

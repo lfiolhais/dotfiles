@@ -1,0 +1,8 @@
+alias ls="eza"
+alias l="ls -l"
+alias ll="ls -l"
+alias la="ls -la"
+
+[ -f ~/.fzf.bash ] && source ~/.fzf.bash
+
+eval "$(starship init bash)"
