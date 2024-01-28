@@ -35,10 +35,10 @@
 	default = simple
 	# Make `git push` push relevant annotated tags when pushing branches out.
 	followTags = true
+	autoSetupRemote = true
 [user]
 	name = Luís Fiolhais
 	email = luis.azenhas.fiolhais@tecnico.ulisboa.pt
-	signingkey = ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIQRqk3nKy0exOyw5da6MxHKONnIH0D0lHWVIQUhtbWy
 [filter "lfs"]
 	clean = git-lfs clean -- %f
 	smudge = git-lfs smudge -- %f
