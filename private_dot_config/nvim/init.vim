@@ -93,17 +93,6 @@ let g:secure_modelines_allowed_items = [
                 \ "colorcolumn"
                 \ ]
 
-" " Lightline
-" let g:lightline = {
-"       \ 'colorscheme': 'dracula',
-"       \ 'component_function': {
-"       \   'filename': 'LightlineFilename',
-"       \ },
-" \ }
-" function! LightlineFilename()
-"   return expand('%:t') !=# '' ? @% : '[No Name]'
-" endfunction
-
 " Latex
 let g:latex_indent_enabled = 1
 let g:latex_fold_envs = 0
