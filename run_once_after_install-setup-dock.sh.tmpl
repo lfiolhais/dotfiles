@@ -1,0 +1,11 @@
+{{- if eq .chezmoi.os "darwin" -}}
+#!/usr/bin/env bash
+
+dockutil --add /Applications/Thunderbird.app
+dockutil --add /System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app/ --after 'Thunderbird'
+dockutil --add /Applications/Reeder.app --after 'Safari'
+dockutil --add /Applications/WezTerm.app --after 'Reeder'
+dockutil --add /System/Applications/Notes.app --after 'WezTerm'
+dockutil --add /System/Applications/Music.app --after 'Notes'
+
+{{ end -}}
