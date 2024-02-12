@@ -32,3 +32,6 @@ set -gx GTK2_RC_FILES "/usr/share/themes/Materia-dark/gtk-2.0/gtkrc"
 
 # Disbale Homebrew Auto Update
 set -gx HOMEBREW_NO_AUTO_UPDATE 1
+
+# Enable iterm tmux integration
+set -x ITERM_ENABLE_SHELL_INTEGRATION_WITH_TMUX YES
