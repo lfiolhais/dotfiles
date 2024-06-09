@@ -1,6 +1,8 @@
 {{- if eq .chezmoi.os "darwin" -}}
 #!/usr/bin/env bash
 
+eval "$(/opt/homebrew/bin/brew shellenv)"
+
 dockutil --add /Applications/Thunderbird.app
 dockutil --add /System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app/ --after 'Thunderbird'
 dockutil --add /Applications/Reeder.app --after 'Safari'
