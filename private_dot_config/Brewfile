@@ -1,6 +1,5 @@
 tap "chipsalliance/verible"
 tap "homebrew/bundle"
-tap "homebrew/cask-fonts"
 tap "homebrew/services"
 tap "lihaoyun6/tap"
 brew "boost"
