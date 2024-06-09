@@ -14,4 +14,19 @@ else
     echo "Found version of Xcode CLI: ${version}"
     echo "Skipping install"
 fi
+
+if /usr/bin/pgrep oahd >/dev/null 2>&1 ; then
+        echo "Rosetta 2 is already installed"
+    else
+        echo "Rosetta 2 is missing - installing"
+        echo
+        /usr/sbin/softwareupdate --install-rosetta --agree-to-license
+        echo
+        if /usr/bin/pgrep oahd >/dev/null 2>&1 ; then
+            echo "Rosetta 2 is now installed"
+        else
+            echo "Rosetta 2 installation failed"
+            exit 1
+        fi
+    fi
 {{ end -}}
