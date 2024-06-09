@@ -5,6 +5,11 @@ version=$(pkgutil --pkg-info=com.apple.pkg.CLTools_Executables | grep version)
 
 if [[ $? != 0 ]]; then
     xcode-select --install
+
+    # Wait until XCode Command Line Tools installation has finished.
+    until $(xcode-select --print-path &> /dev/null); do
+      sleep 5;
+    done
 else
     echo "Found version of Xcode CLI: ${version}"
     echo "Skipping install"
