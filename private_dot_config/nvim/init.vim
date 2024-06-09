@@ -117,15 +117,16 @@ set updatetime=300
 " =============================================================================
 lua <<EOF
 local actions = require('telescope.actions')
-local trouble = require("trouble.providers.telescope")
+local open_with_trouble = require("trouble.sources.telescope").open
+
 require('telescope').setup{
     defaults = {
         mappings = {
           i = {
-                  ["<c-t>"] = trouble.open_with_trouble
+                  ["<c-t>"] = open_with_trouble
               },
           n = {
-                  ["<c-t>"] = trouble.open_with_trouble
+                  ["<c-t>"] = open_with_trouble
               },
         },
     },
@@ -292,7 +293,7 @@ nnoremap <leader>gco :Git checkout<space>
 
 " Move between tabs
 nnoremap <leader>tn <cmd>tabnew<cr>
-nnoremap <leader>tc <cmd>tabclose<cr>
+nnoremap <leader>td <cmd>tabclose<cr>
 nnoremap <leader>tl <cmd>tabn<cr>
 nnoremap <leader>th <cmd>tabp<cr>
 nnoremap <leader>t1 <cmd>1tabn<cr>
