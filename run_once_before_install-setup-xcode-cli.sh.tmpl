@@ -1,5 +1,12 @@
 {{- if eq .chezmoi.os "darwin" -}}
 #!/usr/bin/env bash
 
-xcode-select --install
+version=$(pkgutil --pkg-info=com.apple.pkg.CLTools_Executables | grep version)
+
+if [[ $? != 0 ]]; then
+    xcode-select --install
+else
+    echo "Found version of Xcode CLI: ${version}"
+    echo "Skipping install"
+fi
 {{ end -}}
