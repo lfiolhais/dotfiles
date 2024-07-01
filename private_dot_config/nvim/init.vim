@@ -31,6 +31,8 @@ Plug 'christoomey/vim-tmux-navigator'
 Plug 'stevearc/overseer.nvim'
 " Notifications Asynchronous Commands
 Plug 'rcarriga/nvim-notify'
+" Neovim Sessions
+Plug 'rmagatti/auto-session'
 
 " Git
 Plug 'tpope/vim-fugitive'
@@ -419,6 +421,11 @@ require('Comment').setup()
 
 require("fidget").setup {
   -- options
+}
+
+require("auto-session").setup {
+  log_level = "error",
+  auto_session_suppress_dirs = { "~/", "~/Projects", "~/Downloads", "/", "~/Documents"},
 }
 
 local lsp = require('lsp-zero').preset({
