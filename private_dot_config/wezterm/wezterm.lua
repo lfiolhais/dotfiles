@@ -22,9 +22,11 @@ config.font = wezterm.font 'FiraCode Nerd Font Mono'
 config.enable_tab_bar = false
 
 config.window_close_confirmation = "NeverPrompt"
+config.window_decorations = "RESIZE"
+
 
 wezterm.on("gui-startup", function(cmd)
-  local tab, pane, window = mux.spawn_window{cmd or {}}
+  local tab, pane, window = mux.spawn_window(cmd or {})
   window:gui_window():maximize()
 end)
 
