@@ -1,6 +1,21 @@
 {
-  "$schema" : "https:\/\/schema.linearmouse.app\/0.9.5",
   "schemes" : [
-
-  ]
+    {
+      "if" : {
+        "device" : {
+          "serialNumber" : "7E9BFBBA6946DEE4",
+          "productName" : "MX Vertical",
+          "category" : "mouse",
+          "productID" : "0xb020",
+          "vendorID" : "0x46d"
+        }
+      },
+      "scrolling" : {
+        "acceleration" : {
+          "vertical" : 1
+        }
+      }
+    }
+  ],
+  "$schema" : "https:\/\/schema.linearmouse.app\/0.10.0"
 }
