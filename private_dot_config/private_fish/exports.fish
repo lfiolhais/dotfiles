@@ -5,7 +5,7 @@
 # /usr/bin/core_perl
 #
 # set -gx PATH /home/lfiolhais/.local/bin /usr/local/sbin $HOME/.cargo/bin $PATH
-set -gx LD_LIBRARY_PATH (rustc +nightly --print sysroot)"/lib" $LD_LIBRARY_PATH
+set -gx LD_LIBRARY_PATH (rustc --print sysroot)"/lib" $LD_LIBRARY_PATH
 
 # Make vim the default editor.
 set -gx EDITOR nvim
