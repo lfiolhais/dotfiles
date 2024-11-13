@@ -1,2 +1,2 @@
 #!/usr/bin/env bash
-chsh -s $(which fish)
+#chsh -s $(which fish)
