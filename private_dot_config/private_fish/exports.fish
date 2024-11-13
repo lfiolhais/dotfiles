@@ -1,10 +1,6 @@
 # Instead of setting the PATH every time, set only once using
-# set -U fish_user_paths $HOME/usr/local/sbin
-# $HOME/.cargo/bin $HOME/usr/bin/ /usr/local/bin/ /bin
-# /usr/lib/jvm/default/bin /usr/bin/site_perl /usr/bin/vendor_perl
-# /usr/bin/core_perl
-#
-# set -gx PATH /home/lfiolhais/.local/bin /usr/local/sbin $HOME/.cargo/bin $PATH
+set -U fish_user_paths /opt/homebrew/opt/ruby/bin /opt/homebrew/opt/gnu-tar/libexec/gnubin /opt/homebrew/opt/openjdk@11/bin /opt/homebrew/sbin /opt/homebrew/bin /opt/homebrew/opt/coreutils/libexec/gnubin /Users/lipe/.cargo/bin /usr/local/bin /System/Cryptexes/App/usr/bin /usr/bin /bin /usr/sbin /sbin /var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin /var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin /var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin /Applications/Little Snitch.app/Contents/Components
+
 set -gx LD_LIBRARY_PATH (rustc --print sysroot)"/lib" $LD_LIBRARY_PATH
 
 # Make vim the default editor.
