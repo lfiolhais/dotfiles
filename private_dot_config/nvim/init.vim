@@ -12,10 +12,6 @@ call plug#begin('~/.local/share/nvim/plugged')
 
 " Load plugins
 " VIM enhancements
-Plug 'ciaranm/securemodelines'
-Plug 'justinmk/vim-sneak'
-Plug 'chriskempson/base16-vim'
-Plug 'dracula/vim', { 'as': 'dracula' }
 Plug 'catppuccin/nvim', { 'as': 'catppuccin' }
 Plug 'qpkorr/vim-bufkill'
 Plug 'nvim-treesitter/nvim-treesitter', {'do': ':TSUpdate'}
@@ -24,11 +20,7 @@ Plug 'nvim-tree/nvim-web-devicons'
 Plug 'sindrets/diffview.nvim'
 Plug 'numToStr/Comment.nvim'
 Plug 'j-hui/fidget.nvim', { 'tag': 'legacy' }
-Plug 'lewis6991/gitsigns.nvim'
-Plug 'tpope/vim-obsession'
 Plug 'christoomey/vim-tmux-navigator'
-" Asynchronous Commands
-Plug 'stevearc/overseer.nvim'
 " Notifications Asynchronous Commands
 Plug 'rcarriga/nvim-notify'
 " Neovim Sessions
@@ -37,22 +29,22 @@ Plug 'rmagatti/auto-session'
 " Git
 Plug 'tpope/vim-fugitive'
 Plug 'tpope/vim-surround'
+Plug 'lewis6991/gitsigns.nvim'
 
 " GUI enhancements
 Plug 'nvim-lualine/lualine.nvim'
 Plug 'machakann/vim-highlightedyank'
 
 " Fuzzy finder
-Plug 'airblade/vim-rooter'
 Plug 'nvim-lua/popup.nvim'
 Plug 'nvim-lua/plenary.nvim'
 Plug 'nvim-telescope/telescope.nvim'
 Plug 'nvim-telescope/telescope-file-browser.nvim'
 Plug 'nvim-telescope/telescope-fzf-native.nvim', { 'do': 'make' }
 Plug 'nvim-telescope/telescope-ui-select.nvim'
-Plug 'folke/trouble.nvim'
 
 " Semantic language support
+Plug 'dense-analysis/ale'
 Plug 'neovim/nvim-lspconfig'
 Plug 'williamboman/mason.nvim', {'do': ':MasonUpdate'}
 Plug 'williamboman/mason-lspconfig.nvim'
@@ -66,34 +58,13 @@ Plug 'hrsh7th/cmp-buffer'
 Plug 'VonHeikemen/lsp-zero.nvim', {'branch': 'v2.x'}
 
 " Syntactic language support
-Plug 'cespare/vim-toml'
 Plug 'rust-lang/rust.vim'
-Plug 'fatih/vim-go'
-Plug 'dag/vim-fish'
-Plug 'azidar/firrtl-syntax'
 Plug 'lervag/vimtex'
 Plug 'godlygeek/tabular'
-Plug 'derekwyatt/vim-scala'
-" Plug 'lfiolhais/vim-chisel'
-" Plug 'plasticboy/vim-markdown'
 
 call plug#end()
 
 runtime macros/matchit.vim
-
-" Plugin settings
-let g:secure_modelines_allowed_items = [
-                \ "textwidth",   "tw",
-                \ "softtabstop", "sts",
-                \ "tabstop",     "ts",
-                \ "shiftwidth",  "sw",
-                \ "expandtab",   "et",   "noexpandtab", "noet",
-                \ "filetype",    "ft",
-                \ "foldmethod",  "fdm",
-                \ "readonly",    "ro",   "noreadonly", "noro",
-                \ "rightleft",   "rl",   "norightleft", "norl",
-                \ "colorcolumn"
-                \ ]
 
 " Latex
 let g:latex_indent_enabled = 1
@@ -102,11 +73,6 @@ let g:latex_fold_sections = []
 
 " Don't confirm .lvimrc
 let g:localvimrc_ask = 0
-
-" https://github.com/rust-lang/rust.vim/issues/192
-let g:rustfmt_autosave = 1
-let g:rustfmt_fail_silently = 0
-let $RUST_SRC_PATH = systemlist("rustc --print sysroot")[0] . "/lib/rustlib/src/rust/src"
 
 " Completion
 " Better display for messages
@@ -119,20 +85,14 @@ set updatetime=300
 " =============================================================================
 lua <<EOF
 local actions = require('telescope.actions')
-local open_with_trouble = require("trouble.sources.telescope").open
 
-require('telescope').setup{
-    defaults = {
-        mappings = {
-          i = {
-                  ["<c-t>"] = open_with_trouble
-              },
-          n = {
-                  ["<c-t>"] = open_with_trouble
-              },
-        },
-    },
+local telescope = require("telescope")
 
+telescope.load_extension("file_browser")
+telescope.load_extension('fzf')
+telescope.load_extension("ui-select")
+
+telescope.setup({
     pickers = {
         file_browser = {
             hidden=true,
@@ -150,11 +110,8 @@ require('telescope').setup{
           hijack_netrw = true,
         },
   },
-}
+})
 
-require("telescope").load_extension "file_browser"
-require('telescope').load_extension('fzf')
-require("telescope").load_extension("ui-select")
 EOF
 
 " =============================================================================
@@ -282,9 +239,6 @@ nnoremap ; :
 nnoremap <leader>f <cmd>Telescope find_files<cr>
 nnoremap <leader>b <cmd>Telescope buffers<cr>
 
-" Start session
-nnoremap <leader>o :Obsession ~/.config/nvim/sessions/
-
 " Git hotkeys
 nnoremap <leader>g <cmd>Git<cr>
 nnoremap <leader>gp <cmd>Git push<cr>
@@ -349,16 +303,9 @@ nnoremap k gk
 " <leader><leader> toggles between buffers
 nnoremap <leader><leader> <c-^>
 
-" <leader>, shows/hides hidden characters
-nnoremap <leader>, :set invlist<CR>
-
 " =============================================================================
 " # Autocommands
 " =============================================================================
-
-" Prevent accidental writes to buffers that shouldn't be edited
-autocmd BufRead *.orig set readonly
-autocmd BufRead *.pacnew set readonly
 
 " Leave paste mode when leaving insert mode
 autocmd InsertLeave * set nopaste
@@ -372,11 +319,6 @@ endif
 " Follow Rust code style rules
 au Filetype rust set colorcolumn=100
 
-" Help filetype detection
-autocmd BufRead *.md set filetype=markdown
-autocmd BufRead *.lds set filetype=ld
-autocmd BufRead *.tex set filetype=tex
-
 " Remove trailing whitespace
 fun! <SID>StripTrailingWhitespaces()
     let l = line(".")
@@ -388,21 +330,13 @@ endfun
 autocmd BufWritePre * :call <SID>StripTrailingWhitespaces()
 
 lua << EOF
+vim.diagnostic.config({ virtual_text = true })
+vim.o.sessionoptions="blank,buffers,curdir,folds,help,tabpages,winsize,winpos,terminal,localoptions"
+
 vim.opt.termguicolors = true
 vim.cmd.colorscheme "catppuccin-mocha"
 
 vim.notify = require('notify')
-
-vim.api.nvim_create_user_command("OverseerSleep", function()
-  local overseer = require("overseer")
-  local task = overseer.new_task({
-      cmd = {'sleep'},
-      args = {'3'},
-  })
-  task:start()
-end, {})
-
-require('overseer').setup()
 
 require('gitsigns').setup {
   -- See `:help gitsigns.txt`
@@ -419,13 +353,11 @@ require('lualine').setup()
 
 require('Comment').setup()
 
-require("fidget").setup {
-  -- options
-}
+require("fidget").setup {}
 
 require("auto-session").setup {
   log_level = "error",
-  auto_session_suppress_dirs = { "~/", "~/Projects", "~/Downloads", "/", "~/Documents"},
+  suppressed_dirs = { "~/", "~/Projects", "~/Downloads", "/", "~/Documents"},
 }
 
 local lsp = require('lsp-zero').preset({
