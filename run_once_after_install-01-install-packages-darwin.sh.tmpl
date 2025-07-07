@@ -1,12 +1,16 @@
 {{- if eq .chezmoi.os "darwin" -}}
 #!/bin/bash
 
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+if ! command -v brew > /dev/null 2>&1; then
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
-eval "$(/opt/homebrew/bin/brew shellenv)"
+    eval "$(/opt/homebrew/bin/brew shellenv)"
+fi
 
-brew bundle --no-lock --file=~/.config/Brewfile
+brew bundle --file=~/.config/Brewfile
 
-rustup-init
-rustup install stable
+if ! command -v rustup > /dev/null 2>&1; then
+    rustup-init
+    rustup install stable
+fi
 {{ end -}}
