@@ -1,5 +1,5 @@
 " Fish doesn't play all that well with others
-set shell=/bin/bash
+" set shell=/bin/bash
 let mapleader = "\<Space>"
 
 " =============================================================================
@@ -20,7 +20,6 @@ Plug 'nvim-tree/nvim-web-devicons'
 Plug 'sindrets/diffview.nvim'
 Plug 'numToStr/Comment.nvim'
 Plug 'j-hui/fidget.nvim', { 'tag': 'legacy' }
-Plug 'christoomey/vim-tmux-navigator'
 " Notifications Asynchronous Commands
 Plug 'rcarriga/nvim-notify'
 " Neovim Sessions
@@ -44,18 +43,15 @@ Plug 'nvim-telescope/telescope-fzf-native.nvim', { 'do': 'make' }
 Plug 'nvim-telescope/telescope-ui-select.nvim'
 
 " Semantic language support
-Plug 'dense-analysis/ale'
 Plug 'neovim/nvim-lspconfig'
-Plug 'williamboman/mason.nvim', {'do': ':MasonUpdate'}
-Plug 'williamboman/mason-lspconfig.nvim'
+Plug 'stevearc/conform.nvim'
 
 " Autocompletion
-Plug 'hrsh7th/nvim-cmp'
 Plug 'hrsh7th/cmp-nvim-lsp'
 Plug 'hrsh7th/cmp-path'
 Plug 'hrsh7th/cmp-buffer'
-
-Plug 'VonHeikemen/lsp-zero.nvim', {'branch': 'v2.x'}
+Plug 'hrsh7th/cmp-cmdline'
+Plug 'hrsh7th/nvim-cmp'
 
 " Syntactic language support
 Plug 'rust-lang/rust.vim'
@@ -219,7 +215,7 @@ set diffopt+=iwhite " No whitespace in vimdiff
 " Make diffing better: https://vimways.org/2018/the-power-of-diff/
 set diffopt+=algorithm:patience
 set diffopt+=indent-heuristic
-set colorcolumn=80 " and give me a colored column
+set colorcolumn=100 " and give me a colored column
 set showcmd " Show (partial) command in status line.
 set mouse=a " Enable mouse usage (all modes) in terminals
 set shortmess+=c " don't give |ins-completion-menu| messages.
@@ -360,48 +356,111 @@ require("auto-session").setup {
   suppressed_dirs = { "~/", "~/Projects", "~/Downloads", "/", "~/Documents"},
 }
 
-local lsp = require('lsp-zero').preset({
-  manage_nvim_cmp = {
-    set_sources = 'recommended'
+vim.api.nvim_create_autocmd('LspAttach', {
+    callback = function(event)
+        local opts = { noremap=true, silent=true }
+        vim.keymap.set('n', '<space>l', vim.diagnostic.open_float, opts)
+        vim.keymap.set('n', '[d', vim.diagnostic.goto_prev, opts)
+        vim.keymap.set('n', ']d', vim.diagnostic.goto_next, opts)
+        vim.keymap.set('n', '<space>a', vim.diagnostic.setloclist, opts)
+
+        local bufopts = { noremap=true, silent=true, buffer=true }
+        vim.keymap.set('n', 'gD', vim.lsp.buf.declaration, bufopts)
+        vim.keymap.set('n', 'gd', vim.lsp.buf.definition, bufopts)
+        vim.keymap.set('n', '<space>K', vim.lsp.buf.hover, bufopts)
+        vim.keymap.set('n', 'gi', vim.lsp.buf.implementation, bufopts)
+        vim.keymap.set('n', '<space>k', vim.lsp.buf.signature_help, bufopts)
+        vim.keymap.set('n', 'gy', vim.lsp.buf.type_definition, bufopts)
+        vim.keymap.set('n', 'grn', vim.lsp.buf.rename, bufopts)
+        vim.keymap.set('n', 'ga', vim.lsp.buf.code_action, bufopts)
+        vim.keymap.set('n', 'gr', '<cmd>Telescope lsp_references<cr>', bufopts)
+        vim.keymap.set('n', '<space>=', function()
+            vim.lsp.buf.format({async = false, timeout_ms = 10000})
+        end, bufopts)
+    end,
+})
+
+vim.lsp.config('rust_analyzer', {
+  settings = {
+    ['rust-analyzer'] = {
+      diagnostics = {
+        enable = true;
+      }
+    }
+  }
+})
+vim.lsp.config('ruff', {
+  init_options = {
+    settings = {
+        enableProfileLoading = false,
+    }
   }
 })
 
-lsp.on_attach(function(client, bufnr)
-  lsp.default_keymaps({buffer = bufnr})
+vim.lsp.enable('ruff')
+vim.lsp.enable('rust_analyzer')
 
-  local opts = { noremap=true, silent=true }
-  vim.keymap.set('n', '<space>l', vim.diagnostic.open_float, opts)
-  vim.keymap.set('n', '[d', vim.diagnostic.goto_prev, opts)
-  vim.keymap.set('n', ']d', vim.diagnostic.goto_next, opts)
-  vim.keymap.set('n', '<space>a', vim.diagnostic.setloclist, opts)
-
-  local bufopts = { noremap=true, silent=true, buffer=true }
-  vim.keymap.set('n', 'gD', vim.lsp.buf.declaration, bufopts)
-  vim.keymap.set('n', 'gd', vim.lsp.buf.definition, bufopts)
-  vim.keymap.set('n', '<space>K', vim.lsp.buf.hover, bufopts)
-  vim.keymap.set('n', 'gi', vim.lsp.buf.implementation, bufopts)
-  vim.keymap.set('n', '<space>k', vim.lsp.buf.signature_help, bufopts)
-  vim.keymap.set('n', 'gy', vim.lsp.buf.type_definition, bufopts)
-  vim.keymap.set('n', 'grn', vim.lsp.buf.rename, bufopts)
-  vim.keymap.set('n', 'ga', vim.lsp.buf.code_action, bufopts)
-  vim.keymap.set('n', 'gr', '<cmd>Telescope lsp_references<cr>', bufopts)
-  vim.keymap.set('n', '<space>=', function()
-    vim.lsp.buf.format({async = false, timeout_ms = 10000})
-  end, bufopts)
-end)
-
-lsp.setup()
+require("conform").setup({
+    formatters_by_ft = {
+        python = {
+          -- To fix auto-fixable lint errors.
+          "ruff_fix",
+          -- To run the Ruff formatter.
+          "ruff_format",
+          -- To organize the imports.
+          "ruff_organize_imports",
+        },
+    },
+})
 
 local cmp = require('cmp')
-local cmp_action = require('lsp-zero').cmp_action()
 
 cmp.setup({
-  mapping = {
-    ['<Tab>'] = cmp_action.tab_complete(),
-    ['<S-Tab>'] = cmp_action.select_prev_or_fallback(),
-  }
-})
+    window = {
+      -- completion = cmp.config.window.bordered(),
+      -- documentation = cmp.config.window.bordered(),
+    },
+    mapping = cmp.mapping.preset.insert({
+        ["<Tab>"] = cmp.mapping(function(fallback)
+          -- This little snippet will confirm with tab, and if no entry is selected, will confirm the first item
+          if cmp.visible() then
+            local entry = cmp.get_selected_entry()
+            if not entry then
+              cmp.select_next_item({ behavior = cmp.SelectBehavior.Select })
+            end
+            cmp.confirm()
+          else
+            fallback()
+          end
+        end, {"i","s","c",}),
+    }),
+    sources = cmp.config.sources({
+      { name = 'nvim_lsp' },
+    }, {
+      { name = 'buffer' },
+    })
+  })
+
+  -- Use buffer source for `/` and `?` (if you enabled `native_menu`, this won't work anymore).
+  cmp.setup.cmdline({ '/', '?' }, {
+    mapping = cmp.mapping.preset.cmdline(),
+    sources = {
+      { name = 'buffer' }
+    }
+  })
+
+  -- Use cmdline & path source for ':' (if you enabled `native_menu`, this won't work anymore).
+  cmp.setup.cmdline(':', {
+    mapping = cmp.mapping.preset.cmdline(),
+    sources = cmp.config.sources({
+      { name = 'path' }
+    }, {
+      { name = 'cmdline' }
+    }),
+    matching = { disallow_symbol_nonprefix_matching = false }
+  })
 EOF
+
 
 " =============================================================================
 " # Footer
