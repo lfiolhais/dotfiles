@@ -54,7 +54,6 @@ Plug 'hrsh7th/cmp-cmdline'
 Plug 'hrsh7th/nvim-cmp'
 
 " Syntactic language support
-Plug 'rust-lang/rust.vim'
 Plug 'lervag/vimtex'
 Plug 'godlygeek/tabular'
 
@@ -397,8 +396,11 @@ vim.lsp.config('ruff', {
   }
 })
 
+vim.lsp.enable('bashls')
 vim.lsp.enable('ruff')
 vim.lsp.enable('rust_analyzer')
+vim.lsp.enable('jedi_language_server')
+vim.lsp.enable('marksman')
 
 require("conform").setup({
     formatters_by_ft = {
