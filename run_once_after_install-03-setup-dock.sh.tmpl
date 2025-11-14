@@ -5,9 +5,9 @@ eval "$(/opt/homebrew/bin/brew shellenv)"
 
 dockutil --add /System/Applications/Mail.app
 dockutil --add /System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app/ --after 'Mail'
-dockutil --add /Applications/Reeder.app --after 'Safari'
-dockutil --add /Applications/WezTerm.app --after 'Reeder'
-dockutil --add /System/Applications/Notes.app --after 'WezTerm'
+dockutil --add /Applications/Tapestry.app --after 'Safari'
+dockutil --add /Applications/Ghostty.app --after 'Tapestry'
+dockutil --add /System/Applications/Notes.app --after 'Ghostty'
 dockutil --add /System/Applications/Music.app --after 'Notes'
 
 return 0
