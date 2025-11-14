@@ -12,7 +12,6 @@ Plug('catppuccin/nvim', { ['as'] = 'catppuccin' })
 Plug('qpkorr/vim-bufkill')
 Plug('nvim-treesitter/nvim-treesitter', { ['do'] = ':TSUpdate' })
 Plug('nvim-treesitter/nvim-treesitter-context')
-Plug('nvim-tree/nvim-web-devicons')
 Plug('nvim-mini/mini.nvim')
 -- Neovim Sessions
 Plug('rmagatti/auto-session')
@@ -24,24 +23,9 @@ Plug('tpope/vim-fugitive')
 Plug('nvim-lualine/lualine.nvim')
 Plug('machakann/vim-highlightedyank')
 
--- Fuzzy finder
-Plug('nvim-lua/popup.nvim')
-Plug('nvim-lua/plenary.nvim')
-Plug('nvim-telescope/telescope.nvim')
-Plug('nvim-telescope/telescope-file-browser.nvim')
-Plug('nvim-telescope/telescope-fzf-native.nvim', { ['do'] = 'make' })
-Plug('nvim-telescope/telescope-ui-select.nvim')
-
 -- Semantic language support
 Plug('neovim/nvim-lspconfig')
 Plug('stevearc/conform.nvim')
-
--- Autocompletion
-Plug('hrsh7th/cmp-nvim-lsp')
-Plug('hrsh7th/cmp-path')
-Plug('hrsh7th/cmp-buffer')
-Plug('hrsh7th/cmp-cmdline')
-Plug('hrsh7th/nvim-cmp')
 
 vim.call('plug#end')
 
@@ -145,10 +129,10 @@ vim.keymap.set('c', '%s/', '%sm/', key_opts)
 -- toggles between buffers
 vim.keymap.set('n', '<leader><leader>', '<c-^>', key_opts)
 
-vim.keymap.set('n', '<leader>s', '<cmd>Telescope live_grep<cr>', key_opts)
-vim.keymap.set('n', '<leader>e', '<cmd>Telescope file_browser<cr>', key_opts)
-vim.keymap.set('n', '<leader>f', '<cmd>Telescope find_files<cr>', key_opts)
-vim.keymap.set('n', '<leader>b', '<cmd>Telescope buffers<cr>', key_opts)
+vim.keymap.set('n', '<leader>s', function() MiniPick.builtin.grep_live() end, key_opts)
+vim.keymap.set('n', '<leader>e', function() MiniFiles.open() end, key_opts)
+vim.keymap.set('n', '<leader>f', function() MiniPick.builtin.files() end, key_opts)
+vim.keymap.set('n', '<leader>b', function() MiniPick.builtin.buffers() end, key_opts)
 
 -- Git hotkeys
 vim.keymap.set('n', '<leader>g', '<cmd>Git<cr>', key_opts)
@@ -205,39 +189,12 @@ require('mini.pairs').setup()
 require('mini.align').setup()
 require('mini.notify').setup()
 require('mini.diff').setup()
+require('mini.files').setup()
+require('mini.icons').setup()
+require('mini.pick').setup()
+require('mini.completion').setup()
 
-local telescope = require("telescope")
-
-telescope.load_extension("file_browser")
-telescope.load_extension('fzf')
-telescope.load_extension("ui-select")
-
-telescope.setup({
-    pickers = {
-        file_browser = {
-            hidden = true,
-            no_ignore = true
-        },
-        find_files = {
-            hidden = true,
-            no_ignore = true
-        },
-    },
-
-    extensions = {
-        file_browser = {
-            -- disables netrw and use telescope-file-browser in its place
-            hijack_netrw = true,
-        },
-    },
-})
-
-require 'nvim-treesitter.configs'.setup {
-    ensure_installed = "all", -- one of "all", "maintained" (parsers with maintainers), or a list of languages
-    highlight = {
-        enable = true,      -- false will disable the whole extension
-    },
-}
+require('nvim-treesitter.configs').setup {}
 
 require('lualine').setup()
 
@@ -246,30 +203,22 @@ require("auto-session").setup {
     suppressed_dirs = { "~/", "~/Projects", "~/Downloads", "/", "~/Documents" },
 }
 
-vim.api.nvim_create_autocmd('LspAttach', {
-    callback = function(event)
-        local opts = { noremap = true, silent = true }
-        vim.keymap.set('n', '<space>l', vim.diagnostic.open_float, opts)
-        vim.keymap.set('n', '[d', vim.diagnostic.goto_prev, opts)
-        vim.keymap.set('n', ']d', vim.diagnostic.goto_next, opts)
-        vim.keymap.set('n', '<space>a', vim.diagnostic.setloclist, opts)
-
-        local bufopts = { noremap = true, silent = true, buffer = true }
-        vim.keymap.set('n', 'gD', vim.lsp.buf.declaration, bufopts)
-        vim.keymap.set('n', 'gd', vim.lsp.buf.definition, bufopts)
-        vim.keymap.set('n', '<space>K', vim.lsp.buf.hover, bufopts)
-        vim.keymap.set('n', 'gi', vim.lsp.buf.implementation, bufopts)
-        vim.keymap.set('n', '<space>k', vim.lsp.buf.signature_help, bufopts)
-        vim.keymap.set('n', 'gy', vim.lsp.buf.type_definition, bufopts)
-        vim.keymap.set('n', 'grn', vim.lsp.buf.rename, bufopts)
-        vim.keymap.set('n', 'ga', vim.lsp.buf.code_action, bufopts)
-        vim.keymap.set('n', 'gr', '<cmd>Telescope lsp_references<cr>', bufopts)
-        vim.keymap.set('n', '<space>=', function()
-            vim.lsp.buf.format({ async = false, timeout_ms = 10000 })
-        end, bufopts)
-    end,
+require("conform").setup({
+    formatters_by_ft = {
+        python = {
+            -- To fix auto-fixable lint errors.
+            "ruff_fix",
+            -- To run the Ruff formatter.
+            "ruff_format",
+            -- To organize the imports.
+            "ruff_organize_imports",
+        },
+    },
 })
 
+---------------------------------------------------------------------------------------------------
+-- LSPs
+---------------------------------------------------------------------------------------------------
 vim.lsp.config('rust_analyzer', {
     settings = {
         ['rust-analyzer'] = {
@@ -313,66 +262,6 @@ vim.lsp.enable('jedi_language_server')
 vim.lsp.enable('marksman')
 vim.lsp.enable('lua_ls')
 
-require("conform").setup({
-    formatters_by_ft = {
-        python = {
-            -- To fix auto-fixable lint errors.
-            "ruff_fix",
-            -- To run the Ruff formatter.
-            "ruff_format",
-            -- To organize the imports.
-            "ruff_organize_imports",
-        },
-    },
-})
-
-local cmp = require('cmp')
-
-cmp.setup({
-    window = {
-        -- completion = cmp.config.window.bordered(),
-        -- documentation = cmp.config.window.bordered(),
-    },
-    mapping = cmp.mapping.preset.insert({
-        ["<Tab>"] = cmp.mapping(function(fallback)
-            -- This little snippet will confirm with tab, and if no entry is selected, will confirm the first item
-            if cmp.visible() then
-                local entry = cmp.get_selected_entry()
-                if not entry then
-                    cmp.select_next_item({ behavior = cmp.SelectBehavior.Select })
-                end
-                cmp.confirm()
-            else
-                fallback()
-            end
-        end, { "i", "s", "c", }),
-    }),
-    sources = cmp.config.sources({
-        { name = 'nvim_lsp' },
-    }, {
-        { name = 'buffer' },
-    })
-})
-
--- Use buffer source for `/` and `?` (if you enabled `native_menu`, this won't work anymore).
-cmp.setup.cmdline({ '/', '?' }, {
-    mapping = cmp.mapping.preset.cmdline(),
-    sources = {
-        { name = 'buffer' }
-    }
-})
-
--- Use cmdline & path source for ':' (if you enabled `native_menu`, this won't work anymore).
-cmp.setup.cmdline(':', {
-    mapping = cmp.mapping.preset.cmdline(),
-    sources = cmp.config.sources({
-        { name = 'path' }
-    }, {
-        { name = 'cmdline' }
-    }),
-    matching = { disallow_symbol_nonprefix_matching = false }
-})
-
 ---------------------------------------------------------------------------------------------------
 -- AutoCommands
 ---------------------------------------------------------------------------------------------------
@@ -390,5 +279,28 @@ vim.api.nvim_create_autocmd("BufReadPost", {
         if mark[1] > 0 and mark[1] <= lcount then
             pcall(vim.api.nvim_win_set_cursor, 0, mark)
         end
+    end,
+})
+
+vim.api.nvim_create_autocmd('LspAttach', {
+    callback = function(event)
+        local opts = { noremap = true, silent = true }
+        vim.keymap.set('n', '<space>l', vim.diagnostic.open_float, opts)
+        vim.keymap.set('n', '[d', vim.diagnostic.goto_prev, opts)
+        vim.keymap.set('n', ']d', vim.diagnostic.goto_next, opts)
+        vim.keymap.set('n', '<space>a', vim.diagnostic.setloclist, opts)
+
+        local bufopts = { noremap = true, silent = true, buffer = true }
+        vim.keymap.set('n', 'gD', vim.lsp.buf.declaration, bufopts)
+        vim.keymap.set('n', 'gd', vim.lsp.buf.definition, bufopts)
+        vim.keymap.set('n', '<space>K', vim.lsp.buf.hover, bufopts)
+        vim.keymap.set('n', 'gi', vim.lsp.buf.implementation, bufopts)
+        vim.keymap.set('n', '<space>k', vim.lsp.buf.signature_help, bufopts)
+        vim.keymap.set('n', 'gy', vim.lsp.buf.type_definition, bufopts)
+        vim.keymap.set('n', 'grn', vim.lsp.buf.rename, bufopts)
+        vim.keymap.set('n', 'ga', vim.lsp.buf.code_action, bufopts)
+        vim.keymap.set('n', '<space>=', function()
+            vim.lsp.buf.format({ async = false, timeout_ms = 10000 })
+        end, bufopts)
     end,
 })
