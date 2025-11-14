@@ -38,16 +38,12 @@ vim.o.cmdheight = 2
 -- You will have bad experience for diagnostic messages when it's default 4000.
 vim.o.updatetime = 300
 
-vim.o.sessionoptions = "blank,buffers,curdir,folds,help,tabpages,winsize,winpos,terminal,localoptions"
+vim.o.sessionoptions = vim.o.sessionoptions .. ",winpos,localoptions"
 
-vim.o.autoindent = true
 vim.o.timeoutlen = 300 -- http://stackoverflow.com/questions/2158516/delay-before-o-opens-a-new-line
-vim.o.encoding = 'utf-8'
 vim.o.scrolloff = 2
 vim.o.showmode = false
-vim.o.hidden = true
 vim.o.wrap = false
-vim.o.joinspaces = false
 -- Always draw sign column. Prevent buffer moving when adding/deleting sign.
 vim.o.signcolumn = "yes"
 
@@ -56,11 +52,9 @@ vim.o.splitright = true
 vim.o.splitbelow = true
 
 -- Permanent undo
-vim.o.undodir = '~/.vimdid'
 vim.o.undofile = true
 
 -- Decent wildmenu
-vim.o.wildmenu = true
 vim.o.wildmode = 'list:longest'
 vim.o.wildignore =
 '.hg,.svn,*~,*.png,*.jpg,*.gif,*.settings,Thumbs.db,*.min.js,*.swp,publish/*,intermediate/*,*.o,*.hi,Zend,vendor'
@@ -72,14 +66,11 @@ vim.o.tabstop = 4
 vim.o.expandtab = true
 
 -- Wrapping options
-vim.o.formatoptions = 'tc'                     -- wrap text and comments using textwidth
 vim.o.formatoptions = vim.o.formatoptions .. 'r' -- continue comments when pressing ENTER in I mode
-vim.o.formatoptions = vim.o.formatoptions .. 'q' -- enable formatting of comments with gq
 vim.o.formatoptions = vim.o.formatoptions .. 'n' -- detect lists for formatting
 vim.o.formatoptions = vim.o.formatoptions .. 'b' -- auto-wrap in insert mode, and do not wrap old long lines
 
 -- Proper search
-vim.o.incsearch = true
 vim.o.ignorecase = true
 vim.o.smartcase = true
 vim.o.gdefault = true
@@ -100,7 +91,6 @@ vim.o.shortmess = vim.o.shortmess .. 'c' -- don't give |ins-completion-menu| mes
 
 -- Show those damn hidden characters
 -- Verbose: set listchars=nbsp:¬,eol:¶,extends:»,precedes:«,trail:•
-vim.o.list = false
 vim.o.listchars = 'nbsp:¬,extends:»,precedes:«,trail:•'
 
 -- Use system clipboard
@@ -109,7 +99,7 @@ vim.o.clipboard = vim.o.clipboard .. 'unnamedplus'
 ---------------------------------------------------------------------------------------------------
 -- Keyboard shortcuts
 ---------------------------------------------------------------------------------------------------
-key_opts = { noremap = true }
+local key_opts = { noremap = true }
 
 -- Search results centered please
 vim.keymap.set('n', '<silent> n', 'nzz', key_opts)
