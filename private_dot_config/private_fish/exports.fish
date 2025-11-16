@@ -12,8 +12,8 @@ set -gx PYTHONIOENCODING UTF-8
 # Highlight section titles in manual pages.
 set -gx LESS_TERMCAP_md $yellow
 
-# Don’t clear the screen after quitting a manual page.
-set -gx MANPAGER 'bat -X'
+# Use bat
+batman --export-env | source
 
 # Rust
 set -gx RUST_SRC_PATH (rustc --print sysroot)/lib/rustlib/src/rust/src/
