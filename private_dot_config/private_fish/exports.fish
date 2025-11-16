@@ -13,7 +13,7 @@ set -gx PYTHONIOENCODING UTF-8
 set -gx LESS_TERMCAP_md $yellow
 
 # Don’t clear the screen after quitting a manual page.
-set -gx MANPAGER 'less -X'
+set -gx MANPAGER 'bat -X'
 
 # Rust
 set -gx RUST_SRC_PATH (rustc --print sysroot)/lib/rustlib/src/rust/src/
@@ -22,12 +22,7 @@ set -gx RUST_SRC_PATH (rustc --print sysroot)/lib/rustlib/src/rust/src/
 set -gx XDG_DATA_HOME $HOME/.local/share
 set -gx XDG_CONFIG_HOME $HOME/.config
 set -gx XDG_CACHE_HOME $HOME/.cache
-
-# GTK Dark Theme
-set -gx GTK2_RC_FILES "/usr/share/themes/Materia-dark/gtk-2.0/gtkrc"
+set -gx XDG_STATE_HOME $HOME/.local/state
 
 # Disbale Homebrew Auto Update
 set -gx HOMEBREW_NO_AUTO_UPDATE 1
-
-# Enable iterm tmux integration
-set -x ITERM_ENABLE_SHELL_INTEGRATION_WITH_TMUX YES

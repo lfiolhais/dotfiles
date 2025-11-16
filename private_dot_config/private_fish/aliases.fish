@@ -49,7 +49,3 @@ end
 
 alias gl="git log --pretty=format:\"%C(yellow)%h%Cred%d %Creset%s%Cblue [%cn]\" --decorate"
 alias gll="git log --pretty=format:\"%C(yellow)%h%Cred%d %Creset%s%Cblue [%cn]\" --decorate --numstat"
-
-# Quartus
-#alias quartus="quartus --64bits"
-
