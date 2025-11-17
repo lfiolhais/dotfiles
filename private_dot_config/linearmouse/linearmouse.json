@@ -1,12 +1,16 @@
 {
+  "$schema" : "https:\/\/schema.linearmouse.app\/0.10.2",
   "schemes" : [
     {
+      "buttons" : {
+        "universalBackForward" : true
+      },
       "if" : {
         "device" : {
-          "serialNumber" : "7E9BFBBA6946DEE4",
-          "productName" : "MX Vertical",
           "category" : "mouse",
           "productID" : "0xb020",
+          "productName" : "MX Vertical",
+          "serialNumber" : "7E9BFBBA6946DEE4",
           "vendorID" : "0x46d"
         }
       },
@@ -15,7 +19,20 @@
           "vertical" : 1
         }
       }
+    },
+    {
+      "buttons" : {
+        "universalBackForward" : true
+      },
+      "if" : {
+        "device" : {
+          "category" : "mouse",
+          "productID" : "0xc08a",
+          "productName" : "MX Vertical Advanced Ergonomic Mouse",
+          "serialNumber" : "0BC5FA4EA035487B",
+          "vendorID" : "0x46d"
+        }
+      }
     }
-  ],
-  "$schema" : "https:\/\/schema.linearmouse.app\/0.10.0"
+  ]
 }
