@@ -175,7 +175,6 @@ vim.cmd.colorscheme "catppuccin-mocha"
 -- Mini
 require('mini.trailspace').setup()
 require('mini.surround').setup()
-require('mini.pairs').setup()
 require('mini.align').setup()
 require('mini.notify').setup()
 require('mini.diff').setup()
@@ -214,6 +213,21 @@ require("conform").setup({
     },
 })
 
+require("conform").formatters.verible = {
+    append_args = {
+        "--assignment_statement_alignment", "flush-left",
+        "--case_items_alignment", "flush-left",
+        "--distribution_items_alignment", "flush-left",
+        "--enum_assignment_statement_alignment", "flush-left",
+        "--module_net_variable_alignment", "lush-left",
+        "--named_parameter_alignment", "flush-left",
+        "--named_port_alignment", "flush-left",
+        "--port_declarations_alignment", "flush-left",
+        "--struct_union_members_alignment", "flush-left",
+        "--indentation_spaces", "4",
+    }
+}
+
 ---------------------------------------------------------------------------------------------------
 -- LSPs
 ---------------------------------------------------------------------------------------------------
@@ -232,6 +246,9 @@ vim.lsp.config('ruff', {
             enableProfileLoading = false,
         }
     }
+})
+vim.lsp.config('verible', {
+    cmd = { 'verible-verilog-ls', '--indentation_spaces', '4', '--rules_config_search' },
 })
 vim.lsp.config['lua_ls'] = {
     -- Command and arguments to start the server.
@@ -259,6 +276,7 @@ vim.lsp.enable('rust_analyzer')
 vim.lsp.enable('jedi_language_server')
 vim.lsp.enable('marksman')
 vim.lsp.enable('lua_ls')
+vim.lsp.enable('verible')
 
 ---------------------------------------------------------------------------------------------------
 -- AutoCommands
