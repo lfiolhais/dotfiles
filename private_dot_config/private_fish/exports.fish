@@ -15,6 +15,9 @@ set -gx LESS_TERMCAP_md $yellow
 # Use bat
 batman --export-env | source
 
+# bat pipe
+eval (batpipe)
+
 # Rust
 set -gx RUST_SRC_PATH (rustc --print sysroot)/lib/rustlib/src/rust/src/
 
