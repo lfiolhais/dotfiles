@@ -32,6 +32,7 @@ maximize = true
 confirm-close-surface = false
 mouse-hide-while-typing = true
 window-save-state = always
+shell-integration-features = ssh-terminfo,ssh-env
 
 keybind = alt+s=new_tab
 keybind = alt+f=next_tab
