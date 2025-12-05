@@ -1,5 +1,5 @@
 # Instead of setting the PATH every time, set only once using
-set -U fish_user_paths /opt/homebrew/opt/ruby/bin /opt/homebrew/opt/gnu-tar/libexec/gnubin /opt/homebrew/opt/openjdk@11/bin /opt/homebrew/sbin /opt/homebrew/bin /opt/homebrew/opt/coreutils/libexec/gnubin /Users/lipe/.cargo/bin /usr/local/bin /System/Cryptexes/App/usr/bin /usr/bin /bin /usr/sbin /sbin /var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin /var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin /var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin /Applications/Little Snitch.app/Contents/Components
+set -U fish_user_paths /Users/lipe/.local/share/../bin /opt/homebrew/opt/ruby/bin /opt/homebrew/opt/gnu-tar/libexec/gnubin /opt/homebrew/opt/openjdk@11/bin /opt/homebrew/sbin /opt/homebrew/bin /opt/homebrew/opt/coreutils/libexec/gnubin /Users/lipe/.cargo/bin /usr/local/bin /System/Cryptexes/App/usr/bin /usr/bin /bin /usr/sbin /sbin /var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin /var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin /var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin /Applications/Little Snitch.app/Contents/Components
 
 set -gx LD_LIBRARY_PATH (rustc --print sysroot)"/lib" $LD_LIBRARY_PATH
 
