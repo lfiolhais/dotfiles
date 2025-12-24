@@ -1,0 +1,164 @@
+{
+  "actions" : [
+    {
+      "key" : "t",
+      "type" : "application",
+      "value" : "/Applications/Ghostty.app"
+    },
+    {
+      "key" : "enter",
+      "type" : "application",
+      "value" : "/Applications/Ghostty.app"
+    },
+    {
+      "key" : "q",
+      "type" : "application",
+      "value" : "/System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app"
+    },
+    {
+      "key" : "n",
+      "type" : "application",
+      "value" : "/System/Applications/Notes.app"
+    },
+    {
+      "key" : "r",
+      "type" : "application",
+      "value" : "/Applications/Tapestry.app"
+    },
+    {
+      "actions" : [
+        {
+          "key" : "r",
+          "type" : "application",
+          "value" : "/System/Applications/Preview.app"
+        },
+        {
+          "key" : "a",
+          "type" : "application",
+          "value" : "/System/Applications/Passwords.app"
+        }
+      ],
+      "key" : "p",
+      "label" : "p",
+      "type" : "group"
+    },
+    {
+      "key" : "s",
+      "type" : "application",
+      "value" : "/Applications/Signal.app"
+    },
+    {
+      "key" : "u",
+      "type" : "application",
+      "value" : "/Applications/Unwatched.app"
+    },
+    {
+      "key" : "c",
+      "type" : "application",
+      "value" : "/Applications/BusyCal.app"
+    },
+    {
+      "actions" : [
+        {
+          "key" : "m",
+          "label" : "goto main",
+          "type" : "command",
+          "value" : "/opt/homebrew/bin/aerospace workspace main"
+        },
+        {
+          "key" : "w",
+          "label" : "goto web",
+          "type" : "command",
+          "value" : "/opt/homebrew/bin/aerospace workspace web"
+        },
+        {
+          "key" : "s",
+          "label" : "goto social",
+          "type" : "command",
+          "value" : "/opt/homebrew/bin/aerospace workspace social"
+        },
+        {
+          "key" : "p",
+          "label" : "goto pdf",
+          "type" : "command",
+          "value" : "/opt/homebrew/bin/aerospace workspace pdf"
+        },
+        {
+          "key" : "e",
+          "label" : "goto external",
+          "type" : "command",
+          "value" : "/opt/homebrew/bin/aerospace workspace external"
+        },
+        {
+          "key" : "u",
+          "label" : "goto music",
+          "type" : "command",
+          "value" : "/opt/homebrew/bin/aerospace workspace music"
+        },
+        {
+          "actions" : [
+            {
+              "key" : "m",
+              "label" : "move to main",
+              "type" : "command",
+              "value" : "/opt/homebrew/bin/aerospace move-node-to-workspace main"
+            },
+            {
+              "key" : "w",
+              "label" : "move to web",
+              "type" : "command",
+              "value" : "/opt/homebrew/bin/aerospace move-node-to-workspace web"
+            },
+            {
+              "key" : "s",
+              "label" : "move to social",
+              "type" : "command",
+              "value" : "/opt/homebrew/bin/aerospace move-node-to-workspace social"
+            },
+            {
+              "key" : "p",
+              "label" : "move to pdf",
+              "type" : "command",
+              "value" : "/opt/homebrew/bin/aerospace move-node-to-workspace pdf"
+            },
+            {
+              "key" : "e",
+              "label" : "move to external",
+              "type" : "command",
+              "value" : "/opt/homebrew/bin/aerospace move-node-to-workspace external"
+            },
+            {
+              "key" : "u",
+              "label" : "move to music",
+              "type" : "command",
+              "value" : "/opt/homebrew/bin/aerospace move-node-to-workspace music"
+            }
+          ],
+          "key" : "a",
+          "label" : "move to workspace",
+          "type" : "group"
+        }
+      ],
+      "key" : "a",
+      "label" : "aerospace",
+      "type" : "group"
+    },
+    {
+      "actions" : [
+        {
+          "key" : "u",
+          "type" : "application",
+          "value" : "/System/Applications/Music.app"
+        },
+        {
+          "key" : "e",
+          "type" : "application",
+          "value" : "/System/Applications/Messages.app"
+        }
+      ],
+      "key" : "m",
+      "type" : "group"
+    }
+  ],
+  "type" : "group"
+}
