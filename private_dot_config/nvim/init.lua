@@ -1,33 +1,33 @@
 local vim = vim
-local Plug = vim.fn['plug#']
 
 vim.g.mapleader = " "
 
 ---------------------------------------------------------------------------------------------------
 -- Plugins
 ---------------------------------------------------------------------------------------------------
-vim.call('plug#begin')
--- VIM enhancements
-Plug('catppuccin/nvim', { ['as'] = 'catppuccin' })
-Plug('qpkorr/vim-bufkill')
-Plug('nvim-treesitter/nvim-treesitter', { ['do'] = ':TSUpdate' })
-Plug('nvim-treesitter/nvim-treesitter-context')
-Plug('nvim-mini/mini.nvim')
--- Neovim Sessions
-Plug('rmagatti/auto-session')
+vim.pack.add({
+    -- VIM enhancements
+    { src = "https://github.com/catppuccin/nvim",                         name = "catppuccin" },
+    { src = "https://github.com/nvim-mini/mini.nvim",                     name = "mini.nvim" },
+    { src = "https://github.com/qpkorr/vim-bufkill",                      name = "vim-bufkill" },
+    { src = "https://github.com/nvim-treesitter/nvim-treesitter",         name = "nvim-treesitter",        version = "master" },
+    { src = "https://github.com/nvim-treesitter/nvim-treesitter-context", name = "nvim-treesitter-context" },
 
--- Git
-Plug('tpope/vim-fugitive')
+    -- Neovim Sessions
+    { src = "https://github.com/rmagatti/auto-session",                   name = "auto-session" },
 
--- GUI enhancements
-Plug('nvim-lualine/lualine.nvim')
-Plug('machakann/vim-highlightedyank')
+    -- Git
+    { src = "https://github.com/tpope/vim-fugitive",                      name = "vim-fugitive" },
+    { src = "https://github.com/sindrets/diffview.nvim",                  name = "diffview" },
 
--- Semantic language support
-Plug('neovim/nvim-lspconfig')
-Plug('stevearc/conform.nvim')
+    -- GUI enhancements
+    { src = "https://github.com/nvim-lualine/lualine.nvim",               name = "lualine" },
+    { src = "https://github.com/machakann/vim-highlightedyank",           name = "vim-highlightedyank" },
 
-vim.call('plug#end')
+    -- Semantic language support
+    { src = "https://github.com/neovim/nvim-lspconfig",                   name = "lspconfig" },
+    { src = "https://github.com/stevearc/conform.nvim",                   name = "conform" },
+})
 
 ---------------------------------------------------------------------------------------------------
 -- Editor settings
