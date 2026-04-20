@@ -1,6 +1,7 @@
 local vim = vim
 
 vim.g.mapleader = " "
+vim.g.maplocalleader = ","
 
 ---------------------------------------------------------------------------------------------------
 -- Plugins
@@ -10,7 +11,7 @@ vim.pack.add({
     { src = "https://github.com/catppuccin/nvim",                         name = "catppuccin" },
     { src = "https://github.com/nvim-mini/mini.nvim",                     name = "mini.nvim" },
     { src = "https://github.com/qpkorr/vim-bufkill",                      name = "vim-bufkill" },
-    { src = "https://github.com/nvim-treesitter/nvim-treesitter",         name = "nvim-treesitter",        version = "master" },
+    { src = "https://github.com/nvim-treesitter/nvim-treesitter",         name = "nvim-treesitter",        version = "main" },
     { src = "https://github.com/nvim-treesitter/nvim-treesitter-context", name = "nvim-treesitter-context" },
 
     -- Neovim Sessions
@@ -19,6 +20,11 @@ vim.pack.add({
     -- Git
     { src = "https://github.com/tpope/vim-fugitive",                      name = "vim-fugitive" },
     { src = "https://github.com/sindrets/diffview.nvim",                  name = "diffview" },
+
+    -- GitHub
+    { src = "https://github.com/nvim-tree/nvim-web-devicons",             name = "web-devicons"},
+    { src = "https://github.com/nvim-lua/plenary.nvim",                   name = "plenary"},
+    { src = "https://github.com/pwntester/octo.nvim",                     name = "octo" },
 
     -- GUI enhancements
     { src = "https://github.com/nvim-lualine/lualine.nvim",               name = "lualine" },
@@ -131,6 +137,14 @@ vim.keymap.set('n', '<leader>gmm', '<cmd>Git merge origin/master<cr>', key_opts)
 vim.keymap.set('n', '<leader>gmi', '<cmd>Git merge <space>', key_opts)
 vim.keymap.set('n', '<leader>gco', '<cmd>Git checkout <space>', key_opts)
 
+-- Octo hotkey
+vim.keymap.set('n', '<leader>oi', '<cmd>Octo issue list<cr>', key_opts)
+vim.keymap.set('n', '<leader>op', '<cmd>Octo pr list<cr>', key_opts)
+
+-- DiffView hotkey
+vim.keymap.set('n', '<leader>gdo', '<cmd>DiffviewOpen<cr>', key_opts)
+vim.keymap.set('n', '<leader>gdc', '<cmd>DiffviewClose<cr>', key_opts)
+
 -- Move between tabs
 vim.keymap.set('n', '<leader>tn', '<cmd>tabnew<cr>', key_opts)
 vim.keymap.set('n', '<leader>td', '<cmd>tabclose<cr>', key_opts)
@@ -183,21 +197,23 @@ require('mini.icons').setup()
 require('mini.pick').setup()
 require('mini.completion').setup()
 
-require('nvim-treesitter.configs').setup {
-    -- Automatically install missing parsers when entering buffer
-    -- Recommendation: set to false if you don't have `tree-sitter` CLI installed locally
-    auto_install = true,
-
-    highlight = {
-        enable = true,
-    },
-}
-
 require('lualine').setup()
 
 require("auto-session").setup {
     log_level = "error",
     suppressed_dirs = { "~/", "~/Projects", "~/Downloads", "/", "~/Documents" },
+}
+
+require('nvim-treesitter').install {
+    'rust', 'systemverilog', 'zig', 'lua', 'tcl', 'python', 'markdown', 'bash', 'fish', 'bibtex',
+    'c', 'cpp', 'cmake', 'csv', 'diff', 'dockerfile', 'editorconfig', 'git_config', 'git_rebase',
+    'gitattributes', 'gitcommit', 'gitignore', 'latex', 'markdown_inline', 'objdump', 'tlaplus',
+    'vim', 'vimdoc', 'yaml', 'comment', 'asm'
+}
+
+require('octo').setup {
+    enable_builtin = true,
+    picker = "default",
 }
 
 require("conform").setup({
