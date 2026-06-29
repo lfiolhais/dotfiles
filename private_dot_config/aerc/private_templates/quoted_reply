@@ -1,0 +1,22 @@
+X-Mailer: aerc {{version}}
+
+{{ .Signature }}
+
+On {{dateFormat (.OriginalDate | toLocal) "Mon Jan 2, 2006 at 3:04 PM MST"}}, {{.OriginalFrom | names | join ", "}} wrote:
+{{ if or
+        (eq .OriginalMIMEType "text/html")
+        (contains (toLower .OriginalText) "<html")
+}}
+    {{- $text := exec `~/.config/aerc/filters/html` .OriginalText | replace `\r` `` -}}
+        {{- range split "\n" $text -}}
+            {{- if eq . "References:" }}{{break}}{{end}}
+            {{- if or
+                (eq (len .) 0)
+                (match `^\[.+\]\s*$` .)
+            }}{{continue}}{{end}}
+            {{- printf "%s\n" . | replace `^[\s]+` "" | quote}}
+        {{- end -}}
+{{- else -}}
+    {{- trimSignature .OriginalText | quote -}}
+{{- end}}
+

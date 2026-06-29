@@ -1,0 +1,339 @@
+tap "chipsalliance/verible", trusted: true
+tap "dlvhdr/formulae", trusted: true
+tap "nikitabobko/tap", trusted: true
+tap "riscv-software-src/riscv", trusted: true
+tap "xwmx/taps", trusted: true
+# Core application library for C
+brew "glib"
+# Vector graphics library with cross-device output support
+brew "cairo"
+# Toolkit for image loading and pixel buffer manipulation
+brew "gdk-pixbuf"
+# Framework for layout and rendering of i18n text
+brew "pango"
+# Thread-based email index, search, and tagging
+brew "notmuch"
+# Email client that runs in your terminal
+brew "aerc"
+# Simple, modern, secure file encryption
+brew "age"
+# Collection of portable C++ source libraries
+brew "boost"
+# Formatter/translator for text files to numerous formats
+brew "asciidoc"
+# Powerful, clean, object-oriented scripting language
+brew "ruby", link: false
+# Text processor and publishing toolchain for AsciiDoc
+brew "asciidoctor"
+# Bourne-Again SHell, a UNIX command interpreter
+brew "bash"
+# Open-source, cross-platform JavaScript runtime environment
+brew "node"
+# Language Server for Bash
+brew "bash-language-server"
+# Clone of cat(1) with syntax highlighting and Git integration
+brew "bat"
+# Bash scripts that integrate bat with various command-line tools
+brew "bat-extras"
+# Backend processor for BibLaTeX
+brew "biber"
+# Yet another cross-platform graphical process/system monitor
+brew "bottom"
+# Easily generate Instruments traces for your rust crate
+brew "cargo-instruments"
+# TUI web browser with CSS, inline image and JavaScript support
+brew "chawan"
+# Manage your dotfiles across multiple diverse machines, securely
+brew "chezmoi"
+# Cross-platform make
+brew "cmake"
+# GNU File, Shell, and Text utilities
+brew "coreutils"
+# Lightweight unit testing framework for C
+brew "cunit"
+# Compiler for writing C extensions for the Python language
+brew "cython"
+# Tool for managing dock items
+brew "dockutil"
+# Text processing system for reStructuredText
+brew "docutils"
+# Command-line DNS Client for Humans
+brew "doggo"
+# More intuitive version of du in rust
+brew "dust"
+# Modern, maintained replacement for ls
+brew "eza"
+# Simple, fast and user-friendly alternative to find
+brew "fd"
+# Play, record, convert, and stream select audio and video codecs
+brew "ffmpeg"
+# User-friendly command-line shell for UNIX-like operating systems
+brew "fish"
+# LSP implementation for the fish shell language
+brew "fish-lsp"
+# Command-line fuzzy finder written in Go
+brew "fzf"
+# GNU awk utility
+brew "gawk"
+# GitHub command-line tool
+brew "gh"
+# Distributed revision control system
+brew "git"
+# Highly customizable changelog generator
+brew "git-cliff"
+# Syntax-highlighting pager for git and diff output
+brew "git-delta"
+# Small git utilities
+brew "git-extras"
+# Git extension for versioning large files
+brew "git-lfs"
+# Open-source GitLab command-line tool
+brew "glab"
+# GNU version of the tar archiving utility
+brew "gnu-tar"
+# Command-driven, interactive function plotting
+brew "gnuplot"
+# Package compiler and linker metadata toolkit
+brew "pkgconf"
+# Multi-threaded malloc() and performance analysis tools
+brew "gperftools"
+# Graph visualization software from AT&T and Bell Labs
+brew "graphviz"
+# Signal Messenger client for terminal
+brew "gurk"
+# Popular GNU data compression program
+brew "gzip"
+# Access DVDs as block devices without the decryption
+brew "libdvdcss"
+# Open-source video transcoder available for Linux, Mac, and Windows
+brew "handbrake", link: false
+# Improved top (interactive process viewer)
+brew "htop"
+# Verilog simulation and synthesis tool
+brew "icarus-verilog"
+# Tools and libraries to manipulate images in select formats
+brew "imagemagick"
+# Python wrapper for the various Internet Archive APIs
+brew "internetarchive"
+# Tool to measure maximum TCP and UDP bandwidth
+brew "iperf"
+# Update of iperf: measures TCP, UDP, and SCTP bandwidth
+brew "iperf3"
+# Synchronize a maildir with an IMAP server
+brew "isync", restart_service: :changed
+# Git-compatible distributed version control system
+brew "jj"
+# Console carddav client
+brew "khard"
+# Compare and mark up LaTeX file differences
+brew "latexdiff"
+# Graphical front-end for GCC's coverage testing tool (gcov)
+brew "lcov"
+# Fast, minimalist directory tree viewer
+brew "lstr"
+# Language Server for the Lua language
+brew "lua-language-server"
+# Language Server Protocol for Markdown
+brew "marksman"
+# Mac App Store command-line interface
+brew "mas"
+# Terminal markdown viewer
+brew "mdfried"
+# Polyglot runtime manager (asdf rust clone)
+brew "mise"
+# SMTP client that can be used as an SMTP plugin for Mutt
+brew "msmtp"
+# Ambitious Vim-fork focused on extensibility and agility
+brew "neovim"
+# OCaml package manager
+brew "opam"
+# Swiss-army knife of markup format conversion
+brew "pandoc"
+# Execute binaries from Python packages in isolated environments
+brew "pipx"
+# PDF rendering library (based on the xpdf-3.0 code base)
+brew "poppler"
+# Framework for managing multi-language pre-commit hooks
+brew "pre-commit"
+# Python version management
+brew "pyenv"
+# Pyenv plugin to manage virtualenv
+brew "pyenv-virtualenv"
+# Generic syntax highlighter
+brew "pygments"
+# Simple powerful testing with Python
+brew "pytest"
+# Generic machine emulator and virtualizer
+brew "qemu"
+# Reattach process (e.g., tmux) to background
+brew "reattach-to-user-namespace"
+# Search tool like grep and The Silver Searcher
+brew "ripgrep"
+# Proof assistant for higher-order logic
+brew "rocq"
+# Extremely fast Python linter, written in Rust
+brew "ruff"
+# Experimental Rust compiler front-end for IDEs
+brew "rust-analyzer"
+# Rust toolchain installer
+brew "rustup"
+# Framework for Verilog RTL synthesis
+brew "yosys"
+# Front-end for Yosys-based formal verification flows
+brew "sby"
+# Static analysis and lint tool, for (ba)sh scripts
+brew "shellcheck"
+# Autoformat shell script source code
+brew "shfmt"
+# Cross-shell prompt for astronauts
+brew "starship"
+# Waveform viewer, supporting VCD, FST, or GHW format
+brew "surfer"
+# Swift toolchain installer and manager
+brew "swiftly"
+# Free software distribution for the TeX typesetting system
+brew "texlive"
+# Terminal multiplexer
+brew "tmux"
+# Program that allows you to count code, quickly
+brew "tokei"
+# Parser generator tool
+brew "tree-sitter-cli"
+# Extremely fast Python type checker, written in Rust
+brew "ty"
+# Markup-based typesetting system
+brew "typst"
+# Extremely fast Python package installer and resolver, written in Rust
+brew "uv"
+# Synchronize calendars and contacts
+brew "vdirsyncer"
+# Verilog simulator
+brew "verilator"
+# Tool for creating isolated virtual python environments
+brew "virtualenv"
+# Pager/text based browser
+brew "w3m"
+# Interactive viewer for graphs written in Graphviz's dot language
+brew "xdot"
+# Feature-rich command-line audio/video downloader
+brew "yt-dlp"
+# High-performance theorem prover
+brew "z3"
+# Programming language designed for robustness, optimality, and clarity
+brew "zig"
+# Language Server for Zig
+brew "zls"
+# SystemVerilog developer tools
+brew "chipsalliance/verible/verible"
+# Git diff pager based on delta but with a file tree, à la GitHub
+brew "dlvhdr/formulae/diffnav"
+# RISC-V toolchain including gcc (with newlib), simulator (spike), and pk
+brew "riscv-software-src/riscv/riscv-tools"
+brew "xwmx/taps/nb"
+# Stand alone ad blocker
+cask "adguard"
+# AeroSpace is an i3-like tiling window manager for macOS
+cask "nikitabobko/tap/aerospace"
+# AirPods companion app
+cask "airbuddy"
+# Display management tool
+cask "betterdisplay"
+# Calendar software focusing on flexibility and reliability
+cask "busycal"
+# Clean keyboard and trackpad
+cask "cleanupbuddy"
+# GUI companion app for Homebrew
+cask "cork"
+# App to build and share containerised applications and microservices
+cask "docker-desktop"
+# Online diagram software
+cask "drawio"
+cask "font-awesome-terminal-fonts"
+cask "font-fira-code-nerd-font"
+cask "font-fontawesome"
+cask "font-tex-gyre-cursor"
+cask "font-tex-gyre-termes"
+# Terminal emulator that uses platform-native UI and GPU acceleration
+cask "ghostty"
+# Web browser
+cask "google-chrome"
+# Open-source video transcoder
+cask "handbrake-app"
+# Keyboard shortcuts for every button on your screen
+cask "homerow"
+# Convert your caps lock key or any of your modifier keys to the hyper key
+cask "hyperkey"
+# Free and open-source media player
+cask "iina"
+# Tool to show what is persistently installed on the computer
+cask "knockknock"
+# Application launcher
+cask "leader-key"
+# Customise mouse behavior
+cask "linearmouse"
+# Host-based application firewall
+cask "little-snitch"
+# Video format converter (transcoder)
+cask "makemkv"
+# Provides updates to various Microsoft products
+cask "microsoft-auto-update"
+# Meet, chat, call, and collaborate in just one place
+cask "microsoft-teams"
+# Open-source software for live streaming and screen recording
+cask "obs"
+# Utility to uninstall apps and remove leftover files from old/uninstalled apps
+cask "pearcleaner"
+# Bridges Proton Mail to email clients supporting IMAP and SMTP protocols
+cask "proton-mail-bridge"
+# VPN client focusing on security
+cask "protonvpn"
+# Screenshot measurement and annotation tool
+cask "shottr"
+# Instant messaging application focusing on security
+cask "signal"
+# PDF reader and note-taking application
+cask "skim"
+# Mesh VPN based on WireGuard
+cask "tailscale-app"
+# Multi-platform VNC client and server
+cask "tigervnc"
+# IDE for TLA+
+cask "tla+-toolbox"
+# Web browser focusing on security
+cask "tor-browser"
+# Free and open-source OpenVPN client
+cask "tunnelblick"
+# Virtual machines UI using QEMU
+cask "utm"
+# Multimedia player
+cask "vlc"
+# Screen and application forwarding system
+cask "xpra"
+# Open-source version of the X.Org X Window System
+cask "xquartz"
+# Video communication and virtual meeting platform
+cask "zoom"
+mas "AdGuard for Safari", id: 1440147259
+mas "DeArrow", id: 6451469297
+mas "GarageBand", id: 682658836
+mas "IceCubesApp", id: 6444915884
+mas "iMovie", id: 408981434
+mas "Infuse", id: 1136220934
+mas "Keynote", id: 409183694
+mas "Keynote", id: 361285480
+mas "Noir", id: 1592917505
+mas "Numbers", id: 409203825
+mas "Numbers", id: 361304891
+mas "Pages", id: 361309726
+mas "Pages", id: 409201541
+mas "Qwant for Safari", id: 1645050159
+mas "SponsorBlock", id: 1573461917
+mas "StopTheMadness Pro", id: 6471380298
+mas "StopTheScript", id: 1588394487
+mas "Super Agent", id: 1568262835
+mas "Tapestry", id: 6448078074
+mas "uBlacklist for Safari", id: 1547912640
+mas "Unwatched", id: 6477287463
+mas "WhatsApp", id: 310633997
+mas "Xcode", id: 497799835
+uv "ty"

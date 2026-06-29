@@ -1,0 +1,32 @@
+{{- if eq .chezmoi.os "darwin" -}}
+#!/usr/bin/env bash
+
+xcode_version=$(pkgutil --pkg-info=com.apple.pkg.CLTools_Executables | grep version)
+
+if [[ $? != 0 ]]; then
+    xcode-select --install
+
+    # Wait until XCode Command Line Tools installation has finished.
+    until $(xcode-select --print-path &> /dev/null); do
+      sleep 5;
+    done
+else
+    echo "Found version of Xcode CLI: ${xcode_version}"
+    echo "Skipping install"
+fi
+
+if /usr/bin/pgrep oahd >/dev/null 2>&1 ; then
+        echo "Rosetta 2 is already installed"
+    else
+        echo "Rosetta 2 is missing - installing"
+        echo
+        /usr/sbin/softwareupdate --install-rosetta --agree-to-license
+        echo
+        if /usr/bin/pgrep oahd >/dev/null 2>&1 ; then
+            echo "Rosetta 2 is now installed"
+        else
+            echo "Rosetta 2 installation failed"
+            exit 1
+        fi
+    fi
+{{ end -}}
