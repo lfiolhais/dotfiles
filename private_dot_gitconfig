@@ -74,6 +74,7 @@
 
 [sendemail]
     sendmailCmd = /opt/homebrew/bin/msmtp -a ist
+	annotate = yes
 [gpg]
 	format = ssh
 [commit]
