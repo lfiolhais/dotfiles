@@ -1,0 +1,14 @@
+[tool.ruff]
+line-length = 100
+# DOC (pydoclint) rules are in preview; enable preview so they take effect.
+preview = true
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "UP", "B", "SIM", "I", "ANN", "ASYNC", "BLE", "FBT", "A",
+    "COM", "EM", "FIX", "ISC", "LOG", "PIE", "PT", "Q", "RET", "ARG", "PTH",
+    "N", "PERF", "DOC", "D", "PL", "FURB", "RUF",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"

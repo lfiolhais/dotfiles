@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Pre-push guard: run the safety harness before allowing a push to main.
+
+Git invokes this hook with the remote name and URL as argv and one line
+per pushed ref on stdin: ``<local_ref> <local_sha> <remote_ref> <remote_sha>``.
+"""
+
+import subprocess
+import sys
+
+PROTECTED = "refs/heads/main"
+REF_FIELDS = 4
+
+
+def pushes_to_protected(lines: list[str]) -> bool:
+    """Report whether any pushed ref targets the protected branch.
+
+    Args:
+        lines: The stdin lines git passes to the pre-push hook.
+
+    Returns:
+        True if a line updates ``PROTECTED``, otherwise False.
+
+    """
+    for line in lines:
+        fields = line.split()
+        if len(fields) == REF_FIELDS and fields[2] == PROTECTED:
+            return True
+    return False
+
+
+def main() -> int:
+    """Run the harness when the push targets the protected branch.
+
+    Returns:
+        Process exit code: 0 to allow the push, 1 to block it.
+
+    """
+    if not pushes_to_protected(sys.stdin.read().splitlines()):
+        return 0
+    top_level = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    repo = top_level.stdout.strip()
+    print(f"pre-push: push targets {PROTECTED} — running tests/check.py")
+    if subprocess.call([sys.executable, f"{repo}/tests/check.py"]) != 0:
+        print("pre-push: BLOCKED — harness failed. Push to a branch instead.", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
