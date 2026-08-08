@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""Check a branch, tag, or commit out into its own folder.
+
+Run from anywhere inside a repository cloned by ``git-wt-clone`` (the root, or
+any existing worktree). The new folder is always created beside ``.bare``, named
+after the ref with slashes flattened, so ``feature/foo`` lands in
+``feature-foo``.
+
+How the argument is treated:
+
+- a branch is checked out as a branch, tracking ``origin`` when it exists only
+  there;
+- a tag or commit is checked out detached, since moving a branch onto a tag is
+  never what was meant;
+- anything unknown triggers one fetch, and if it is still unknown it becomes a
+  new branch off the default branch.
+
+The worktree path is printed on stdout, so ``cd (git wt-add <ref>)`` drops you
+straight into it.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+# The shared library sits beside this script's bin directory, not on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib" / "python"))
+
+from gitwt import GitWtError, Repo, Worktree
+
+
+def main() -> int:
+    """Parse arguments and add the worktree.
+
+    Returns:
+        Process exit code: 0 on success, 1 on a reported failure.
+
+    """
+    parser = argparse.ArgumentParser(
+        prog="git-wt-add",
+        description="Check a branch, tag, or commit out into its own folder.",
+        epilog="example: git-wt-add feature/login",
+    )
+    parser.add_argument("ref", help="branch, tag, commit, or new branch name")
+    args = parser.parse_args()
+
+    try:
+        repo = Repo.discover(Path.cwd())
+        worktree = Worktree.add_worktree(repo, args.ref)
+    except GitWtError as exc:
+        print(f"git-wt-add: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"{worktree.path.name}/  {worktree.summary}", file=sys.stderr)
+    print(worktree.path)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""Clone a repository into the bare-clone-plus-worktrees layout."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+# The shared library sits beside this script's bin directory, not on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib" / "python"))
+
+from gitwt import BARE_DIR, GitWtError, Repo, Worktree
+
+
+def clone(url: str) -> Path:
+    """Build the layout for ``url`` under the current directory.
+
+    Args:
+        url: The ssh or https clone URL.
+
+    Returns:
+        The path of the worktree holding the default branch.
+
+    """
+    repo = Repo.create(url, Path.cwd() / Repo.repo_name(url))
+    worktree = Worktree.add_worktree(repo, repo.default_branch())
+
+    print(f"{repo.root}", file=sys.stderr)
+    print(f"  {BARE_DIR}/  bare clone", file=sys.stderr)
+    print(f"  {worktree.path.name}/  {worktree.summary}", file=sys.stderr)
+
+    return worktree.path
+
+
+def main() -> int:
+    """Parse arguments and clone.
+
+    Returns:
+        Process exit code: 0 on success, 1 on a reported failure.
+
+    """
+    parser = argparse.ArgumentParser(
+        prog="git-wt-clone",
+        description="Clone a repository into a bare clone plus per-ref worktrees.",
+        epilog="example: git-wt-clone git@github.com:user/repo.git",
+    )
+    parser.add_argument("url", help="ssh or https clone URL")
+    args = parser.parse_args()
+
+    try:
+        path = clone(args.url)
+    except GitWtError as exc:
+        print(f"git-wt-clone: {exc}", file=sys.stderr)
+        return 1
+
+    print(path)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

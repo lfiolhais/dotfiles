@@ -3,6 +3,7 @@ CLAUDE.md
 LICENSE
 tests
 README.md
+**/__pycache__
 {{ if ne .chezmoi.os "darwin" }}
 # macOS-only GUI / package-manager configs: never deploy them off darwin.
 .config/aerospace
