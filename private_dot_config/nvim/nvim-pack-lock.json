@@ -5,7 +5,7 @@
       "src": "https://github.com/rmagatti/auto-session"
     },
     "catppuccin": {
-      "rev": "8edd468af4d63212b84d69b2ddb5ffc9023ef5eb",
+      "rev": "0303a7208dba448c459767486a38a6ec05c4216b",
       "src": "https://github.com/catppuccin/nvim"
     },
     "conform": {
@@ -21,15 +21,15 @@
       "src": "https://github.com/linrongbin16/gitlinker.nvim"
     },
     "lspconfig": {
-      "rev": "a4ed4e761c400849e8c9f8bda33e5083f890268c",
+      "rev": "229b79051b380377664edc4cbd534930154921a1",
       "src": "https://github.com/neovim/nvim-lspconfig"
     },
     "lualine": {
-      "rev": "131a558e13f9f28b15cd235557150ccb23f89286",
+      "rev": "221ce6b2d999187044529f49da6554a92f740a96",
       "src": "https://github.com/nvim-lualine/lualine.nvim"
     },
     "mini.nvim": {
-      "rev": "44657837c7338e52727facc85c1d95bec1f6bd7c",
+      "rev": "11afe78a10570fe1d0c7ed0b6fc2b5b19098cb45",
       "src": "https://github.com/nvim-mini/mini.nvim"
     },
     "nvim-treesitter": {
@@ -42,7 +42,7 @@
       "src": "https://github.com/nvim-treesitter/nvim-treesitter-context"
     },
     "octo": {
-      "rev": "b495047f0b9d35de3d8c6b84fad9de296d353b41",
+      "rev": "c86a43da3514dbe916eb96ecac4d776890078786",
       "src": "https://github.com/pwntester/octo.nvim"
     },
     "plenary": {
