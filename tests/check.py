@@ -11,6 +11,7 @@ Usage::
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -20,8 +21,19 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 BREWFILE = REPO / "private_dot_config" / "Brewfile"
+RUFF_CONFIG = REPO / "tests" / "pyproject.toml"
+# The gitwt library the two commands share. Globbed rather than listed, so
+# splitting a module in two cannot silently drop it out of the lint.
+LIB_PYTHON = REPO / "dot_local" / "lib" / "python"
+DEPLOYED_ENTRY_POINTS = (
+    REPO / "dot_local" / "bin" / "executable_git-wt-clone",
+    REPO / "dot_local" / "bin" / "executable_git-wt-add",
+)
+# Deployed Python that ruff would not otherwise find: it lives outside tests/,
+# and the entry points have no .py extension because they are commands.
+DEPLOYED_PYTHON = (*sorted(LIB_PYTHON.glob("*.py")), *DEPLOYED_ENTRY_POINTS)
 # Target paths that must never be deployed (kept out via .chezmoiignore).
-MUST_NOT_DEPLOY = ("CLAUDE.md", "LICENSE", "key.txt.age")
+MUST_NOT_DEPLOY = ("CLAUDE.md", "LICENSE", "key.txt.age", "tests")
 # Exit code a shell uses for "command not found".
 MISSING = 127
 
@@ -164,11 +176,14 @@ def _lint(rel: Path, script: Path) -> Result:
     return Result(Status.OK, str(rel))
 
 
-def _render_template(rel: Path, path: Path, workdir: Path) -> tuple[Path, Result | None]:
+def _render_template(rel: Path, path: Path, workdir: Path) -> tuple[Path | None, Result | None]:
     rendered = chezmoi("execute-template", stdin=path.read_text(encoding="utf-8"))
 
     if not rendered.ok:
-        return path, Result(Status.FAIL, f"{rel}: template render", rendered.output)
+        return None, Result(Status.FAIL, f"{rel}: template render", rendered.output)
+
+    if not rendered.output.strip():
+        return None, None  # gated off for this OS (e.g. a linux-only script on darwin)
 
     script = workdir / (rel.name + ".rendered")
     script.write_text(rendered.output, encoding="utf-8")
@@ -199,6 +214,9 @@ def check_scripts(workdir: Path) -> list[Result]:
             if error is not None:
                 results.append(error)
                 continue
+
+            if script is None:
+                continue  # rendered empty: OS-gated off, nothing to lint
         else:
             script = path
 
@@ -228,23 +246,70 @@ def check_brewfile() -> Result:
 
 
 def check_python() -> Result:
-    """Lint the harness's own Python with ruff (rules live in tests/pyproject.toml).
+    """Lint this repo's Python with ruff (rules live in tests/pyproject.toml).
 
     Returns:
         A failing result if ruff is missing or reports issues, otherwise a passing result.
 
     """
-    tests_dir = REPO / "tests"
+    targets = [str(REPO / "tests"), *(str(path) for path in DEPLOYED_PYTHON)]
+    config = ["--config", str(RUFF_CONFIG)]
 
-    lint = run("ruff", "check", "--preview", str(tests_dir))
+    lint = run("ruff", "check", "--preview", *config, *targets)
     if not lint.ok:
         return Result(Status.FAIL, "ruff check", lint.output)
 
-    fmt = run("ruff", "format", "--check", str(tests_dir))
+    fmt = run("ruff", "format", "--check", *config, *targets)
     if not fmt.ok:
         return Result(Status.FAIL, "ruff format", fmt.output)
 
     return Result(Status.OK, "python: ruff clean")
+
+
+def _interpreters() -> list[str]:
+    """Find the python3 interpreters the deployed commands could run under.
+
+    Returns:
+        Executable paths, deduplicated by what they resolve to, oldest-standing
+        system interpreter included when it exists.
+
+    """
+    found: dict[Path, str] = {}
+    for candidate in (shutil.which("python3"), "/usr/bin/python3", sys.executable):
+        if not candidate:
+            continue
+        path = Path(candidate)
+        if path.exists():
+            found.setdefault(path.resolve(), candidate)
+    return list(found.values())
+
+
+def check_python_imports() -> Result:
+    """Import the deployed library and run each command's ``--help``.
+
+    Returns:
+        A failing result if an import or ``--help`` fails, a warning if the host
+        has no python3 at all, otherwise a passing result.
+
+    """
+    interpreters = _interpreters()
+    if not interpreters:
+        return Result(Status.WARN, "python: no python3 found, imports not checked")
+
+    probe = f"import sys; sys.path.insert(0, {str(LIB_PYTHON)!r}); import gitwt"
+
+    for interp in interpreters:
+        # -B: never leave a __pycache__ behind in the source directory.
+        imported = run(interp, "-B", "-c", probe)
+        if not imported.ok:
+            return Result(Status.FAIL, f"python: import gitwt ({interp})", imported.output)
+
+        for entry in DEPLOYED_ENTRY_POINTS:
+            helped = run(interp, "-B", str(entry), "--help")
+            if not helped.ok:
+                return Result(Status.FAIL, f"python: {entry.name} --help ({interp})", helped.output)
+
+    return Result(Status.OK, f"python: imports clean ({len(interpreters)} interpreter(s))")
 
 
 def _dry_run() -> None:
@@ -281,6 +346,7 @@ def main() -> int:
             *check_scripts(workdir),
             check_brewfile(),
             check_python(),
+            check_python_imports(),
         ]
         hard_failure = _report(results)
         _dry_run()
