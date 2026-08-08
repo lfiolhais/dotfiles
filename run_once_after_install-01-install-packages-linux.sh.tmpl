@@ -26,7 +26,7 @@ fi
 # RHEL 9's minimal install lacks `which` and `chsh` (util-linux-user), both of
 # which the fish setup script needs.
 "${SUDO[@]}" dnf install -y --allowerasing \
-    curl file fontconfig git which util-linux-user \
+    curl file fontconfig git which util-linux-user python3 \
     fish neovim bat ripgrep fd-find fzf zoxide
 {{ if eq $id "fedora" -}}
 # gh ships in Fedora's own repositories.
@@ -40,7 +40,7 @@ fi
 # --- Debian / Ubuntu / Pop!_OS ----------------------------------------------
 "${SUDO[@]}" apt-get update
 "${SUDO[@]}" apt-get install -y \
-    curl file fontconfig git wget \
+    curl file fontconfig git wget python3 \
     fish neovim bat ripgrep fd-find fzf zoxide
 
 # Debian/Ubuntu ship bat as "batcat" and fd as "fdfind"; expose the usual names.
