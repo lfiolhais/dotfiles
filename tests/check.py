@@ -36,6 +36,15 @@ DEPLOYED_PYTHON = (*sorted(LIB_PYTHON.glob("*.py")), *DEPLOYED_ENTRY_POINTS)
 MUST_NOT_DEPLOY = ("CLAUDE.md", "LICENSE", "key.txt.age", "tests")
 # Exit code a shell uses for "command not found".
 MISSING = 127
+# Exit code timeout(1) uses; reused for a command that outstayed TIMEOUT.
+TIMED_OUT = 124
+# Seconds any single command may take before the harness gives up on it.
+TIMEOUT = 180
+# --no-tty: never open the terminal to ask a question. chezmoi prompts on
+# /dev/tty rather than stdin, so a prompt raised here would be invisible behind
+# our captured output and would hang the harness. --no-pager: never hand output
+# to a pager, which would wait on the terminal for the same reason.
+CHEZMOI_FLAGS = ("--no-tty", "--no-pager")
 
 
 class Status(StrEnum):
@@ -86,18 +95,32 @@ class Result:
 def run(*argv: str, stdin: str | None = None) -> Command:
     """Run a command, capturing combined output; never raises.
 
+    The child never inherits this terminal's stdin: it gets the given text, or an
+    immediately closed pipe. Anything that stops to ask a question therefore reads
+    EOF and fails, instead of hanging the harness on a prompt nobody can see.
+
     Args:
         argv: The command and its arguments.
         stdin: Optional text piped to the command's standard input.
 
     Returns:
-        The exit code and stripped stdout+stderr; a missing binary yields code 127.
+        The exit code and stripped stdout+stderr; a missing binary yields code 127
+        and one that outstays ``TIMEOUT`` yields code 124.
 
     """
     try:
-        proc = subprocess.run(argv, input=stdin, capture_output=True, text=True, check=False)
+        proc = subprocess.run(
+            argv,
+            input=stdin or "",
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=TIMEOUT,
+        )
     except FileNotFoundError:
         return Command(MISSING, f"command not found: {argv[0]}")
+    except subprocess.TimeoutExpired:
+        return Command(TIMED_OUT, f"timed out after {TIMEOUT}s: {' '.join(argv)}")
     return Command(proc.returncode, (proc.stdout + proc.stderr).strip())
 
 
@@ -112,7 +135,7 @@ def chezmoi(*args: str, stdin: str | None = None) -> Command:
         The command result.
 
     """
-    return run("chezmoi", "--source", str(REPO), *args, stdin=stdin)
+    return run("chezmoi", *CHEZMOI_FLAGS, "--source", str(REPO), *args, stdin=stdin)
 
 
 def check_render(workdir: Path) -> Result:
@@ -313,9 +336,12 @@ def check_python_imports() -> Result:
 
 
 def _dry_run() -> None:
-    diff = chezmoi("apply", "--dry-run", "--verbose").output
+    # --force answers apply's "overwrite/remove?" prompts up front, so the diff is
+    # complete rather than truncated at the first question. It changes nothing on
+    # its own: --dry-run still writes nothing and still runs no script.
+    diff = chezmoi("apply", "--dry-run", "--force", "--verbose").output
 
-    print("\n-- chezmoi apply --dry-run (nothing applied, no scripts run) --")
+    print("\n-- chezmoi apply --dry-run --")
     print("\n".join("  " + line for line in diff.splitlines()) if diff else "  (no differences)")
 
 
