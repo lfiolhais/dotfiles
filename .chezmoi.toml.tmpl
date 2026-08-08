@@ -1,4 +1,10 @@
+{{- $sudo := false -}}
+{{- if eq .chezmoi.os "linux" -}}
+{{-   $sudo = promptBoolOnce . "sudo" "Do you have sudo on this machine" -}}
+{{- end -}}
 encryption = "age"
 [age]
     identity = "~/.config/chezmoi/key.txt"
     recipient = "age1438scmtmwhp40j3vjxnmxdsf62e897krznk5q2zs9f7mdls6cqhskqwerv"
+[data]
+    sudo = {{ $sudo }}

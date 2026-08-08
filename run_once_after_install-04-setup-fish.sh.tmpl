@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -eu
+{{ if eq .chezmoi.os "darwin" -}}
+eval "$(/opt/homebrew/bin/brew shellenv)"
+
+which fish | sudo tee -a /etc/shells
+
+chsh -s "$(which fish)"
+{{- else if eq .chezmoi.os "linux" -}}
+{{ if .sudo -}}
+# Use sudo only when we are not already root (test containers run as root).
+SUDO=()
+if [ "$(id -u)" -ne 0 ]; then
+    SUDO=(sudo)
+fi
+which fish | "${SUDO[@]}" tee -a /etc/shells
+
+chsh -s "$(which fish)"
+{{- else -}}
+fish_path="$HOME/.local/share/mise/shims/fish"
+grep -qF "exec $fish_path" "$HOME/.bashrc" || echo "exec $fish_path" >> "$HOME/.bashrc"
+{{- end }}
+{{- end }}

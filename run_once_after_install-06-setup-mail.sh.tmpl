@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+echo "Follow these instructions to setup email."
+echo
+{{- if eq .chezmoi.os "linux" -}}
+echo "Linux uses gpg and pass to store your credentials."
+echo "Before setting up pass you need to have a gpg key."
+echo
+echo "Create GPG key:"
+echo "* gpg --full-gen-key"
+echo
+echo "WARNING: You will have to disable AEAD in the key. It's not supported by the GnuPG standard."
+echo "More info at https://wiki.archlinux.org/title/GnuPG#Disable_unsupported_AEAD_mechanism"
+echo "Run: gpg --expert --edit-key FINGERPRINT"
+echo "Inside the gpg shell run: setpref AES256 AES192 AES SHA512 SHA384 SHA256 SHA224 ZLIB BZIP2 ZIP"
+echo
+echo "Create pass store:"
+echo "* pass init gpg-id_or_email"
+{{ end -}}
+echo
+echo "Update Keychain with IMAP and SMTP passwords:"
+echo
+echo "mbsync:"
+{{- if eq .chezmoi.os "darwin" -}}
+echo "* security add-internet-password -r imap -s Host -a User -w password -T /opt/homebrew/bin/mbsync"
+{{- else if eq .chezmoi.os "linux" -}}
+echo "* pass insert email/mbsync"
+{{ end -}}
+echo "msmtp:"
+{{- if eq .chezmoi.os "darwin" -}}
+echo "* security add-internet-password -r smtp -s Host -a User -w password -T /opt/homebrew/bin/msmtp"
+{{- else if eq .chezmoi.os "linux" -}}
+echo "* pass insert email/smtp"
+{{ end -}}
+echo
+echo
+echo "Export Proton Mail Bridge SSL Certificates"
+echo "Open ProtonMail Bridge"
+echo "Settings->Advanced->Export TLS Certificates"
+echo "Store them in ~/.config"
+echo
+echo
+echo "After setting up all passwords. Run: mbsync -a && notmuch new"

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -eu
+{{ if eq .chezmoi.os "darwin" -}}
+eval "$(/opt/homebrew/bin/brew shellenv)"
+{{- else if eq .chezmoi.os "linux" -}}
+export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"
+{{- end }}
+bat cache --build

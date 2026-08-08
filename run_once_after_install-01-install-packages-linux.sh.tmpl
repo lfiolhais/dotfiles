@@ -1,0 +1,75 @@
+{{- if eq .chezmoi.os "linux" -}}
+#!/usr/bin/env bash
+# Two profiles:
+#   * sudo:    native package manager (apt/dnf) for the bulk, plus each tool's
+#              official repo/installer for what the base repos lack (gh, starship).
+#   * no-sudo: rootless mise under ~/.local -- the only option without root.
+set -eu
+{{ if .sudo }}
+# Use sudo only when we are not already root (test containers run as root).
+SUDO=()
+if [ "$(id -u)" -ne 0 ]; then
+    SUDO=(sudo)
+fi
+{{ $id := index .chezmoi.osRelease "id" -}}
+{{ $idLike := index .chezmoi.osRelease "idLike" -}}
+{{ if or (eq $id "fedora") (has $id (list "rhel" "rocky" "almalinux" "centos")) (contains "fedora" $idLike) (contains "rhel" $idLike) }}
+# --- Fedora / RHEL family (RHEL, Rocky, AlmaLinux, CentOS Stream) ------------
+{{- if ne $id "fedora" }}
+# RHEL rebuilds keep the CLI tools in EPEL, some of whose deps need the CRB repo.
+"${SUDO[@]}" dnf install -y dnf-plugins-core epel-release
+"${SUDO[@]}" dnf config-manager --set-enabled crb 2> /dev/null \
+    || "${SUDO[@]}" dnf config-manager --set-enabled powertools 2> /dev/null \
+    || true
+{{- end }}
+# --allowerasing lets curl replace RHEL's curl-minimal instead of conflicting.
+# RHEL 9's minimal install lacks `which` and `chsh` (util-linux-user), both of
+# which the fish setup script needs.
+"${SUDO[@]}" dnf install -y --allowerasing \
+    curl file fontconfig git which util-linux-user \
+    fish neovim bat ripgrep fd-find fzf zoxide
+{{ if eq $id "fedora" -}}
+# gh ships in Fedora's own repositories.
+"${SUDO[@]}" dnf install -y gh
+{{- else }}
+# gh is not in EPEL; add its official repository.
+"${SUDO[@]}" dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
+"${SUDO[@]}" dnf install -y gh
+{{- end }}
+{{- else }}
+# --- Debian / Ubuntu / Pop!_OS ----------------------------------------------
+"${SUDO[@]}" apt-get update
+"${SUDO[@]}" apt-get install -y \
+    curl file fontconfig git wget \
+    fish neovim bat ripgrep fd-find fzf zoxide
+
+# Debian/Ubuntu ship bat as "batcat" and fd as "fdfind"; expose the usual names.
+mkdir -p "$HOME/.local/bin"
+[ -e /usr/bin/batcat ] && ln -sf /usr/bin/batcat "$HOME/.local/bin/bat"
+[ -e /usr/bin/fdfind ] && ln -sf /usr/bin/fdfind "$HOME/.local/bin/fd"
+
+# GitHub CLI from its official repository.
+"${SUDO[@]}" mkdir -p -m 755 /etc/apt/keyrings
+wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    | "${SUDO[@]}" tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+"${SUDO[@]}" chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+    | "${SUDO[@]}" tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+"${SUDO[@]}" apt-get update
+"${SUDO[@]}" apt-get install -y gh
+{{- end }}
+
+# Starship prompt is not in the base repos; use its official installer.
+if ! command -v starship > /dev/null 2>&1; then
+    curl -fsSL https://starship.rs/install.sh | "${SUDO[@]}" sh -s -- --yes
+fi
+{{- else }}
+# --- no-sudo: rootless mise toolchain ---------------------------------------
+if ! command -v mise > /dev/null 2>&1 && [ ! -x "$HOME/.local/bin/mise" ]; then
+    curl -fsSL https://mise.run | sh
+fi
+export PATH="$HOME/.local/bin:$PATH"
+eval "$(mise activate bash)"
+mise install
+{{- end }}
+{{ end -}}

@@ -1,0 +1,12 @@
+# Linux CLI toolchain for the no-sudo profile.
+
+[tools]
+neovim = "latest"
+"aqua:fish-shell/fish-shell" = "latest"
+bat = "latest"
+ripgrep = "latest"
+fd = "latest"
+fzf = "latest"
+zoxide = "latest"
+starship = "latest"
+gh = "latest"

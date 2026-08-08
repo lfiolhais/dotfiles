@@ -1,0 +1,20 @@
+{{ if eq .chezmoi.os "linux" -}}
+# Debian/Ubuntu rename the bat and fd to batcat and fdfind. I want to use the
+# actual names. The install script creates a symlink to .local/bin with the
+# proper names.
+fish_add_path $HOME/.local/bin
+{{ end -}}
+{{ if and (eq .chezmoi.os "linux") (not .sudo) -}}
+# no-sudo Linux only: activate mise so its toolchain is on PATH.
+mise activate fish | source
+{{ end -}}
+# Setup fzf
+fzf --fish | source
+
+source $HOME/.config/fish/exports.fish
+source $HOME/.config/fish/aliases.fish
+source $HOME/.config/fish/greet.fish
+
+set -g fish_key_bindings fish_vi_key_bindings
+
+starship init fish | source

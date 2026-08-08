@@ -2,3 +2,16 @@ key.txt.age
 CLAUDE.md
 LICENSE
 tests
+README.md
+{{ if ne .chezmoi.os "darwin" }}
+# macOS-only GUI / package-manager configs: never deploy them off darwin.
+.config/aerospace
+.config/linearmouse
+.config/leaderkey
+.config/Brewfile
+{{ end }}
+{{ if or (ne .chezmoi.os "linux") .sudo }}
+# mise (rootless toolchain) is used only on the no-sudo Linux profile; the sudo
+# profile and macOS install tools with their native package managers instead.
+.config/mise
+{{ end }}
