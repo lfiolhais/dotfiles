@@ -13,8 +13,15 @@ if command -v apt-get > /dev/null 2>&1; then
     apt-get update -qq
     apt-get install -y -qq curl git shellcheck age
 else
-    # Fedora carries ShellCheck/age in its base repos; RHEL rebuilds need EPEL.
-    grep -q '^ID=fedora' /etc/os-release || dnf install -y -q epel-release
+    # Fedora carries ShellCheck/age in its base repos; RHEL rebuilds need EPEL --
+    # and CRB, which several EPEL packages depend on. The bootstrap script enables
+    # both itself, but the package-name check below runs without it.
+    if ! grep -q '^ID=fedora' /etc/os-release; then
+        dnf install -y -q dnf-plugins-core epel-release
+        dnf config-manager --set-enabled crb 2> /dev/null \
+            || dnf config-manager --set-enabled powertools 2> /dev/null \
+            || true
+    fi
     # --allowerasing lets curl replace RHEL's curl-minimal instead of conflicting.
     dnf install -y -q --allowerasing curl git ShellCheck age
 fi
@@ -49,6 +56,37 @@ for f in /src/run_*.sh /src/run_*.sh.tmpl; do
     bash -n /tmp/script.sh
     shellcheck -S error /tmp/script.sh
 done
+
+# Confirm every package name the manifest targets at this distro actually exists
+# in its repositories. The 01 script installs them in one strict transaction, so a
+# single bad name would abort the whole bootstrap; this asks first and installs
+# nothing. The names do not depend on the sudo flag, so checking one mode per
+# distro covers the manifest -- the no-sudo profile's mise names are exercised by
+# `mise install` under --full instead.
+if [ "$SUDO" = "true" ]; then
+    target="$(chezmoi execute-template --source /src '{{ includeTemplate "linux-target" . }}')"
+    read -r -a names <<< "$(chezmoi execute-template --source /src \
+        '{{ includeTemplate "linux-packages" . }}' | tr '\n' ' ')"
+
+    if command -v apt-cache > /dev/null 2>&1; then
+        resolves() { apt-cache show "$1" > /dev/null 2>&1; }
+    else
+        resolves() { dnf info --quiet "$1" > /dev/null 2>&1; }
+    fi
+
+    echo "checking ${#names[@]} package names against the $target repositories"
+    unresolved=()
+    for name in "${names[@]}"; do
+        resolves "$name" || unresolved+=("$name")
+    done
+
+    if [ "${#unresolved[@]}" -ne 0 ]; then
+        echo "not found in the $target repositories: ${unresolved[*]}" >&2
+        echo "fix the names in .chezmoidata/packages.toml, or drop the $target" >&2
+        echo "field so the tool is skipped on this distro." >&2
+        exit 1
+    fi
+fi
 
 if [ "$FULL" = "true" ]; then
     chezmoi apply --source /src --exclude encrypted --verbose

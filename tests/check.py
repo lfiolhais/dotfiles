@@ -11,6 +11,8 @@ Usage::
 
 from __future__ import annotations
 
+import itertools
+import re
 import shutil
 import subprocess
 import sys
@@ -19,12 +21,28 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
+# Sorted apart from the block above because ruff's isort targets Python 3.9 -- the
+# floor the deployed gitwt library must hold to -- and so files tomllib, new in
+# 3.11, as third-party. This harness itself already requires 3.11 for StrEnum.
+import tomllib
+
 REPO = Path(__file__).resolve().parent.parent
 BREWFILE = REPO / "private_dot_config" / "Brewfile"
+# Maps every Brewfile formula onto its per-distro Linux equivalent.
+MANIFEST = REPO / ".chezmoidata" / "packages.toml"
+# Where a [packages] entry can install a tool. An entry naming none of these
+# installs nowhere, which is a mistake unless it is `repo` (gh and starship, which
+# the 01 script installs from their own repository).
+TARGETS = frozenset({"apt", "fedora", "el", "mise"})
+# Every field a [packages] entry may carry, so a typo cannot go unnoticed.
+FIELDS = TARGETS | {"brew", "mise_exe", "repo", "note"}
 RUFF_CONFIG = REPO / "tests" / "pyproject.toml"
 # The gitwt library the two commands share. Globbed rather than listed, so
 # splitting a module in two cannot silently drop it out of the lint.
 LIB_PYTHON = REPO / "dot_local" / "lib" / "python"
+# The facade of each library there. Importing these is what catches an import
+# cycle or a construct too new for the oldest interpreter; ruff cannot see either.
+DEPLOYED_LIBRARIES = ("gitwt",)
 DEPLOYED_ENTRY_POINTS = (
     REPO / "dot_local" / "bin" / "executable_git-wt-clone",
     REPO / "dot_local" / "bin" / "executable_git-wt-add",
@@ -268,6 +286,80 @@ def check_brewfile() -> Result:
     return Result(Status.WARN, "Brewfile has unmet entries", check.output)
 
 
+def _manifest_problems(packages: dict, skip: dict) -> list[str]:
+    """Compare the manifest against the Brewfile and check it is self-consistent.
+
+    Args:
+        packages: The manifest's ``[packages]`` table, tool name to per-target names.
+        skip: The manifest's ``[skip]`` table, formula name to reason.
+
+    Returns:
+        One human-readable line per problem, empty when the manifest is clean.
+
+    """
+    formulae = set(re.findall(r'^(?:brew|uv)\s+"([^"]+)"', BREWFILE.read_text(), re.MULTILINE))
+    claimed = {entry["brew"] for entry in packages.values() if "brew" in entry}
+
+    problems = [
+        f"{name}: in the Brewfile, unaccounted for in the manifest"
+        for name in sorted(formulae - claimed - set(skip))
+    ]
+    problems += [
+        f"{name}: claimed by the manifest but no longer in the Brewfile"
+        for name in sorted(claimed - formulae)
+    ]
+    problems += [
+        f"{name}: names no target, so it installs nowhere -- add one or move it to [skip]"
+        for name, entry in sorted(packages.items())
+        if not TARGETS & entry.keys() and "repo" not in entry
+    ]
+    problems += [
+        f"{name}: unknown field(s) {', '.join(sorted(entry.keys() - FIELDS))}"
+        for name, entry in sorted(packages.items())
+        if entry.keys() - FIELDS
+    ]
+
+    # The mise names all land in one generated [tools] table, where a repeat is a
+    # TOML error that would break the no-sudo profile's config.
+    owner: dict[str, str] = {}
+    for name, entry in sorted(packages.items()):
+        tool = entry.get("mise")
+        if tool is None:
+            continue
+        if tool in owner:
+            problems.append(f"{name}: mise tool {tool!r} already claimed by {owner[tool]}")
+        owner.setdefault(tool, name)
+
+    return problems
+
+
+def check_package_parity() -> Result:
+    """Check the Linux package manifest still accounts for every Brewfile formula.
+
+    macOS installs from the Brewfile and Linux from ``.chezmoidata/packages.toml``,
+    so the two drift apart silently -- a ``brew bundle dump`` widens the gap with no
+    warning. Every formula must therefore be mapped in ``[packages]`` or listed in
+    ``[skip]`` with a reason. Pure text, so it runs on Linux too, where there is
+    no ``brew`` to ask.
+
+    Returns:
+        A failing result listing every problem, otherwise a passing result.
+
+    """
+    manifest = tomllib.loads(MANIFEST.read_text())
+    packages, skip = manifest["packages"], manifest["skip"]
+    problems = _manifest_problems(packages, skip)
+
+    if problems:
+        return Result(Status.FAIL, "Brewfile <-> package manifest", "\n".join(problems))
+
+    return Result(
+        Status.OK,
+        f"package manifest in step with the Brewfile "
+        f"({len(packages)} mapped, {len(skip)} not installed on Linux)",
+    )
+
+
 def check_python() -> Result:
     """Lint this repo's Python with ruff (rules live in tests/pyproject.toml).
 
@@ -308,7 +400,7 @@ def _interpreters() -> list[str]:
 
 
 def check_python_imports() -> Result:
-    """Import the deployed library and run each command's ``--help``.
+    """Import each deployed library and run each command's ``--help``.
 
     Returns:
         A failing result if an import or ``--help`` fails, a warning if the host
@@ -319,18 +411,17 @@ def check_python_imports() -> Result:
     if not interpreters:
         return Result(Status.WARN, "python: no python3 found, imports not checked")
 
-    probe = f"import sys; sys.path.insert(0, {str(LIB_PYTHON)!r}); import gitwt"
-
-    for interp in interpreters:
+    for interp, library in itertools.product(interpreters, DEPLOYED_LIBRARIES):
+        probe = f"import sys; sys.path.insert(0, {str(LIB_PYTHON)!r}); import {library}"
         # -B: never leave a __pycache__ behind in the source directory.
         imported = run(interp, "-B", "-c", probe)
         if not imported.ok:
-            return Result(Status.FAIL, f"python: import gitwt ({interp})", imported.output)
+            return Result(Status.FAIL, f"python: import {library} ({interp})", imported.output)
 
-        for entry in DEPLOYED_ENTRY_POINTS:
-            helped = run(interp, "-B", str(entry), "--help")
-            if not helped.ok:
-                return Result(Status.FAIL, f"python: {entry.name} --help ({interp})", helped.output)
+    for interp, entry in itertools.product(interpreters, DEPLOYED_ENTRY_POINTS):
+        helped = run(interp, "-B", str(entry), "--help")
+        if not helped.ok:
+            return Result(Status.FAIL, f"python: {entry.name} --help ({interp})", helped.output)
 
     return Result(Status.OK, f"python: imports clean ({len(interpreters)} interpreter(s))")
 
@@ -371,6 +462,7 @@ def main() -> int:
             check_no_leaks(),
             *check_scripts(workdir),
             check_brewfile(),
+            check_package_parity(),
             check_python(),
             check_python_imports(),
         ]

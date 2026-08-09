@@ -1,0 +1,569 @@
+# Cross-OS package manifest -- what gets installed, and what does not.
+#
+# macOS installs from private_dot_config/Brewfile. This file maps each Brewfile
+# formula onto its Linux equivalent so the Linux profiles stay in step, and
+# records the reason for every formula that is deliberately not ported.
+#
+# THE RULE: if a tool is not in the system's package manager, it is not
+# installed. No release downloads, no vendored installers. The only exceptions
+# are gh and starship, which the 01 script installs from their own repo and
+# installer because neither is in any base repo.
+#
+# Targets:
+#   apt     Debian / Ubuntu / Pop!_OS
+#   fedora  Fedora
+#   el      RHEL rebuilds (Rocky / Alma / CentOS Stream 9) with EPEL + CRB
+#   mise    the rootless no-sudo profile, where mise IS the package manager --
+#           so a tool can be mise-only, available there and nowhere else
+#
+# A missing field means "not available on that target": the name is left out of
+# that distro's install list. `note` records why, when the absence is surprising.
+#
+# To add, remove, or look up a package, use tests/packages.py -- see the Packages
+# section of README.md. Do not hand-edit if you can avoid it: the field order
+# below is what that script writes and what tests/check.py checks.
+
+
+[packages.aerc]
+brew = "aerc"
+apt = "aerc"
+fedora = "aerc"
+note = "no EPEL 9 build"
+
+[packages.age]
+brew = "age"
+apt = "age"
+fedora = "age"
+el = "age"
+
+[packages.asciidoc]
+brew = "asciidoc"
+apt = "asciidoc"
+fedora = "asciidoc"
+el = "asciidoc"
+
+[packages.asciidoctor]
+brew = "asciidoctor"
+apt = "asciidoctor"
+fedora = "rubygem-asciidoctor"
+el = "rubygem-asciidoctor"
+
+[packages.bat]
+brew = "bat"
+apt = "bat"
+fedora = "bat"
+el = "bat"
+mise = "bat"
+note = "Debian/Ubuntu ship the binary as batcat; the 01 script symlinks it"
+
+[packages.biber]
+brew = "biber"
+apt = "biber"
+fedora = "biber"
+note = "no EPEL 9 build"
+
+[packages.boost]
+brew = "boost"
+apt = "libboost-all-dev"
+fedora = "boost-devel"
+el = "boost-devel"
+
+[packages.bottom]
+brew = "bottom"
+mise = "bottom"
+note = "no distro package; mise-only, and the binary is btm"
+
+[packages.cmake]
+brew = "cmake"
+apt = "cmake"
+fedora = "cmake"
+el = "cmake"
+
+[packages.cunit]
+brew = "cunit"
+apt = "libcunit1-dev"
+fedora = "CUnit-devel"
+el = "CUnit-devel"
+
+[packages.cython]
+brew = "cython"
+apt = "cython3"
+fedora = "python3-Cython"
+el = "python3-Cython"
+
+[packages.docutils]
+brew = "docutils"
+apt = "python3-docutils"
+fedora = "python3-docutils"
+el = "python3-docutils"
+
+[packages.doggo]
+brew = "doggo"
+mise = "doggo"
+note = "no distro package; mise-only"
+
+[packages.dust]
+brew = "dust"
+fedora = "du-dust"
+mise = "dust"
+note = "Fedora only, where it is packaged as du-dust"
+
+[packages.eza]
+brew = "eza"
+apt = "eza"
+fedora = "eza"
+mise = "eza"
+note = "no EPEL 9 build"
+
+[packages.fd]
+brew = "fd"
+apt = "fd-find"
+fedora = "fd-find"
+el = "fd-find"
+mise = "fd"
+
+[packages.ffmpeg]
+brew = "ffmpeg"
+apt = "ffmpeg"
+fedora = "ffmpeg-free"
+el = "ffmpeg-free"
+note = "the unencumbered build; full ffmpeg needs RPM Fusion"
+
+[packages.fish]
+brew = "fish"
+apt = "fish"
+fedora = "fish"
+el = "fish"
+mise = "aqua:fish-shell/fish-shell"
+
+[packages.fzf]
+brew = "fzf"
+apt = "fzf"
+fedora = "fzf"
+el = "fzf"
+mise = "fzf"
+
+[packages.gawk]
+brew = "gawk"
+apt = "gawk"
+fedora = "gawk"
+el = "gawk"
+
+[packages.gh]
+brew = "gh"
+mise = "gh"
+repo = "official"
+note = "installed from cli.github.com in the 01 script; not in Debian or EPEL"
+
+[packages.git]
+brew = "git"
+apt = "git"
+fedora = "git"
+el = "git"
+
+[packages.git-cliff]
+brew = "git-cliff"
+mise = "git-cliff"
+note = "no distro package; mise-only"
+
+[packages.git-delta]
+brew = "git-delta"
+apt = "git-delta"
+fedora = "git-delta"
+el = "git-delta"
+mise = "delta"
+
+[packages.git-extras]
+brew = "git-extras"
+apt = "git-extras"
+fedora = "git-extras"
+el = "git-extras"
+
+[packages.git-lfs]
+brew = "git-lfs"
+apt = "git-lfs"
+fedora = "git-lfs"
+el = "git-lfs"
+mise = "git-lfs"
+
+[packages.glab]
+brew = "glab"
+mise = "glab"
+
+[packages.gnuplot]
+brew = "gnuplot"
+apt = "gnuplot"
+fedora = "gnuplot"
+el = "gnuplot"
+
+[packages.gperftools]
+brew = "gperftools"
+apt = "google-perftools"
+fedora = "gperftools"
+el = "gperftools"
+
+[packages.graphviz]
+brew = "graphviz"
+apt = "graphviz"
+fedora = "graphviz"
+el = "graphviz"
+
+[packages.handbrake]
+brew = "handbrake"
+apt = "handbrake-cli"
+note = "CLI only; Fedora/EL builds live in RPM Fusion, which is out of scope"
+
+[packages.htop]
+brew = "htop"
+apt = "htop"
+fedora = "htop"
+el = "htop"
+
+[packages.icarus-verilog]
+brew = "icarus-verilog"
+apt = "iverilog"
+fedora = "iverilog"
+el = "iverilog"
+
+[packages.imagemagick]
+brew = "imagemagick"
+apt = "imagemagick"
+fedora = "ImageMagick"
+el = "ImageMagick"
+
+[packages.internetarchive]
+brew = "internetarchive"
+apt = "python3-internetarchive"
+note = "Debian/Ubuntu only; the command is ia"
+
+[packages.iperf]
+brew = "iperf"
+apt = "iperf"
+fedora = "iperf"
+el = "iperf"
+
+[packages.iperf3]
+brew = "iperf3"
+apt = "iperf3"
+fedora = "iperf3"
+el = "iperf3"
+
+[packages.isync]
+brew = "isync"
+apt = "isync"
+fedora = "isync"
+el = "isync"
+
+[packages.jj]
+brew = "jj"
+mise = "jj"
+note = "no distro package; mise-only"
+
+[packages.khard]
+brew = "khard"
+apt = "khard"
+fedora = "khard"
+note = "no EPEL 9 build"
+
+[packages.latexdiff]
+brew = "latexdiff"
+apt = "latexdiff"
+fedora = "texlive-latexdiff"
+note = "part of texlive on Fedora; no EPEL 9 build"
+
+[packages.lcov]
+brew = "lcov"
+apt = "lcov"
+fedora = "lcov"
+el = "lcov"
+
+[packages.lua-language-server]
+brew = "lua-language-server"
+mise = "lua-language-server"
+note = "no distro package; mise-only"
+
+[packages.marksman]
+brew = "marksman"
+mise = "marksman"
+note = "no distro package; mise-only"
+
+[packages.msmtp]
+brew = "msmtp"
+apt = "msmtp msmtp-mta"
+fedora = "msmtp"
+el = "msmtp"
+
+[packages.neovim]
+brew = "neovim"
+apt = "neovim"
+fedora = "neovim"
+el = "neovim"
+mise = "neovim"
+
+[packages.node]
+brew = "node"
+apt = "nodejs npm"
+fedora = "nodejs nodejs-npm"
+el = "nodejs npm"
+note = "no mise entry: its prebuilt node needs libatomic, which no-sudo cannot install"
+
+[packages.notmuch]
+brew = "notmuch"
+apt = "notmuch"
+fedora = "notmuch"
+note = "no EPEL 9 build, so no mail stack there"
+
+[packages.opam]
+brew = "opam"
+apt = "opam"
+fedora = "opam"
+note = "no EPEL 9 build"
+
+[packages.pandoc]
+brew = "pandoc"
+apt = "pandoc"
+fedora = "pandoc"
+el = "pandoc"
+
+[packages.pipx]
+brew = "pipx"
+apt = "pipx"
+fedora = "pipx"
+el = "pipx"
+
+[packages.pkgconf]
+brew = "pkgconf"
+apt = "pkgconf"
+fedora = "pkgconf-pkg-config"
+el = "pkgconf-pkg-config"
+
+[packages.poppler]
+brew = "poppler"
+apt = "poppler-utils"
+fedora = "poppler-utils"
+el = "poppler-utils"
+
+[packages.pre-commit]
+brew = "pre-commit"
+apt = "pre-commit"
+fedora = "pre-commit"
+el = "pre-commit"
+
+[packages.pygments]
+brew = "pygments"
+apt = "python3-pygments"
+fedora = "python3-pygments"
+el = "python3-pygments"
+
+[packages.pytest]
+brew = "pytest"
+apt = "python3-pytest"
+fedora = "python3-pytest"
+el = "python3-pytest"
+
+[packages.qemu]
+brew = "qemu"
+apt = "qemu-system"
+fedora = "qemu"
+el = "qemu-kvm"
+
+[packages.ripgrep]
+brew = "ripgrep"
+apt = "ripgrep"
+fedora = "ripgrep"
+el = "ripgrep"
+mise = "ripgrep"
+
+[packages.riscv-tools]
+brew = "riscv-software-src/riscv/riscv-tools"
+apt = "gcc-riscv64-unknown-elf"
+fedora = "gcc-riscv64-linux-gnu"
+note = "the cross-compiler only; spike and pk are not packaged for any distro"
+
+[packages.rocq]
+brew = "rocq"
+apt = "coq"
+fedora = "coq"
+note = "no EPEL 9 build; install with opam there if needed"
+
+[packages.ruby]
+brew = "ruby"
+apt = "ruby"
+fedora = "ruby"
+el = "ruby"
+
+[packages.ruff]
+brew = "ruff"
+fedora = "ruff"
+mise = "ruff"
+note = "Fedora only"
+
+[packages.rustup]
+brew = "rustup"
+apt = "rustup"
+fedora = "rustup"
+note = "not in EPEL 9, so those machines have no Rust toolchain"
+
+[packages.shellcheck]
+brew = "shellcheck"
+apt = "shellcheck"
+fedora = "ShellCheck"
+el = "ShellCheck"
+mise = "shellcheck"
+
+[packages.shfmt]
+brew = "shfmt"
+apt = "shfmt"
+fedora = "shfmt"
+mise = "shfmt"
+note = "no EPEL 9 build"
+
+[packages.starship]
+brew = "starship"
+mise = "starship"
+repo = "official"
+note = "installed from starship.rs in the 01 script; not in any base repo"
+
+[packages.texlive]
+brew = "texlive"
+apt = "texlive-full"
+fedora = "texlive-scheme-full"
+el = "texlive-scheme-basic"
+note = "multi-gigabyte; dominates bootstrap and --full runtime. EPEL 9 has only the basic scheme"
+
+[packages.tmux]
+brew = "tmux"
+apt = "tmux"
+fedora = "tmux"
+el = "tmux"
+
+[packages.tokei]
+brew = "tokei"
+fedora = "tokei"
+note = "Fedora only"
+
+[packages.tree-sitter-cli]
+brew = "tree-sitter-cli"
+fedora = "tree-sitter-cli"
+mise = "tree-sitter"
+note = "Fedora only; mise calls it tree-sitter"
+
+[packages.ty]
+brew = "ty"
+mise = "ty"
+note = "no distro package; mise-only"
+
+[packages.typst]
+brew = "typst"
+mise = "typst"
+note = "no distro package; mise-only"
+
+[packages.uv]
+brew = "uv"
+fedora = "uv"
+mise = "uv"
+note = "Fedora only"
+
+[packages.vdirsyncer]
+brew = "vdirsyncer"
+apt = "vdirsyncer"
+fedora = "vdirsyncer"
+note = "no EPEL 9 build"
+
+[packages.verilator]
+brew = "verilator"
+apt = "verilator"
+fedora = "verilator"
+el = "verilator"
+
+[packages.virtualenv]
+brew = "virtualenv"
+apt = "python3-virtualenv"
+fedora = "python3-virtualenv"
+el = "python3-virtualenv"
+
+[packages.w3m]
+brew = "w3m"
+apt = "w3m"
+fedora = "w3m"
+el = "w3m"
+
+[packages.xdot]
+brew = "xdot"
+apt = "xdot"
+fedora = "python-xdot"
+note = "no EPEL 9 build"
+
+[packages.yosys]
+brew = "yosys"
+apt = "yosys"
+fedora = "yosys"
+note = "no EPEL 9 build"
+
+[packages.yt-dlp]
+brew = "yt-dlp"
+apt = "yt-dlp"
+fedora = "yt-dlp"
+note = "no EPEL 9 build"
+
+[packages.z3]
+brew = "z3"
+apt = "z3"
+fedora = "z3"
+el = "z3"
+
+[packages.zig]
+brew = "zig"
+fedora = "zig"
+mise = "zig"
+note = "Fedora only; the no-sudo profile gets it from mise"
+
+[packages.zls]
+brew = "zls"
+mise = "zls"
+note = "no distro package; mise-only"
+
+[packages.zoxide]
+apt = "zoxide"
+fedora = "zoxide"
+el = "zoxide"
+mise = "zoxide"
+note = "no `brew` field -- zoxide is not in the Brewfile, it is Linux-only here"
+
+# ---------------------------------------------------------------------------
+# [skip] -- Brewfile formulae deliberately not installed on Linux, and why.
+# ---------------------------------------------------------------------------
+
+[skip]
+bash = "the GNU shell is the system bash on Linux"
+bash-language-server = "no distro package; npm only, and not in mise's registry"
+bat-extras = "no distro package and not in mise's registry"
+cairo = "transitive dependency on Linux"
+cargo-instruments = "front-end for Xcode Instruments"
+chawan = "no binary release; a source build is too heavy for a bootstrap"
+chezmoi = "already installed -- it is what runs this bootstrap"
+"chipsalliance/verible/verible" = "no distro package; upstream ships only a GitHub release"
+coreutils = "GNU coreutils are the native ones on Linux"
+dockutil = "drives the macOS Dock"
+fish-lsp = "no distro package; npm only, and not in mise's registry"
+gdk-pixbuf = "transitive dependency on Linux"
+glib = "transitive dependency on Linux"
+gnu-tar = "GNU tar is the native tar on Linux"
+gurk = "no distro package and not in mise's registry"
+gzip = "GNU gzip is native on Linux"
+jedi-language-server = "no distro package; pip only, and not in mise's registry"
+libdvdcss = "only in deb-multimedia and RPM Fusion, both out of scope"
+lstr = "no distro package and not in mise's registry"
+lume = "wraps Apple's Virtualization framework"
+mas = "Mac App Store CLI"
+mdfried = "no distro package and not in mise's registry"
+mise = "no distro package; the no-sudo profile bootstraps it from mise.run"
+"nohajc/anylinuxfs/anylinuxfs" = "mounts Linux filesystems on macOS"
+pango = "transitive dependency on Linux"
+pyenv = "no distro package; use the distro's python or mise"
+pyenv-virtualenv = "a pyenv plugin, installed by the pyenv installer"
+reattach-to-user-namespace = "bridges the macOS pasteboard into tmux"
+rust-analyzer = "a rustup component, added by the rustup installer"
+sby = "no distro package; needs yosys and a source build"
+surfer = "no distro package and not in mise's registry"
+swiftly = "no distro package; swift.org ships its own installer"

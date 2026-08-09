@@ -1,9 +1,15 @@
 {{- if eq .chezmoi.os "linux" -}}
 #!/usr/bin/env bash
 # Two profiles:
-#   * sudo:    native package manager (apt/dnf) for the bulk, plus each tool's
-#              official repo/installer for what the base repos lack (gh, starship).
+#   * sudo:    native package manager (apt/dnf), plus gh and starship from their
+#              own repo/installer -- the only two exceptions, because neither is
+#              in any base repository. A tool the distro does not package is
+#              simply not installed.
 #   * no-sudo: rootless mise under ~/.local -- the only option without root.
+#
+# The package names come from .chezmoidata/packages.toml, which maps every
+# Brewfile formula onto its per-distro equivalent. Edit the manifest with
+# tests/packages.py, not this list; tests/check.py fails if the two drift apart.
 set -eu
 {{ if .sudo }}
 # Use sudo only when we are not already root (test containers run as root).
@@ -11,24 +17,28 @@ SUDO=()
 if [ "$(id -u)" -ne 0 ]; then
     SUDO=(sudo)
 fi
-{{ $id := index .chezmoi.osRelease "id" -}}
-{{ $idLike := index .chezmoi.osRelease "idLike" -}}
-{{ if or (eq $id "fedora") (has $id (list "rhel" "rocky" "almalinux" "centos")) (contains "fedora" $idLike) (contains "rhel" $idLike) }}
+{{ $target := includeTemplate "linux-target" . -}}
+{{ if ne $target "apt" }}
 # --- Fedora / RHEL family (RHEL, Rocky, AlmaLinux, CentOS Stream) ------------
-{{- if ne $id "fedora" }}
+{{- if eq $target "el" }}
 # RHEL rebuilds keep the CLI tools in EPEL, some of whose deps need the CRB repo.
 "${SUDO[@]}" dnf install -y dnf-plugins-core epel-release
 "${SUDO[@]}" dnf config-manager --set-enabled crb 2> /dev/null \
     || "${SUDO[@]}" dnf config-manager --set-enabled powertools 2> /dev/null \
     || true
 {{- end }}
+packages=(
+    # Bootstrap-only: no Brewfile counterpart. RHEL 9's minimal install lacks
+    # `which` and `chsh` (util-linux-user), both of which the fish setup script
+    # needs; the compiler stands in for the Xcode CLI tools the darwin bootstrap
+    # installs, which is what makes cmake, boost and CUnit below any use.
+    curl file fontconfig which util-linux-user python3 ca-certificates
+    gcc gcc-c++ make
+{{ includeTemplate "linux-packages" . | trim | indent 4 }}
+)
 # --allowerasing lets curl replace RHEL's curl-minimal instead of conflicting.
-# RHEL 9's minimal install lacks `which` and `chsh` (util-linux-user), both of
-# which the fish setup script needs.
-"${SUDO[@]}" dnf install -y --allowerasing \
-    curl file fontconfig git which util-linux-user python3 \
-    fish neovim bat ripgrep fd-find fzf zoxide
-{{ if eq $id "fedora" -}}
+"${SUDO[@]}" dnf install -y --allowerasing "${packages[@]}"
+{{ if eq $target "fedora" -}}
 # gh ships in Fedora's own repositories.
 "${SUDO[@]}" dnf install -y gh
 {{- else }}
@@ -39,9 +49,15 @@ fi
 {{- else }}
 # --- Debian / Ubuntu / Pop!_OS ----------------------------------------------
 "${SUDO[@]}" apt-get update
-"${SUDO[@]}" apt-get install -y \
-    curl file fontconfig git wget python3 \
-    fish neovim bat ripgrep fd-find fzf zoxide
+packages=(
+    # Bootstrap-only: no Brewfile counterpart. `wget` fetches the gh keyring
+    # below; build-essential stands in for the Xcode CLI tools the darwin
+    # bootstrap installs, which is what makes cmake, boost and CUnit below any
+    # use.
+    curl file fontconfig wget python3 ca-certificates build-essential
+{{ includeTemplate "linux-packages" . | trim | indent 4 }}
+)
+"${SUDO[@]}" apt-get install -y "${packages[@]}"
 
 # Debian/Ubuntu ship bat as "batcat" and fd as "fdfind"; expose the usual names.
 mkdir -p "$HOME/.local/bin"

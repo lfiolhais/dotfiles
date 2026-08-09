@@ -1,0 +1,24 @@
+{{- /*
+Which column of .chezmoidata/packages.toml applies to this machine: "apt" for
+Debian/Ubuntu/Pop!_OS, "fedora" for Fedora, "el" for the RHEL rebuilds (Rocky,
+AlmaLinux, CentOS Stream) which need EPEL and CRB. Shared so the two bootstrap
+scripts and the test harness cannot disagree about what distro they are on.
+
+Note the ordering: Rocky and Alma report idLike "rhel centos fedora", so only an
+exact id of "fedora" means Fedora -- every other match in the family is "el".
+*/ -}}
+{{- /* toString: osRelease is empty off Linux, and `contains` rejects a nil. */ -}}
+{{- $id := index .chezmoi.osRelease "id" | toString -}}
+{{- $idLike := index .chezmoi.osRelease "idLike" | toString -}}
+{{- $rhel := or
+    (eq $id "fedora")
+    (has $id (list "rhel" "rocky" "almalinux" "centos"))
+    (contains "fedora" $idLike)
+    (contains "rhel" $idLike) -}}
+{{- if not $rhel -}}
+apt
+{{- else if eq $id "fedora" -}}
+fedora
+{{- else -}}
+el
+{{- end -}}

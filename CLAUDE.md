@@ -90,8 +90,8 @@ On `chezmoi apply`, run scripts execute in prefix order:
 3. `run_once_after_install-01-install-packages-darwin.sh.tmpl` — (darwin)
    install Homebrew, `brew bundle --file=~/.config/Brewfile`, rustup
 3b. `-01-install-packages-linux.sh.tmpl` — (linux) sudo profile: native package
-   manager chosen by distro *family* (via `.chezmoi.osRelease` `id`/`idLike`) —
-   apt on Debian/Ubuntu, dnf on Fedora, dnf + EPEL/CRB on RHEL rebuilds
+   manager chosen by distro *family* (via the shared `.chezmoitemplates/linux-target`)
+   — apt on Debian/Ubuntu, dnf on Fedora, dnf + EPEL/CRB on RHEL rebuilds
    (Rocky/Alma/CentOS) — plus the `gh`/`starship` official repos/installers for
    the gaps; no-sudo profile: rootless mise + `mise install`. Both profiles
    install `python3`, which the `git-wt-*` commands need and which neither
@@ -110,14 +110,47 @@ are wrapped so they render **empty** on Linux, and chezmoi skips empty `run_`
 scripts; `04` branches per OS/profile. Editing an already-run `run_once_` script
 re-runs it (hash changed); keep them idempotent.
 
+## Packages
+
+**`README.md` is the reference — read its Packages section before touching a
+package list.** In short: `private_dot_config/Brewfile` is what macOS installs,
+`.chezmoidata/packages.toml` maps each formula onto its name per Linux target,
+and **a tool not in the system's package manager is not installed** (only `gh`
+and `starship` are excepted, in the `01` script). A missing field in the manifest
+means "not available on that target"; `mise` is a target too, because on the
+no-sudo profile mise *is* the package manager.
+
+Use `tests/packages.py` (`search` / `add` / `skip` / `remove`) rather than hand
+editing — it knows the field order, and `search` asks each distro's real
+repositories what the package is called there. `tests/check.py` fails if a
+Brewfile formula is in neither `[packages]` nor `[skip]`, if an entry names no
+target, or if a field name is misspelled; `tests/linux.py` fails if a name does
+not resolve in the repository it claims.
+
+Two consumers read the manifest, neither keeping its own copy: the `01` script
+(via `.chezmoitemplates/linux-packages`) and
+`private_dot_config/mise/config.toml.tmpl`, which is **generated**. The distro
+dispatch lives once, in `.chezmoitemplates/linux-target` (`apt`/`fedora`/`el`).
+
+## Updating a machine
+
+The fish `update` function (`private_fish/functions/update.fish.tmpl`) walks
+whichever package managers it finds, skipping absent ones and reporting failures
+at the end rather than stopping at the first: brew and mas on darwin; apt or dnf
+plus the starship installer on linux+sudo; `mise self-update` on no-sudo; and on
+every profile `rustup update`, `uv tool upgrade --all` and `mise upgrade`. It
+deliberately does **not** run `chezmoi update`, since applying dotfiles can
+re-run bootstrap scripts.
+
 ## Layout
 
 - `private_dot_config/` — per-app configs: `aerc`, `aerospace`, `bat`, `gh`,
   `gh-dash`, `ghostty`, `khard`, `leaderkey`, `linearmouse`, `msmtp`, `nvim`,
-  `private_fish/`, `starship.toml`, `vdirsyncer`, plus the `Brewfile` (macOS
-  package source of truth) and `mise/config.toml` (the Linux no-sudo toolchain
-  equivalent). `aerospace`/`linearmouse`/`leaderkey`/`Brewfile` are darwin-only
-  and `mise` is linux-no-sudo-only, per the templated `.chezmoiignore`.
+  `private_fish/`, `starship.toml`, `vdirsyncer`, plus the `Brewfile` (what
+  macOS installs) and `mise/config.toml.tmpl` (the Linux no-sudo toolchain,
+  generated from `.chezmoidata/packages.toml`).
+  `aerospace`/`linearmouse`/`leaderkey`/`Brewfile` are darwin-only and `mise` is
+  linux-no-sudo-only, per the templated `.chezmoiignore`.
 - `private_dot_config/private_fish/` — fish shell: `config.fish.tmpl` sources
   `exports.fish`, `aliases.fish`, `greet.fish`; uses vi keybindings; inits fzf
   and starship. It's a template only so the mise activation (which would make the
@@ -174,7 +207,8 @@ python3 tests/check.py
 
 It renders the whole source with `chezmoi archive` (proving templates + age
 decryption + ignores work), lints the `run_*` bootstrap scripts (`bash -n`,
-shellcheck), checks the Brewfile, lints this repo's Python with ruff, imports the
+shellcheck), checks the Brewfile and its agreement with
+`.chezmoidata/packages.toml`, lints this repo's Python with ruff, imports the
 deployed `gitwt` library under every `python3` on the host, and prints a
 `chezmoi apply --dry-run` diff to review. It performs **no** destructive
 actions and never runs the `run_*` scripts. `check.py` is OS-aware: scripts
@@ -190,6 +224,12 @@ containers (no host changes, no real age key):
 python3 tests/linux.py          # render + lint ubuntu/fedora/rocky/alma × sudo/no-sudo
 python3 tests/linux.py --full   # also run the real apt/dnf + mise bootstrap in-container
 ```
+
+The default run also asks each distro's package manager whether every name the
+manifest targets at it resolves, without installing anything — that is what keeps
+the strict one-transaction install in `01` safe, and what confirms a name you
+added is real. `--full` installs the whole toolchain, TeX included, so budget
+gigabytes and a long wait.
 
 The macOS analogue is `tests/macos.py`, which does the same in throwaway **Lume**
 VMs (Docker can't run macOS; Lume is the MIT-licensed CLI over Apple's
@@ -216,8 +256,9 @@ See `tests/README.md` for full documentation of the harness and the hook
 apply` — applying dotfiles has real side effects (chsh, defaults write, brew,
 dockutil). Testing and applying are human-only steps.**
 
-Python in this repo — the harness plus the deployed `git-wt-*` commands under
-`dot_local/` — must pass the ruff ruleset in `tests/pyproject.toml` (`ruff check`
-+ `ruff format`). The deployed ones live outside `tests/`, so `check.py` passes
-them to ruff by path with an explicit `--config`; the library modules are globbed
-from `dot_local/lib/python/`, so splitting one in two keeps it covered.
+Python in this repo — the harness and the deployed `git-wt-*` commands under
+`dot_local/` — must pass the ruff ruleset in `tests/pyproject.toml`
+(`ruff check` + `ruff format`). The deployed
+ones live outside `tests/`, so `check.py` passes them to ruff by path with an
+explicit `--config`; the library modules are globbed from `dot_local/lib/python/`,
+so splitting one in two keeps it covered.

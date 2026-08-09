@@ -1,0 +1,17 @@
+# Linux CLI toolchain for the no-sudo profile.
+#
+# GENERATED from .chezmoidata/packages.toml -- edit the manifest with
+# tests/packages.py, not this file. Every `mise` field there lands here.
+#
+# Without root, mise IS this machine's package manager, so this list can carry
+# tools the sudo profiles cannot get from apt or dnf. It is still shorter than
+# theirs, because plenty of the manifest needs root either way: no TeX, no qemu,
+# no C development headers.
+
+[tools]
+# Bootstrap-only: no Brewfile counterpart. The git-wt-* commands need python3,
+# and without root there is no distro package to fall back on.
+"python" = "latest"
+{{ range $tool, $p := .packages }}{{ if hasKey $p "mise" -}}
+{{ printf "%q" $p.mise }} = {{ if hasKey $p "mise_exe" }}{ version = "latest", exe = {{ printf "%q" $p.mise_exe }} }{{ else }}"latest"{{ end }}
+{{ end }}{{ end -}}

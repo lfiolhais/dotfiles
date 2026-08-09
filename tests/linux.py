@@ -10,6 +10,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -66,10 +67,14 @@ def run_target(target: Target, *, full: bool) -> bool:
         f"SUDO={'true' if target.sudo else 'false'}",
         "-e",
         f"FULL={'true' if full else 'false'}",
-        IMAGES[target.distro],
-        "bash",
-        ENTRYPOINT,
     ]
+    # mise resolves most of the no-sudo toolchain through GitHub releases, and
+    # unauthenticated that is 60 requests an hour for the whole host -- which a
+    # --full run across four no-sudo targets exhausts. Forward a token when the
+    # environment has one; without it, expect rate-limit failures on repeat runs.
+    if os.environ.get("GITHUB_TOKEN"):
+        cmd += ["-e", "GITHUB_TOKEN"]
+    cmd += [IMAGES[target.distro], "bash", ENTRYPOINT]
     print(f"\n=== {target.label} ({IMAGES[target.distro]}) ===")
     return subprocess.run(cmd, check=False).returncode == 0
 
