@@ -1,0 +1,95 @@
+function update --description "Update every package on this machine, whatever installed it"
+    # Packages here come from a handful of unrelated installers, so no single
+    # `brew upgrade` or `apt upgrade` covers the machine. This walks all of them,
+    # in dependency order: system packages first, then the language toolchains,
+    # then the tools those toolchains installed.
+    #
+    # Each step is skipped when its tool is absent, so the same function works on
+    # a half-provisioned machine, and steps are independent: one failing does not
+    # stop the rest, it is just listed at the end.
+    set --local failed
+
+    function __update_step --no-scope-shadow
+        # __update_step <label> <command...>: run it, remember the label if it
+        # fails. --no-scope-shadow is what lets it append to `failed` above.
+        set --local label $argv[1]
+        set --erase argv[1]
+
+        set_color --bold blue
+        echo "==> $label"
+        set_color normal
+
+        # Run it, then read $status. Testing the command inline instead, as in
+        # `if not $argv`, loses the failure when the binary is missing entirely.
+        $argv
+        set --local code $status
+
+        if test $code -ne 0
+            set --append failed $label
+            set_color --bold red
+            echo "!!! $label failed (exit $code)"
+            set_color normal
+        end
+    end
+
+{{ if eq .chezmoi.os "darwin" }}
+    # --- macOS: Homebrew owns nearly everything ------------------------------
+    if command --query brew
+        __update_step "homebrew" brew update
+        # --greedy: casks that self-update are otherwise never reported stale.
+        __update_step "homebrew packages" brew upgrade --greedy
+        __update_step "homebrew cleanup" brew cleanup --prune=all
+    end
+
+    # mas has no "check first" mode; upgrading nothing is a no-op.
+    command --query mas; and __update_step "mac app store" mas upgrade
+{{ else if .sudo }}
+    # --- Linux with sudo: the distro package manager --------------------------
+    if command --query apt-get
+        __update_step "apt metadata" sudo apt-get update
+        # dist-upgrade, not upgrade: it is the one that lets a package pull in a
+        # new dependency, which a held-back kernel or toolchain update needs.
+        __update_step "apt packages" sudo apt-get dist-upgrade --yes
+        __update_step "apt cleanup" sudo apt-get autoremove --purge --yes
+    else if command --query dnf
+        # --refresh forces a metadata check rather than trusting the cache.
+        __update_step "dnf packages" sudo dnf upgrade --refresh --assumeyes
+        __update_step "dnf cleanup" sudo dnf autoremove --assumeyes
+    end
+
+    # starship came from its own installer, which is also how it updates.
+    if command --query starship
+        __update_step "starship" fish -c \
+            "curl -fsSL https://starship.rs/install.sh | sudo sh -s -- --yes"
+    end
+{{ else }}
+    # --- Linux without sudo: mise bootstrapped itself, so it updates itself ---
+    command --query mise; and __update_step "mise itself" mise self-update --yes
+{{ end }}
+    # --- The two things no package manager covers -----------------------------
+    # The Rust toolchain: brew and apt/dnf install rustup, not the compilers it
+    # manages, so it has to be told to update them itself.
+    command --query rustup; and __update_step "rust toolchain" rustup update
+
+    # Tools installed by `uv` rather than by a package manager -- on macOS the
+    # Brewfile's `uv "…"` entries, and nothing on Linux unless you added some.
+    command --query uv; and __update_step "uv tools" uv tool upgrade --all
+
+    # mise is the package manager on the no-sudo profile, and elsewhere carries
+    # whatever the distro repositories do not (see .chezmoidata/packages.toml).
+    command --query mise; and __update_step "mise tools" mise upgrade
+
+    functions --erase __update_step
+
+    echo
+    if set --query failed[1]
+        set_color --bold red
+        echo "Finished, but these failed: $failed"
+        set_color normal
+        return 1
+    end
+
+    set_color --bold green
+    echo "Everything is up to date."
+    set_color normal
+end
