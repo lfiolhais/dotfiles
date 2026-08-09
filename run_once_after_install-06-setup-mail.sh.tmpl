@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
+# Whitespace control matters here. Each conditional trims only the newline
+# *before* it and keeps the one after, so every echo stays on its own line;
+# trimming on both sides swallows the separator and runs the echoes together
+# into one unreadable line.
 echo "Follow these instructions to setup email."
 echo
-{{- if eq .chezmoi.os "linux" -}}
+{{- if eq .chezmoi.os "linux" }}
 echo "Linux uses gpg and pass to store your credentials."
 echo "Before setting up pass you need to have a gpg key."
 echo
@@ -15,22 +19,26 @@ echo "Inside the gpg shell run: setpref AES256 AES192 AES SHA512 SHA384 SHA256 S
 echo
 echo "Create pass store:"
 echo "* pass init gpg-id_or_email"
-{{ end -}}
+{{- end }}
 echo
+{{- if eq .chezmoi.os "darwin" }}
 echo "Update Keychain with IMAP and SMTP passwords:"
+{{- else }}
+echo "Store the IMAP and SMTP passwords in pass:"
+{{- end }}
 echo
 echo "mbsync:"
-{{- if eq .chezmoi.os "darwin" -}}
+{{- if eq .chezmoi.os "darwin" }}
 echo "* security add-internet-password -r imap -s Host -a User -w password -T /opt/homebrew/bin/mbsync"
-{{- else if eq .chezmoi.os "linux" -}}
+{{- else if eq .chezmoi.os "linux" }}
 echo "* pass insert email/mbsync"
-{{ end -}}
+{{- end }}
 echo "msmtp:"
-{{- if eq .chezmoi.os "darwin" -}}
+{{- if eq .chezmoi.os "darwin" }}
 echo "* security add-internet-password -r smtp -s Host -a User -w password -T /opt/homebrew/bin/msmtp"
-{{- else if eq .chezmoi.os "linux" -}}
+{{- else if eq .chezmoi.os "linux" }}
 echo "* pass insert email/smtp"
-{{ end -}}
+{{- end }}
 echo
 echo
 echo "Export Proton Mail Bridge SSL Certificates"
