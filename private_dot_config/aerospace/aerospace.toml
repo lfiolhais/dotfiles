@@ -111,10 +111,10 @@ on-mode-changed = []
     cmd-alt-ctrl-comma = 'layout accordion horizontal vertical'
 
     # See: https://nikitabobko.github.io/AeroSpace/commands#focus
-    cmd-alt-ctrl-h = 'focus left'
-    cmd-alt-ctrl-j = 'focus down'
-    cmd-alt-ctrl-k = 'focus up'
-    cmd-alt-ctrl-l = 'focus right'
+    cmd-alt-ctrl-h = 'focus --wrap-around left'
+    cmd-alt-ctrl-j = 'focus --wrap-around down'
+    cmd-alt-ctrl-k = 'focus --wrap-around up'
+    cmd-alt-ctrl-l = 'focus --wrap-around right'
 
     # See: https://nikitabobko.github.io/AeroSpace/commands#move
     cmd-alt-ctrl-shift-h = 'move left'
