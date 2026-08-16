@@ -207,8 +207,6 @@ brew "ty"
 brew "typst"
 # Extremely fast Python package installer and resolver, written in Rust
 brew "uv"
-# Synchronize calendars and contacts
-brew "vdirsyncer"
 # Verilog simulator
 brew "verilator"
 # Tool for creating isolated virtual python environments

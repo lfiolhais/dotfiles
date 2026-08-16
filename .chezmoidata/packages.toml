@@ -464,11 +464,6 @@ fedora = "uv"
 mise = "uv"
 note = "Fedora only"
 
-[packages.vdirsyncer]
-brew = "vdirsyncer"
-apt = "vdirsyncer"
-fedora = "vdirsyncer"
-note = "no EPEL 9 build"
 
 [packages.verilator]
 brew = "verilator"
