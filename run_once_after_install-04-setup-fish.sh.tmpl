@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 set -eu
+
+has_fish=$(grep -c fish < /etc/shells)
+
 {{ if eq .chezmoi.os "darwin" -}}
 eval "$(/opt/homebrew/bin/brew shellenv)"
 
-which fish | sudo tee -a /etc/shells
+if [ -z "$has_fish"]; then
+    which fish | sudo tee -a /etc/shells
+fi
 
 chsh -s "$(which fish)"
 {{- else if eq .chezmoi.os "linux" -}}
@@ -13,7 +18,10 @@ SUDO=()
 if [ "$(id -u)" -ne 0 ]; then
     SUDO=(sudo)
 fi
-which fish | "${SUDO[@]}" tee -a /etc/shells
+
+if [ -z "$has_fish"]; then
+    which fish | "${SUDO[@]}" tee -a /etc/shells
+fi
 
 chsh -s "$(which fish)"
 {{- else -}}
