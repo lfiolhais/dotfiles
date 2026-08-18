@@ -217,6 +217,7 @@ Temporary Items
 *.x86_64
 *.hex
 
+# AI #
+######
 **/.claude/settings.local.json
-
 **/.claude/.cc-writes/
