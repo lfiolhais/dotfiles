@@ -1,0 +1,10 @@
+#!/bin/sh
+spam='(folder:pm/Spam or folder:ist/Junk or folder:icloud/Junk)'
+notmuch tag +spam -inbox -unread -- "$spam and not tag:spam"
+notmuch tag -spam +inbox   -- "not $spam and tag:spam"
+
+trash='(folder:pm/Trash or folder:ist/Trash)'
+notmuch tag +trash -inbox -unread -- "$trash and not tag:trash"
+notmuch tag -trash +inbox   -- "not $trash and tag:trash"
+
+notmuch tag +riscv -- "folder:pm/Folders/RISC-V"
