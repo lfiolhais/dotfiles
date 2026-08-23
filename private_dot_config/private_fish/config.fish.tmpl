@@ -16,7 +16,7 @@ source $HOME/.config/fish/aliases.fish
 source $HOME/.config/fish/greet.fish
 
 {{ if eq .chezmoi.os "darwin" -}}
-ssh-add --apple-use-keychain ~/.ssh/gh_sign
+ssh-add --apple-use-keychain ~/.ssh/gh_sign &> /dev/null
 {{ end -}}
 
 set -g fish_key_bindings fish_vi_key_bindings
