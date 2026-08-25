@@ -82,3 +82,5 @@
 [rebase]
 	autoSquash = true
 	autoStash = true
+[format]
+	signOff = yes
