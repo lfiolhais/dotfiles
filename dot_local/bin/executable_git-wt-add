@@ -13,7 +13,10 @@ How the argument is treated:
 - a tag or commit is checked out detached, since moving a branch onto a tag is
   never what was meant;
 - anything unknown triggers one fetch, and if it is still unknown it becomes a
-  new branch off the default branch.
+  new branch off the default branch, deliberately with **no** upstream: git would
+  otherwise track the branch it forked from, whose name differs, and ``git push``
+  refuses that. The first push sets the upstream to ``origin/<ref>`` instead,
+  provided ``push.autoSetupRemote`` is on.
 
 The worktree path is printed on stdout, so ``cd (git wt-add <ref>)`` drops you
 straight into it.

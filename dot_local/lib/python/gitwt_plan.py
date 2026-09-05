@@ -87,9 +87,14 @@ class Plan:
             )
 
         base = f"{REMOTE}/{repo.default_branch()}"
+        # Without --no-track git makes `base` the new branch's upstream, since
+        # branch.autoSetupMerge defaults to true for a remote-tracking start point.
+        # `git push` would then refuse -- the upstream's name is not this branch's
+        # name -- and suggest `git push origin HEAD`. Born with no upstream,
+        # push.autoSetupRemote creates and tracks origin/<ref> on the first push.
         return cls(
             kind,
             path,
-            f"new branch {ref!r}, off {base}",
-            ("-b", ref, target, base),
+            f"new branch {ref!r}, off {base}, no upstream until first push",
+            ("--no-track", "-b", ref, target, base),
         )
