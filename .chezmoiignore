@@ -9,6 +9,8 @@ README.md
 .config/linearmouse
 .config/leaderkey
 .config/Brewfile
+.local/bin/mount-nas
+Library/LaunchAgents/xyz.botasal.mount-nas.plist
 {{ end }}
 {{ if or (ne .chezmoi.os "linux") .sudo }}
 .config/mise

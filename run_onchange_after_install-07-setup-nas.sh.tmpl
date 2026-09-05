@@ -1,0 +1,46 @@
+{{- if eq .chezmoi.os "darwin" -}}
+#!/usr/bin/env bash
+# launchd caches a job's definition when it is bootstrapped, so an edited plist
+# is only read on a fresh one. The digest below changes this script whenever the
+# plist changes, which is what makes chezmoi re-run it and reload the agent.
+# plist: {{ include "Library/LaunchAgents/xyz.botasal.mount-nas.plist.tmpl" | sha256sum }}
+set -eu
+
+label="xyz.botasal.mount-nas"
+plist="${HOME}/Library/LaunchAgents/${label}.plist"
+domain="gui/$(id -u)"
+
+# launchd writes the log itself but creates no directory for it.
+mkdir -p "${HOME}/.local/state"
+
+# bootstrap refuses a label that is already loaded, and an agent loaded from the
+# previous plist would otherwise keep running the old definition.
+launchctl bootout "${domain}/${label}" 2>/dev/null || true
+launchctl bootstrap "${domain}" "${plist}"
+
+echo "Loaded ${label}: the NAS share mounts whenever nas.botasal.xyz answers."
+echo
+echo "One step is left, and until it is done the agent mounts nothing."
+echo "The agent needs the password from the login Keychain, and asking for one"
+echo "it does not have is the dialog this exists to avoid."
+echo
+echo "Store it (-w last, so it prompts instead of reaching ps and history):"
+echo '    security add-internet-password -r "smb " -s nas.botasal.xyz \'
+echo '      -a lfiolhais -D "Network Password" \'
+echo '      -T /System/Library/CoreServices/NetAuthAgent.app/Contents/MacOS/NetAuthAgent \'
+echo '      -U -w'
+echo
+echo "Then: mount-nas status, which reports whether the lookup finds it."
+echo
+echo "If the first mount raises a Keychain prompt, answer Always Allow: the"
+echo "reader is NetAuthAgent, and that grants it the access -T was meant to."
+echo
+echo "Finder -> Go -> Connect to Server -> smb://nas.botasal.xyz/Book2 also"
+echo "works. Type that URL rather than picking the NAS out of the sidebar: the"
+echo "item is stored under whatever name was used to connect, and mount-nas"
+echo "looks it up by nas.botasal.xyz."
+echo
+echo "The agent appears under System Settings -> General -> Login Items &"
+echo "Extensions as a background item. Leave it enabled; disabled, it looks"
+echo "exactly like a broken script."
+{{ end -}}

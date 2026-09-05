@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+r"""Keep the NAS share mounted while it is reachable, and quiet while it is not.
+
+Run without arguments this is what the LaunchAgent runs on every network change:
+it mounts the share when the NAS answers, clears the mount when it stops
+answering, and does nothing at all in the two cases where nothing can be done --
+away from the network, or with no password in the Keychain. Those two are
+silent by design, because the alternative to silence is a dialog.
+
+One thing has to be done by hand, once per machine, and until it is done the
+agent mounts nothing -- the password goes in the login Keychain::
+
+    security add-internet-password -r "smb " -s nas.botasal.xyz -a lfiolhais \\
+      -D "Network Password" \\
+      -T /System/Library/CoreServices/NetAuthAgent.app/Contents/MacOS/NetAuthAgent \\
+      -U -w
+
+``-w`` last so it prompts rather than reaching ``ps``; ``-T`` names NetAuthAgent
+because that is what reads the item when ``mount volume`` authenticates.
+Connecting once in Finder writes an equivalent item, provided the URL is typed
+rather than picked out of the sidebar: the item records the name used to
+connect, and this looks it up by ``nas.botasal.xyz``.
+
+``status`` says whether that has happened, which is the first thing to check
+when the share is not appearing.
+
+Usage::
+
+    mount-nas              # mount when reachable, unmount when not
+    mount-nas status       # reachability, Keychain, and where the share is
+    mount-nas mount        # mount now, saying why if it cannot
+    mount-nas unmount      # unmount now
+    mount-nas … --dry-run  # print the commands, run none of them
+"""
+
+from __future__ import annotations
+
+import argparse
+import shlex
+import sys
+from pathlib import Path
+
+# The shared library sits beside this script's bin directory, not on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib" / "python"))
+
+from mountnas import (
+    AWAY,
+    MOUNTED,
+    NO_PASSWORD,
+    PRESENT,
+    SHARES,
+    UNMOUNTED,
+    NasError,
+    Outcome,
+    PackagesError,
+    mount,
+    sync,
+    table,
+    unmount,
+)
+
+# What each outcome of a pass is called when a person asks.
+REPORT = {
+    AWAY: "not reachable, nothing mounted",
+    PRESENT: "already mounted",
+    MOUNTED: "mounted",
+    UNMOUNTED: "unmounted, the NAS stopped answering",
+    NO_PASSWORD: "reachable, but no password in the Keychain",
+}
+
+
+def show(outcome: Outcome, *, dry_run: bool) -> None:
+    """Print one outcome for a person to read.
+
+    Args:
+        outcome: The outcome to describe.
+        dry_run: Whether the command was printed rather than run.
+
+    """
+    prefix = "would run" if dry_run else "ran"
+    detail = f"  [{prefix}: {shlex.join(outcome.argv)}]" if outcome.argv else ""
+    result = REPORT[outcome.action] if outcome.ok else f"failed: {outcome.error}"
+    print(f"{outcome.share.name}: {result}{detail}")
+
+
+def cmd_sync(*, dry_run: bool) -> int:
+    """Mount or unmount as the network allows, reporting only real failures.
+
+    This is what launchd runs. Everything it decides is expected, so nothing is
+    printed while nothing is wrong; the agent's log stays empty and a line in it
+    means something needs looking at.
+
+    Args:
+        dry_run: Report the commands without running them.
+
+    Returns:
+        Process exit code: 1 if any share failed, otherwise 0.
+
+    """
+    outcomes = sync(dry_run=dry_run)
+    if dry_run:
+        for outcome in outcomes:
+            show(outcome, dry_run=True)
+        return 0
+
+    failed = [outcome for outcome in outcomes if not outcome.ok]
+    for outcome in failed:
+        print(f"mount-nas: {outcome.share.name}: {outcome.error}", file=sys.stderr)
+    return 1 if failed else 0
+
+
+def cmd_status() -> int:
+    """Report what each share is doing and why.
+
+    Returns:
+        Process exit code: always 0. Every state this reports is a fact about
+        the network or the Keychain rather than a failure of the command.
+
+    """
+    snapshot = table()
+    for share in SHARES:
+        path = share.mountpoint(snapshot)
+        where = f"mounted at {path}" if path else "not mounted"
+        if not share.reachable():
+            print(f"{share.name}: {share.host} not reachable, {where}")
+        elif share.has_password():
+            print(f"{share.name}: {share.host} reachable, password in Keychain, {where}")
+        else:
+            print(f"{share.name}: {share.host} reachable, {where}")
+            print(f"  no password in the Keychain for {share.user}@{share.host}, so nothing")
+            print(f"  will be mounted. Connect once in Finder to {share.url} and tick")
+            print('  "Remember this password in my keychain".')
+    return 0
+
+
+def cmd_mount(*, dry_run: bool) -> int:
+    """Mount every share that is not already mounted.
+
+    Args:
+        dry_run: Report the commands without running them.
+
+    Returns:
+        Process exit code: 1 if any share could not be mounted, otherwise 0.
+
+    """
+    snapshot = table()
+    failed = False
+    for share in SHARES:
+        path = share.mountpoint(snapshot)
+        if path:
+            print(f"{share.name}: already mounted at {path}")
+            continue
+        if not share.reachable():
+            print(f"{share.name}: {share.host} is not reachable", file=sys.stderr)
+            failed = True
+            continue
+        if not share.has_password():
+            print(f"{share.name}: no password in the Keychain for {share.url}", file=sys.stderr)
+            failed = True
+            continue
+        outcome = mount(share, dry_run=dry_run)
+        show(outcome, dry_run=dry_run)
+        failed = failed or not outcome.ok
+    return 1 if failed else 0
+
+
+def cmd_unmount(*, dry_run: bool) -> int:
+    """Unmount every share that is mounted.
+
+    Args:
+        dry_run: Report the commands without running them.
+
+    Returns:
+        Process exit code: 1 if any share could not be unmounted, otherwise 0.
+
+    """
+    snapshot = table()
+    failed = False
+    for share in SHARES:
+        path = share.mountpoint(snapshot)
+        if not path:
+            print(f"{share.name}: not mounted")
+            continue
+        outcome = unmount(share, path, dry_run=dry_run)
+        show(outcome, dry_run=dry_run)
+        failed = failed or not outcome.ok
+    return 1 if failed else 0
+
+
+def main() -> int:
+    """Parse arguments and run the requested command.
+
+    Returns:
+        Process exit code: 0 on success, 1 on a reported failure.
+
+    """
+    parser = argparse.ArgumentParser(
+        prog="mount-nas",
+        description="Mount the NAS while it is reachable, silently when it is not.",
+        epilog="with no command: mount when reachable, unmount when not",
+    )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        default="sync",
+        choices=("sync", "status", "mount", "unmount"),
+        help="what to do (default: sync)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the commands instead of running them",
+    )
+    args = parser.parse_args()
+
+    try:
+        if args.command == "status":
+            return cmd_status()
+        if args.command == "mount":
+            return cmd_mount(dry_run=args.dry_run)
+        if args.command == "unmount":
+            return cmd_unmount(dry_run=args.dry_run)
+        return cmd_sync(dry_run=args.dry_run)
+    except (NasError, PackagesError) as exc:
+        print(f"mount-nas: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

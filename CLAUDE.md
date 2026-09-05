@@ -104,9 +104,14 @@ On `chezmoi apply`, run scripts execute in prefix order:
    adds `~/.local/bin` + mise shims on Linux, so bat is on PATH under bash
 8. `-06-setup-mail.sh.tmpl` — (darwin) prints manual mail setup steps (Keychain
    passwords, Proton Bridge TLS certs)
+9. `run_onchange_after_install-07-setup-nas.sh.tmpl` — (darwin) loads the
+   `xyz.botasal.mount-nas` LaunchAgent and prints the one manual step, seeding
+   the Keychain. It is `run_onchange_` and carries the plist's digest in a
+   comment, because launchd caches a job's definition at bootstrap and an edited
+   plist is only read on a fresh one.
 
-OS-gating: darwin-only scripts (`xcode-cli`, `01-…-darwin`, `02`, `03`, `06`)
-are wrapped so they render **empty** on Linux, and chezmoi skips empty `run_`
+OS-gating: darwin-only scripts (`xcode-cli`, `01-…-darwin`, `02`, `03`, `06`,
+`07`) are wrapped so they render **empty** on Linux, and chezmoi skips empty `run_`
 scripts; `04` branches per OS/profile. Editing an already-run `run_once_` script
 re-runs it (hash changed); keep them idempotent.
 
@@ -118,14 +123,44 @@ package list.** In short: `private_dot_config/Brewfile` is what macOS installs,
 and **a tool not in the system's package manager is not installed** (only `gh`
 and `starship` are excepted, in the `01` script). A missing field in the manifest
 means "not available on that target"; `mise` is a target too, because on the
-no-sudo profile mise *is* the package manager.
+no-sudo profile mise *is* the package manager. There is **one table**: an entry
+naming no target at all is not installed on Linux, and its `note` says why —
+that replaced a second `[skip]` table that said the same thing twice.
 
-Use `tests/packages.py` (`search` / `add` / `skip` / `remove`) rather than hand
-editing — it knows the field order, and `search` asks each distro's real
-repositories what the package is called there. `tests/check.py` fails if a
-Brewfile formula is in neither `[packages]` nor `[skip]`, if an entry names no
-target, or if a field name is misspelled; `tests/linux.py` fails if a name does
-not resolve in the repository it claims.
+The two files are written by different hands, and that is the thing to keep
+straight. The **Brewfile is derived**: `brew bundle dump` writes it from what
+the Mac has installed — descriptions, taps, casks, Mac App Store apps and `uv`
+tools included — so nothing else may edit it, and a line spliced in by hand is
+gone at the next dump. The **manifest is authored**: it records a decision no
+machine can be asked for.
+
+Use `chezmoi-packages` (`search` / `add` / `remove` / `dump`) rather than hand
+editing. `add` and `remove` drive **both** ends — install or uninstall, re-dump
+the Brewfile, then edit the manifest — because a package that is only half
+removed is exactly what the harness fails on; `--no-install`/`--no-uninstall`
+edit the manifest alone. `dump` is the only path to the Brewfile and just runs
+`brew bundle dump`, then reports what the manifest still owes. `search` asks each
+distro's real repositories what the package is called there. It is a **deployed**
+command (`dot_local/bin/executable_chezmoi-packages` -> `~/.local/bin`), not
+harness tooling: it finds the two files through `chezmoi source-path`, so it runs
+from anywhere, and editing it needs a `chezmoi apply` before the change is on
+`PATH`. `tests/check.py` fails if a Brewfile `brew`/`uv` entry is unclaimed by
+the manifest, if an entry installs nowhere and gives no reason, or if a field
+name is misspelled; `tests/linux.py` fails if a name does not resolve in the
+repository it claims.
+
+The manifest is **generated**: `tomllib` reads it, and `tomlkit` writes it back
+whole from the header in `chezpkg_manifest.py` and one table per entry. So every
+edit rewrites the file and a comment added by hand does not survive — annotations
+belong in `note`. Nothing is written until the render has been re-parsed and found
+to hold exactly the entries that were asked for.
+
+Writing TOML is the one thing the standard library cannot do, and Homebrew
+packages no writer for it (the Linux targets all have `python3-tomlkit`), so the
+command's shebang is a PEP 723 script run through **uv**, which supplies both
+`tomlkit` and a >= 3.11 interpreter. That is why `chezpkg` may use 3.11 features
+where `gitwt` may not, and why `tests/check.py` exercises this command through
+`uv run --script` instead of under every `python3` on the host.
 
 Two consumers read the manifest, neither keeping its own copy: the `01` script
 (via `.chezmoitemplates/linux-packages`) and
@@ -142,6 +177,131 @@ every profile `rustup update`, `uv tool upgrade --all` and `mise upgrade`. It
 deliberately does **not** run `chezmoi update`, since applying dotfiles can
 re-run bootstrap scripts.
 
+## App self-updates
+
+Most casks ship the vendor's own updater — **29 of the 41 installed casks declare
+`auto_updates true`** — so an app replaces itself behind Homebrew's back. The
+Caskroom then describes a version that is no longer on disk, and the next
+`brew upgrade --greedy` reinstalls, or walks back, an app that was already
+current.
+
+There is no general switch for this: Homebrew ships the vendor's binary as-is,
+and its maintainers say so. What there is, is **Sparkle**, the update framework
+most Mac apps embed. It reads its automatic-check settings from the app's *own*
+user-defaults domain, where they beat the same keys in the bundle's
+`Info.plist`. `cask-updates` writes those two keys —
+`SUEnableAutomaticChecks` and `SUAutomaticallyUpdate`, both false — for exactly
+the apps Homebrew installed:
+
+```sh
+cask-updates status     # what self-updates, and what is already silent
+cask-updates disable    # silence the Sparkle apps Homebrew owns (--dry-run works)
+cask-updates enable     # undo it: the keys are deleted, not set true
+```
+
+`update` runs `disable` on every darwin run, so a cask installed since the last
+one is caught without anyone remembering to.
+
+Three things about it are load-bearing:
+
+- **Nothing is discovered from a list.** The set is whatever `brew list --cask`
+  says today, and whether an app can be silenced is read out of its bundle
+  (`SUFeedURL`/`SUPublicEDKey`/`SUPublicDSAKeyFile`, or an embedded
+  `Sparkle.framework` — both tests, because either alone misses cases). That is
+  what keeps the maintenance at zero.
+- **Apps installed by hand are never touched**, because nothing else would ever
+  update them. Only apps Homebrew owns are fair game.
+- **Nothing inside an app bundle is modified.** Deleting `Autoupdate.app` or
+  `ksadmin` would break the code signature and be undone by the next upgrade;
+  writing a preference is reversible and survives nothing but a `defaults
+  delete`.
+
+Coverage today is **17 silenced, 12 still self-updating**. Five are exempt on
+purpose (`EXEMPT` in `caskupd_app.py`: adguard, little-snitch,
+proton-mail-bridge, protonvpn, tor-browser — security tools whose own schedule
+beats a weekly `brew upgrade`). Seven cannot be reached at all, and `status`
+names them rather than pretending otherwise: `google-chrome` (Keystone),
+`signal`/`claude`/`drawio` (Electron), `zoom`, `busycal`, `shottr`. Chasing
+those per-vendor keys was considered and rejected — each is a line that rots on
+someone else's schedule.
+
+## Mounting the NAS
+
+`nas.botasal.xyz` serves the share `Book2` over SMB, and it should be mounted
+whenever the network allows and absent, without comment, when it does not. The
+hard part is the silence: three separate things raise a dialog on macOS, so
+`mount-nas` carries three guards.
+
+```sh
+mount-nas             # mount when reachable, unmount when not (what launchd runs)
+mount-nas status      # reachability, Keychain, and where the share is
+mount-nas mount       # mount now, saying why if it cannot (--dry-run works)
+mount-nas unmount     # unmount now
+```
+
+- Nothing is attempted until TCP 445 answers, so the agent is a no-op away from
+  home. Testing the port rather than the network name means Ethernet and VPN
+  count as being home just as Wi-Fi does.
+- `mount volume` raises an authentication sheet when the login Keychain holds no
+  password for the server, so the Keychain is consulted first and a missing
+  entry is a reason to do nothing rather than a reason to ask.
+- A mount whose server has vanished produces interrupted-connection alerts until
+  it is cleared, so an unreachable NAS that is still mounted is force unmounted.
+
+`mount volume` is the AppleScript route rather than `mount_smbfs` because it
+reads the login Keychain and mounts under `/Volumes` the way Finder does, so the
+share behaves normally in the sidebar. Every command is named by absolute path,
+since launchd hands a job a bare `PATH`.
+
+The share is found in `mount(8)` by its device column, `//user@host/share`,
+rather than by `/Volumes/Book2`. A leftover directory of that name makes macOS
+mount at `/Volumes/Book2-1` instead, and a check that only looked at the
+expected path would mount a second copy every five minutes.
+
+The password lives in the login Keychain and nowhere in this repo. Seeding it is
+the one manual step, and until it is done the agent mounts nothing and says
+nothing:
+
+```sh
+security add-internet-password -r "smb " -s nas.botasal.xyz -a lfiolhais \
+  -D "Network Password" \
+  -T /System/Library/CoreServices/NetAuthAgent.app/Contents/MacOS/NetAuthAgent \
+  -U -w
+```
+
+`-w` goes last with no value so `security` prompts, rather than the password
+reaching `ps` and the shell history. `-T` names NetAuthAgent because that is
+what reads the item: `mount volume` hands the authentication to it, and an item
+created by `security` is otherwise trusted only by `security` itself. A first
+mount that raises a Keychain prompt is answered with Always Allow, which grants
+the same access.
+
+Connecting once through Finder writes an equivalent item, and the URL has to be
+typed rather than picked out of the sidebar. The `srvr` attribute is whatever
+string was used to connect -- an existing item on this machine is stored under
+the NetBIOS name `DELTA7` -- and `has_password()` looks the item up by
+`nas.botasal.xyz`. A mismatch fails closed: the agent mounts nothing and stays
+silent, which is indistinguishable from being away without asking.
+
+`mount-nas status` is what tells them apart, and it is the first thing to check
+when the share is not appearing.
+
+`Library/LaunchAgents/xyz.botasal.mount-nas.plist.tmpl` runs it: at load, on
+every write to `/var/run/resolv.conf` (rewritten on every network transition,
+which is what makes this fire on joining a network rather than polling for one),
+and every 300 seconds as a backstop for wake-from-sleep. It must stay a user
+agent — a `/Library/LaunchDaemons` job runs as root, which can read neither the
+login Keychain nor mount into the login session. It appears under System
+Settings -> General -> Login Items & Extensions as a background item and has to
+stay enabled.
+
+`sync` prints nothing while nothing is wrong, so `~/.local/state/mount-nas.log`
+stays empty and a line in it is always worth reading.
+
+autofs was the alternative and was rejected: it mounts lazily and handles
+network comings and goings for free, but `automountd` runs as root and cannot
+reach a login Keychain, so the password ends up in `/var/root/.nsmbrc`.
+
 ## Layout
 
 - `private_dot_config/` — per-app configs: `aerc`, `aerospace`, `bat`, `gh`,
@@ -151,21 +311,45 @@ re-run bootstrap scripts.
   generated from `.chezmoidata/packages.toml`).
   `aerospace`/`linearmouse`/`leaderkey`/`Brewfile` are darwin-only and `mise` is
   linux-no-sudo-only, per the templated `.chezmoiignore`.
+  `khard/work/exact_default/` holds one age-encrypted vCard per contact; the
+  `exact_` prefix is load-bearing — see *Contacts* below. vdirsyncer's `status/`
+  is deliberately **not** tracked.
 - `private_dot_config/private_fish/` — fish shell: `config.fish.tmpl` sources
   `exports.fish`, `aliases.fish`, `greet.fish`; uses vi keybindings; inits fzf
   and starship. It's a template only so the mise activation (which would make the
   shell prefer mise's binaries) is gated to the **no-sudo Linux** profile; macOS
-  and sudo-Linux render without it. Add functions under `functions/`.
+  and sudo-Linux render without it. Add functions under `functions/`, one
+  function per file named after it (fish autoloads by filename) — e.g.
+  `khard-rm.fish` / `khard-track.fish`, the contact helpers described under
+  *Contacts* below.
 - `dot_local/share/mail/` — Maildir store (`pm`, `ist`, `icloud`) plus notmuch
   state.
 - `dot_local/bin/` — user commands, deployed `0755` via the `executable_` prefix:
-  `git-wt-clone` (clone a repo as a bare clone plus per-ref worktrees) and
-  `git-wt-add` (check a branch/tag/hash out into its own folder). The `git-`
-  prefix means git dispatches them as subcommands too (`git wt-add …`).
-- `dot_local/lib/python/` — the `gitwt` library both commands share. **The entry
-  points import `gitwt` and nothing else**; it is a facade of re-exports, so the
-  split below can change without touching them. Modules import strictly
-  downwards, which is what keeps them free of cycles:
+  `git-wt-clone` (clone a repo as a bare clone plus per-ref worktrees, into a
+  folder you may name), `git-wt-add` (check a branch/tag/hash out into its own
+  folder), `chezmoi-packages` (maintain the two package files — see *Packages*
+  above), `cask-updates` (stop cask apps updating themselves — see *App
+  self-updates* above), and `mount-nas` (keep the NAS share mounted while it is
+  reachable — see *Mounting the NAS* above). The `git-` prefix means git
+  dispatches the two worktree commands as subcommands too (`git wt-add …`).
+  `chezmoi-packages` is the one command that edits **this repo** rather than the
+  machine, so it discovers the source directory with `chezmoi source-path`
+  instead of deriving it from `__file__`. `cask-updates` and `mount-nas` are
+  macOS-only and chezmoi-ignored off darwin.
+- `Library/LaunchAgents/` — `xyz.botasal.mount-nas.plist.tmpl`, the only
+  LaunchAgent here. A template because `ProgramArguments` needs the home
+  directory; no `dot_` prefix, because `~/Library` is not hidden.
+- `dot_local/lib/python/` — the libraries the commands share, plus
+  `linux_distros.py`: `IMAGES` and `TARGET_OF`, the Linux target matrix, read by
+  both `chezpkg_search` and `tests/linux.py` so that adding a distro is one edit.
+  It is deployed rather than kept in `tests/` precisely because
+  `chezmoi-packages` runs from `~/.local/bin`, where `tests/` does not exist.
+
+  Four families, each a facade over modules that import strictly **downwards**,
+  which is what keeps them free of cycles. **The entry points import the facade
+  and nothing else**, so any split can change without touching them.
+
+  `gitwt`, behind the two `git-wt-*` commands:
 
   | module | holds | imports |
   | --- | --- | --- |
@@ -176,11 +360,48 @@ re-run bootstrap scripts.
   | `gitwt_worktree.py` | `Worktree` (create, or reuse in place) | all of the above |
   | `gitwt.py` | `__all__`, nothing else | all of the above |
 
-  Standard library only and Python 3.9-compatible: that floor comes from both
-  OSes — a fresh Mac has Apple's 3.9 until Homebrew's lands, and the RHEL
-  rebuilds ship 3.9 as well. `tests/check.py` both lints every module with ruff
-  and imports the library under each interpreter it finds, since ruff alone
-  cannot see an import cycle.
+  `chezpkg`, behind `chezmoi-packages`:
+
+  | module | holds | imports |
+  | --- | --- | --- |
+  | `chezpkg_run.py` | `PackagesError`, `run()`, `maybe()`, `have()` | nothing local |
+  | `chezpkg_source.py` | `Source` (the source dir and the two file paths) | `chezpkg_run` |
+  | `chezpkg_brew.py` | `Entry`, `Brewfile` (parse, dump, install, uninstall) | run, source |
+  | `chezpkg_manifest.py` | `Manifest` (read, save, problems) | run, source, brew |
+  | `chezpkg_search.py` | `Match`, `Search` (ask every platform, **return** it) | run, `linux_distros` |
+  | `chezpkg.py` | `__all__`, nothing else | all of the above |
+
+  `caskupd`, behind `cask-updates`:
+
+  | module | holds | imports |
+  | --- | --- | --- |
+  | `caskupd_app.py` | `App` (a cask's app: bundle id, updater kind), `EXEMPT` | `chezpkg_run` |
+  | `caskupd_sparkle.py` | `Sparkle` (the two keys: read, write, delete) | `chezpkg_run` |
+  | `caskupd.py` | `__all__`, nothing else | both above |
+
+  `mountnas.py`, behind `mount-nas`, is a family of one: `Share` (its URL, its
+  device column, whether the NAS answers, where it is mounted, whether the
+  Keychain has its password), `Outcome`, and `sync()` over them. It is both
+  facade and implementation, because the whole surface is a single dataclass;
+  the entry point still imports from `mountnas` and nothing else, so splitting it
+  later changes nothing there.
+
+  `caskupd` and `mountnas` are the cross-family imports: `chezpkg_run` is generic
+  process plumbing, so it is shared rather than copied — which is why that one
+  module must stay stdlib-only and 3.9-clean even though the rest of `chezpkg`
+  need not be.
+
+  `gitwt` is standard library only and Python 3.9-compatible: that floor comes
+  from both OSes — a fresh Mac has Apple's 3.9 until Homebrew's lands, and the
+  RHEL rebuilds ship 3.9 as well. `caskupd` and `mountnas` share that floor for
+  the same reason. `chezpkg` is **3.11+** instead, because uv supplies its interpreter
+  (see *Packages* above); its one dependency, `tomlkit`, is imported under a
+  guard so that merely importing the library — as `tests/check.py` does, under a
+  plain `python3` — needs nothing but the stdlib. `tests/check.py` lints every
+  module with ruff, imports `caskupd`/`gitwt`/`linux_distros`/`mountnas` under
+  each interpreter it finds (ruff alone cannot see an import cycle), runs the
+  `mount-nas` unit tests, and runs `chezmoi-packages --help` through
+  `uv run --script`.
 - `private_dot_ssh/`, `private_dot_gitconfig`, `dot_bashrc` — top-level
   dotfiles.
 
@@ -196,6 +417,41 @@ The most interconnected part. Sync/read pipeline: **mbsync/isync**
 Mail is reached through Proton Mail Bridge (TLS certs exported into
 `~/.config`). After credential/config changes: `mbsync -a && notmuch new`.
 
+## Contacts
+
+khard's address book is `work`, one age-encrypted vCard per contact under
+`private_dot_config/khard/work/exact_default/` ->
+`~/.config/khard/work/default/<uid>.vcf`. **chezmoi is the transport between
+machines**, not CardDAV — vdirsyncer is dormant here, and its `status/`
+directory is machine-local bookkeeping that is chezmoi-ignored (restoring one
+machine's status on another makes vdirsyncer disagree with itself about what has
+already been deleted).
+
+The `exact_` prefix is what makes **deletions propagate**. Without it
+`chezmoi apply` only writes the entries it knows about and silently leaves a
+target file whose source entry has been deleted, so removing a contact on one
+machine never reached the others. `exact_` declares the target directory to
+contain *exactly* the source entries, so chezmoi deletes the strays.
+
+That cuts both ways, and it is the one thing to remember here:
+
+> A contact created with `khard new` has no source entry yet, so the next
+> `chezmoi apply` **deletes it**. Run `khard-track` (or
+> `chezmoi add ~/.config/khard/work/default`) after adding or editing a contact.
+
+Two fish helpers cover the lifecycle:
+
+- `khard-rm` — fzf multi-select over `khard list --parsable`, confirm, then
+  `khard remove` each and `chezmoi forget` their vcf files. It resolves every
+  uid through `khard filename` first and skips anything that does not match
+  exactly one card, because khard's `remove` takes free-text search terms and
+  has no `--uid` flag. Supports `--dry-run`.
+- `khard-track` — `chezmoi add` the collection, to be run after `khard new`.
+
+Note `chezmoi re-add` **cannot** express a deletion: it only re-adds files that
+still exist ("all entries that are not files are ignored"). `chezmoi forget` is
+the verb that drops an entry from the source state.
+
 ## Testing (human-run — do NOT let an AI run this)
 
 Other machines pull `main` via `chezmoi update`, so a broken `main` breaks
@@ -208,9 +464,9 @@ python3 tests/check.py
 It renders the whole source with `chezmoi archive` (proving templates + age
 decryption + ignores work), lints the `run_*` bootstrap scripts (`bash -n`,
 shellcheck), checks the Brewfile and its agreement with
-`.chezmoidata/packages.toml`, lints this repo's Python with ruff, imports the
-deployed `gitwt` library under every `python3` on the host, and prints a
-`chezmoi apply --dry-run` diff to review. It performs **no** destructive
+`.chezmoidata/packages.toml`, lints this repo's Python with ruff, imports every
+deployed library under every `python3` on the host, runs the `mount-nas` unit
+tests, and prints a `chezmoi apply --dry-run` diff to review. It performs **no** destructive
 actions and never runs the `run_*` scripts. `check.py` is OS-aware: scripts
 gated off for the current OS render empty and are skipped, so it runs on both
 macOS and Linux. The `tests/` directory is chezmoi-ignored (never deployed to
@@ -248,6 +504,20 @@ A `pre-push` git hook enforces this on pushes to `main`. Enable it once per clon
 ```sh
 git config core.hooksPath tests/githooks
 ```
+
+`tests/nasprobe.py` is the one test that talks to something real. It sends an
+SMB2 NEGOTIATE to the host named in `mountnas.py` and prints the dialect the
+server picks, so a name that has stopped pointing at a file server says so
+instead of looking like an evening away from home:
+
+```sh
+python3 tests/nasprobe.py
+```
+
+It is standalone and deliberately **not** part of `check.py`, because the
+pre-push hook has to pass away from home. It connects directly when it can and
+tunnels through the SOCKS5 proxy in `$ALL_PROXY` when a direct socket is
+refused, which is what lets it run inside a sandbox.
 
 See `tests/README.md` for full documentation of the harness and the hook
 (behavior, bypassing with `--no-verify`, and the per-clone caveat).

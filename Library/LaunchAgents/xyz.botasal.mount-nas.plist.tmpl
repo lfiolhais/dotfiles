@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>xyz.botasal.mount-nas</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{ .chezmoi.homeDir }}/.local/bin/mount-nas</string>
+  </array>
+
+  <!-- Login, where the network is usually not up yet: the reachability check
+       simply says no and the next trigger does the work. -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- resolv.conf is rewritten on every network transition, which is what makes
+       this fire on joining a network rather than polling for one. The
+       SystemConfiguration plist covers an interface appearing or going away. -->
+  <key>WatchPaths</key>
+  <array>
+    <string>/var/run/resolv.conf</string>
+    <string>/Library/Preferences/SystemConfiguration/NetworkInterfaces.plist</string>
+  </array>
+
+  <!-- The backstop: wake from sleep, and a Mac that joins the network before
+       the NAS has finished booting. -->
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <!-- mount-nas prints nothing while nothing is wrong, so a line in here is
+       always worth reading. -->
+  <key>StandardErrorPath</key>
+  <string>{{ .chezmoi.homeDir }}/.local/state/mount-nas.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
