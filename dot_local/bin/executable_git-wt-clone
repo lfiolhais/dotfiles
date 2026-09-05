@@ -13,17 +13,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib" / "python"
 from gitwt import BARE_DIR, GitWtError, Repo, Worktree
 
 
-def clone(url: str) -> Path:
+def clone(url: str, directory: str | None = None) -> Path:
     """Build the layout for ``url`` under the current directory.
 
     Args:
         url: The ssh or https clone URL.
+        directory: Where to build the layout, relative to the current directory
+            unless absolute. Defaults to the repository's own name.
 
     Returns:
         The path of the worktree holding the default branch.
 
+    Raises:
+        GitWtError: If ``directory`` is given but is blank.
+
     """
-    repo = Repo.create(url, Path.cwd() / Repo.repo_name(url))
+    if directory is None:
+        dest = Path(Repo.repo_name(url))
+    elif not directory.strip():
+        msg = "the destination directory cannot be blank"
+        raise GitWtError(msg)
+    else:
+        dest = Path(directory)
+
+    repo = Repo.create(url, Path.cwd() / dest)
     worktree = Worktree.add_worktree(repo, repo.default_branch())
 
     print(f"{repo.root}", file=sys.stderr)
@@ -43,13 +56,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         prog="git-wt-clone",
         description="Clone a repository into a bare clone plus per-ref worktrees.",
-        epilog="example: git-wt-clone git@github.com:user/repo.git",
+        epilog="example: git-wt-clone git@github.com:user/repo.git myfolder",
     )
     parser.add_argument("url", help="ssh or https clone URL")
+    parser.add_argument(
+        "directory",
+        nargs="?",
+        help="destination folder (default: the repository name)",
+    )
     args = parser.parse_args()
 
     try:
-        path = clone(args.url)
+        path = clone(args.url, args.directory)
     except GitWtError as exc:
         print(f"git-wt-clone: {exc}", file=sys.stderr)
         return 1
