@@ -120,8 +120,8 @@ class Share:
             timeout: Seconds to wait for the connection.
 
         Returns:
-            True if the port accepted a connection. A name that no longer
-            resolves raises ``socket.gaierror``, itself an ``OSError``, so being
+            True if the port accepted a connection. A name that does not
+            resolve raises ``socket.gaierror``, itself an ``OSError``, so being
             away from the network is answered the same way as a refused port.
 
         """
@@ -242,12 +242,14 @@ def mount(share: Share, *, dry_run: bool = False) -> Outcome:
 
 
 def unmount(share: Share, path: str, *, dry_run: bool = False) -> Outcome:
-    """Unmount a share whose server has stopped answering.
+    """Unmount a share, forcibly.
 
-    The unmount is forced. It only runs once the server is gone, so an open file
-    could not be written back whatever happened, and leaving the mount in place
-    is what produces the interrupted-connection alerts. ``diskutil`` is the
-    fallback because it also tells Finder the volume went away.
+    ``sync()`` reaches here only for a share whose server has stopped answering,
+    where an open file could not be written back whatever happened and leaving
+    the mount in place is what produces the interrupted-connection alerts. The
+    ``unmount`` command calls it directly, so it will also force a live share
+    down, discarding unwritten data. ``diskutil`` is the fallback because it also
+    tells Finder the volume went away.
 
     Args:
         share: The share being unmounted.

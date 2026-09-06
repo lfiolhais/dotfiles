@@ -1,50 +1,71 @@
 #!/usr/bin/env bash
-# Whitespace control matters here. Each conditional trims only the newline
-# *before* it and keeps the one after, so every echo stays on its own line;
-# trimming on both sides swallows the separator and runs the echoes together
-# into one unreadable line.
-echo "Follow these instructions to setup email."
+# Prints the mail steps that cannot be automated, and changes nothing. Whitespace
+# control matters: each conditional trims only the newline *before* it and keeps
+# the one after, so every echo stays on its own line. Trimming both sides
+# swallows the separator and runs the echoes together into one unreadable line.
+#
+# This is run_once_, so it prints during the first apply and not again. Re-read it
+# at any time with:
+#     chezmoi execute-template < run_once_after_install-06-setup-mail.sh.tmpl
+echo "Mail needs some setup by hand. Until it is done, mbsync has no"
+echo "credentials and fetches nothing."
+echo
+echo "Re-read these steps at any time with:"
+echo "  chezmoi execute-template < run_once_after_install-06-setup-mail.sh.tmpl"
 echo
 {{- if eq .chezmoi.os "linux" }}
-echo "Linux uses gpg and pass to store your credentials."
-echo "Before setting up pass you need to have a gpg key."
+echo "A gpg key, which is what pass encrypts the passwords to."
 echo
-echo "Create GPG key:"
-echo "* gpg --full-gen-key"
+echo "  gpg --full-gen-key"
+echo "  gpg --list-secret-keys --keyid-format=long    # the fingerprint, for below"
 echo
-echo "WARNING: You will have to disable AEAD in the key. It's not supported by the GnuPG standard."
-echo "More info at https://wiki.archlinux.org/title/GnuPG#Disable_unsupported_AEAD_mechanism"
-echo "Run: gpg --expert --edit-key FINGERPRINT"
-echo "Inside the gpg shell run: setpref AES256 AES192 AES SHA512 SHA384 SHA256 SHA224 ZLIB BZIP2 ZIP"
+echo "Set the key's preferences so pass can read it back. GnuPG before 2.4"
+echo "and most pass frontends cannot decrypt AEAD/OCB, and the failure looks"
+echo "like a corrupt store rather than an unsupported algorithm:"
 echo
-echo "Create pass store:"
-echo "* pass init gpg-id_or_email"
-{{- end }}
+echo "  gpg --expert --edit-key FINGERPRINT"
+echo "    setpref AES256 AES192 AES SHA512 SHA384 SHA256 SHA224 ZLIB BZIP2 ZIP"
+echo "    save"
 echo
-{{- if eq .chezmoi.os "darwin" }}
-echo "Update Keychain with IMAP and SMTP passwords:"
+echo "'save' is what writes the change and leaves the gpg shell. Quitting"
+echo "without it discards the preferences and the key looks unchanged."
+echo
+echo "  pass init FINGERPRINT"
+echo
+echo "The IMAP and SMTP passwords, in pass:"
+echo
+echo "  pass insert email/mbsync"
+echo "  pass insert email/smtp"
 {{- else }}
-echo "Store the IMAP and SMTP passwords in pass:"
+echo "The IMAP and SMTP passwords, in the login Keychain. The account and"
+echo "server to use are the ones the configs already name:"
+echo
+echo "  grep -iE 'user|host' ~/.config/isyncrc ~/.config/msmtp/config"
+echo
+echo "  Then, once per password. -w goes last with no value so security prompts"
+echo "  rather than taking the password from the command line, where it would"
+echo "  reach ps and the shell history:"
+echo
+echo "  security add-internet-password -r imap -s HOST -a USER \\"
+echo "    -T /opt/homebrew/bin/mbsync -U -w"
+echo "  security add-internet-password -r smtp -s HOST -a USER \\"
+echo "    -T /opt/homebrew/bin/msmtp -U -w"
 {{- end }}
 echo
-echo "mbsync:"
-{{- if eq .chezmoi.os "darwin" }}
-echo "* security add-internet-password -r imap -s Host -a User -w password -T /opt/homebrew/bin/mbsync"
-{{- else if eq .chezmoi.os "linux" }}
-echo "* pass insert email/mbsync"
-{{- end }}
-echo "msmtp:"
-{{- if eq .chezmoi.os "darwin" }}
-echo "* security add-internet-password -r smtp -s Host -a User -w password -T /opt/homebrew/bin/msmtp"
-{{- else if eq .chezmoi.os "linux" }}
-echo "* pass insert email/smtp"
-{{- end }}
+echo "Proton Mail Bridge's TLS certificates, which mbsync and msmtp verify the"
+echo "local Bridge against. Export them from the Bridge:"
 echo
+echo "  Settings -> Advanced -> Export TLS Certificates"
 echo
-echo "Export Proton Mail Bridge SSL Certificates"
-echo "Open ProtonMail Bridge"
-echo "Settings->Advanced->Export TLS Certificates"
-echo "Store them in ~/.config"
+echo "Save them where the configs expect. Both are encrypted in the source"
+echo "directory, so read the deployed copies for the paths they name:"
 echo
+echo "  grep -i cert ~/.config/isyncrc ~/.config/msmtp/config"
 echo
-echo "After setting up all passwords. Run: mbsync -a && notmuch new"
+echo "Then sync. The first run downloads every message and takes a while:"
+echo
+echo "  mbsync -a && notmuch new"
+echo
+echo "mbsync prints a progress line per mailbox and notmuch ends with a count of"
+echo "the messages it added. An authentication failure names the mailbox it"
+echo "could not open, which is the account whose password is wrong or missing."

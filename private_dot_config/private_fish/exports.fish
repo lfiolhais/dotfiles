@@ -31,6 +31,9 @@ set -gx EDITOR nvim
 set -gx PYTHONIOENCODING UTF-8
 
 # Highlight section titles in manual pages.
+# $yellow is not set anywhere, so this exports an empty string and man pages
+# are not highlighted. A real value is an escape sequence, e.g.
+# (set_color -o yellow | string collect).
 set -gx LESS_TERMCAP_md $yellow
 
 # Use bat
@@ -48,5 +51,6 @@ set -gx XDG_CONFIG_HOME $HOME/.config
 set -gx XDG_CACHE_HOME $HOME/.cache
 set -gx XDG_STATE_HOME $HOME/.local/state
 
-# Disbale Homebrew Auto Update
+# Homebrew updates itself implicitly on every install, which makes an install
+# unpredictably slow. The `update` function runs `brew update` explicitly.
 set -gx HOMEBREW_NO_AUTO_UPDATE 1

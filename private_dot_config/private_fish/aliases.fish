@@ -6,12 +6,14 @@ alias .....="cd ../../../.."
 # Shortcuts
 alias d="cd ~/Downloads"
 alias p="cd ~/Projects"
+# macOS path; this file also deploys to Linux, where the alias simply fails.
 alias icloud="cd /Users/lipe/Library/Mobile\ Documents/com\~apple\~CloudDocs/"
 
-# Rust replacements
+# Rust replacements. These shadow the POSIX tools everywhere, scripts included,
+# and none of the three is argument-compatible with what it replaces: `find .
+# -name '*.tmp' -delete` fails under fd. `command grep` reaches the real one.
 alias grep="rg"
 alias find="fd"
-# alias cat="bat"
 alias ls="eza"
 
 # List all files colorized in long format
@@ -21,9 +23,6 @@ alias ll=l
 # List all files colorized in long format, including dot files
 alias la="eza -la"
 
-# List only directories
-#alias lsd="exa -l | grep --color=never '^d'"
-
 # Nvim everywhere
 alias vi="nvim"
 alias vim="nvim"
@@ -32,10 +31,15 @@ alias vim="nvim"
 alias c="cargo"
 alias clippy="cargo clippy"
 
-# Zip. Always exclude .git folders when zipping
+# Exclude .git when zipping. `-x` takes every following non-option argument as
+# a pattern, so `zip out.zip dir` becomes `zip -x '*.git*' out.zip dir` and zip
+# finds nothing to do. It works only when the next argument is another flag.
 alias zip="zip -x '*.git*'"
 
-# Git aliases/abbreviations
+# Git abbreviations. The guard is a universal variable, so this block runs once
+# per machine ever: an abbreviation added below will not appear on a machine that
+# has already run it. `set -e git_abbr_initialized` in a shell, then restart it,
+# is what picks up a change here.
 if not set -q git_abbr_initialized
     set -U git_abbr_initialized
     abbr -a gco git checkout

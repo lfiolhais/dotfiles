@@ -40,6 +40,7 @@ class Repo:
             GitWtError: If no usable name can be derived.
 
         """
+        # Split on ":" as well as "/" so scp-style git@host:owner/repo.git works.
         tail = re.split(r"[/:]", url.rstrip("/"))[-1]
         name = tail.removesuffix(".git")
         if not name or name in {".", ".."}:
@@ -164,6 +165,10 @@ class Repo:
             The branch name, for example ``main``.
 
         """
+        # origin/HEAD only exists once `remote set-head` has run. _build does that
+        # on every clone made here, but a bare repository created another way, or
+        # one whose remote was empty at clone time, has no such ref -- fall back to
+        # whatever HEAD points at locally.
         try:
             head = self.git("rev-parse", "--abbrev-ref", f"{REMOTE}/HEAD")
         except GitWtError:

@@ -1,7 +1,18 @@
 #!/bin/sh
+# Unlocks the age key every other encrypted file in this repo is encrypted to.
+# `--passphrase` prompts, so this is the one interactive step of the bootstrap
+# and it blocks until answered. The passphrase is not in this repository.
+#
+# The guard tests only that the file exists, so a truncated or wrong key is
+# accepted silently and every encrypted file then fails to render instead. The
+# fix is to delete ~/.config/chezmoi/key.txt and apply again.
+#
+# run_onchange_ rather than run_once_: editing this script re-runs it, and it
+# then does nothing on a machine whose key is already in place.
 
 if [ ! -f "${HOME}/.config/chezmoi/key.txt" ]; then
     mkdir -p "${HOME}/.config/chezmoi"
     chezmoi age decrypt --output "${HOME}/.config/chezmoi/key.txt" --passphrase "{{ .chezmoi.sourceDir }}/key.txt.age"
+    # Written under the inherited umask first, so tighten it immediately.
     chmod 600 "${HOME}/.config/chezmoi/key.txt"
 fi

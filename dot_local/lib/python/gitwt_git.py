@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+
+# No timeout is set on git itself, unlike chezpkg_run: a clone or fetch of a large
+# repository legitimately outlasts any cap short enough to be useful, and killing
+# one halfway leaves a partial object store behind.
 from pathlib import Path
 
 # The bare clone lives here, and every worktree is created beside it.

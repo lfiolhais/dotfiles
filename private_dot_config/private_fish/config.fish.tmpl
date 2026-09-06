@@ -1,14 +1,17 @@
 {{ if eq .chezmoi.os "linux" -}}
-# Debian/Ubuntu rename the bat and fd to batcat and fdfind. I want to use the
-# actual names. The install script creates a symlink to .local/bin with the
-# proper names.
+# Debian and Ubuntu ship bat and fd as batcat and fdfind, so the 01 bootstrap
+# script (run_once_after_install-01-install-packages-linux.sh.tmpl) symlinks them
+# under their real names into ~/.local/bin, which this adds to PATH. macOS gets
+# the same directory from fish_user_paths in exports.fish instead.
 fish_add_path $HOME/.local/bin
 {{ end -}}
 {{ if and (eq .chezmoi.os "linux") (not .sudo) -}}
 # no-sudo Linux only: activate mise so its toolchain is on PATH.
 mise activate fish | source
 {{ end -}}
-# Setup fzf
+# Installs fzf's Ctrl-T, Ctrl-R and Alt-C bindings. Order matters: setting
+# fish_key_bindings below re-runs the binding functions, so fzf has to be
+# sourced first for functions/fish_user_key_bindings.fish to find its bindings.
 fzf --fish | source
 
 source $HOME/.config/fish/exports.fish
@@ -16,6 +19,9 @@ source $HOME/.config/fish/aliases.fish
 source $HOME/.config/fish/greet.fish
 
 {{ if eq .chezmoi.os "darwin" -}}
+# Loads the commit-signing key from the Keychain (gitconfig sets gpgsign with
+# format=ssh). Silent on purpose so a new shell prints nothing; a missing or
+# locked key therefore surfaces later, as a commit that will not sign.
 ssh-add -q --apple-use-keychain ~/.ssh/gh_sign &> /dev/null
 {{ end -}}
 

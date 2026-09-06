@@ -10,9 +10,9 @@ silent by design, because the alternative to silence is a dialog.
 One thing has to be done by hand, once per machine, and until it is done the
 agent mounts nothing -- the password goes in the login Keychain::
 
-    security add-internet-password -r "smb " -s nas.botasal.xyz -a lfiolhais \\
-      -D "Network Password" \\
-      -T /System/Library/CoreServices/NetAuthAgent.app/Contents/MacOS/NetAuthAgent \\
+    security add-internet-password -r "smb " -s nas.botasal.xyz -a lfiolhais \
+      -D "Network Password" \
+      -T /System/Library/CoreServices/NetAuthAgent.app/Contents/MacOS/NetAuthAgent \
       -U -w
 
 ``-w`` last so it prompts rather than reaching ``ps``; ``-T`` names NetAuthAgent

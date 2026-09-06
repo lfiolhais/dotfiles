@@ -41,6 +41,12 @@ function update --description "Update every package on this machine, whatever in
         __update_step "homebrew cleanup" brew cleanup --prune=all
     end
 
+    # Most casks ship the vendor's own updater, which would replace the app
+    # behind the upgrade above and leave the Caskroom describing a version that
+    # is no longer installed. This silences the ones that can be silenced, and
+    # catches any cask installed since the last run.
+    command --query cask-updates; and __update_step "app self-updaters" cask-updates disable
+
     # mas has no "check first" mode; upgrading nothing is a no-op.
     command --query mas; and __update_step "mac app store" mas upgrade
 {{ else if .sudo }}
@@ -72,7 +78,7 @@ function update --description "Update every package on this machine, whatever in
     command --query rustup; and __update_step "rust toolchain" rustup update
 
     # Tools installed by `uv` rather than by a package manager -- on macOS the
-    # Brewfile's `uv "…"` entries, and nothing on Linux unless you added some.
+    # Brewfile's `uv "…"` entries, and nothing on Linux unless some were added.
     command --query uv; and __update_step "uv tools" uv tool upgrade --all
 
     # mise is the package manager on the no-sudo profile, and elsewhere carries

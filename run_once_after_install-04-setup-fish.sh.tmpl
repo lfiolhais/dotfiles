@@ -1,26 +1,24 @@
 #!/usr/bin/env bash
 set -eu
 
-has_fish=$(grep -c fish < /etc/shells)
-
 {{ if eq .chezmoi.os "darwin" -}}
 eval "$(/opt/homebrew/bin/brew shellenv)"
 
-if [ -z "${has_fish}" ]; then
-    which fish | sudo tee -a /etc/shells
+if ! grep -qxF "$(command -v fish)" /etc/shells; then
+    command -v fish | sudo tee -a /etc/shells
 fi
 
 chsh -s "$(which fish)"
 {{- else if eq .chezmoi.os "linux" -}}
 {{ if .sudo -}}
-# Use sudo only when we are not already root (test containers run as root).
+# Use sudo only when not already root (test containers run as root).
 SUDO=()
 if [ "$(id -u)" -ne 0 ]; then
     SUDO=(sudo)
 fi
 
-if [ -z "${has_fish}" ]; then
-    which fish | "${SUDO[@]}" tee -a /etc/shells
+if ! grep -qxF "$(command -v fish)" /etc/shells; then
+    command -v fish | sudo tee -a /etc/shells
 fi
 
 chsh -s "$(which fish)"

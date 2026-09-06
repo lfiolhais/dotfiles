@@ -9,10 +9,10 @@
 #
 # The package names come from .chezmoidata/packages.toml, which maps every
 # Brewfile formula onto its per-distro equivalent. Edit the manifest with
-# tests/packages.py, not this list; tests/check.py fails if the two drift apart.
+# `chezmoi-packages`, not this list; tests/check.py fails if the two drift apart.
 set -eu
 {{ if .sudo }}
-# Use sudo only when we are not already root (test containers run as root).
+# Use sudo only when not already root (test containers run as root).
 SUDO=()
 if [ "$(id -u)" -ne 0 ]; then
     SUDO=(sudo)

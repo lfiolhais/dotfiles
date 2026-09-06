@@ -12,7 +12,11 @@ if TYPE_CHECKING:
 
 
 class RefKind(Enum):
-    """Handle different Git references."""
+    """What a ref names, which decides how the worktree is created.
+
+    A branch that exists on origin is tracked, a tag or commit is checked out
+    detached, and a name that matches nothing becomes a new branch.
+    """
 
     LOCAL_BRANCH = "branch"
     REMOTE_BRANCH = "remote branch"

@@ -1,23 +1,31 @@
 {{- if eq .chezmoi.os "darwin" -}}
 #!/usr/bin/env bash
 
-# ~/.macos — https://mths.be/macos
+# macOS defaults, adapted from https://mths.be/macos and since diverged: check a
+# setting here rather than upstream. Nothing sets -e, so a write that fails is
+# skipped and the rest still run; the script always reports success.
+#
+# A settings pane that is open when a key changes writes its own value back on
+# close. Quitting it first is what stops that. The app is System Settings on
+# Ventura and later, so this only matters on older releases, where it is called
+# System Preferences; the error it prints otherwise is harmless.
+osascript -e 'tell application "System Preferences" to quit' 2>/dev/null || true
 
-# Close any open System Preferences panes, to prevent them from overriding
-# settings we’re about to change
-osascript -e 'tell application "System Preferences" to quit'
-
-# Ask for the administrator password upfront
+# Five of the writes below need root. Asking once here means the password is
+# requested at the start rather than partway through an unattended run.
 sudo -v
 
-# Keep-alive: update existing `sudo` time stamp until `.macos` has finished
+# Refresh the sudo timestamp every 60s so it does not expire mid-run. `kill -0`
+# tests whether this script is still alive and ends the loop when it is not, so
+# no background job is left holding a credential. Errors go nowhere because the
+# loop's last iteration always races the exit.
 while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
 
 ###############################################################################
 # General UI/UX                                                               #
 ###############################################################################
 
-# Disable transparency in the menu bar and elsewhere on Yosemite
+# Disable transparency in the menu bar and elsewhere
 defaults write com.apple.universalaccess reduceTransparency -bool true
 
 # Always show scrollbars
@@ -44,11 +52,12 @@ defaults write NSGlobalDomain PMPrintingExpandedStateForPrint2 -bool true
 # Automatically quit printer app once the print jobs complete
 defaults write com.apple.print.PrintingPrefs "Quit When Finished" -bool true
 
-# Remove duplicates in the “Open With” menu (also see `lscleanup` alias)
+# Rebuild the LaunchServices database, which is what removes duplicates from
+# the “Open With” menu. lsregister is not on PATH, and this is the longest
+# step in the script: several minutes, printing nothing.
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -kill -r -domain local -domain system -domain user
 
 # Display ASCII control characters using caret notation in standard text views
-# Try e.g. `cd /tmp; unidecode "\x{0000}" > cc.txt; open -e cc.txt`
 defaults write NSGlobalDomain NSTextShowsControlCharacters -bool true
 
 # Disable automatic capitalization as it’s annoying when typing code
@@ -81,7 +90,7 @@ defaults write com.apple.driver.AppleBluetoothMultitouch.trackpad TrackpadRightC
 defaults -currentHost write NSGlobalDomain com.apple.trackpad.trackpadCornerClickBehavior -int 1
 defaults -currentHost write NSGlobalDomain com.apple.trackpad.enableSecondaryClick -bool true
 
-# Disable “natural” (Lion-style) scrolling
+# Disable “natural” scrolling: the trackpad moves the content, not the view
 defaults write NSGlobalDomain com.apple.swipescrolldirection -bool false
 
 # Increase sound quality for Bluetooth headphones/headsets
@@ -90,7 +99,9 @@ defaults write com.apple.BluetoothAudioAgent "Apple Bitpool Min (editable)" -int
 # Disable press-and-hold for keys in favor of key repeat
 defaults write NSGlobalDomain ApplePressAndHoldEnabled -bool false
 
-# Set a blazingly fast keyboard repeat rate
+# Keyboard repeat, in 15 ms ticks: 15 ms between repeats after a 150 ms delay.
+# Both are faster than the Keyboard pane's sliders can express, so it shows them
+# pinned to the end and rewrites these keys if either slider is touched.
 defaults write NSGlobalDomain KeyRepeat -int 1
 defaults write NSGlobalDomain InitialKeyRepeat -int 10
 
@@ -110,6 +121,7 @@ sudo pmset -a displaysleep 15
 
 # Require password immediately after sleep or screen saver begins
 defaults write com.apple.screensaver askForPassword -int 1
+# Seconds of grace before the password is demanded. 0 is immediate.
 defaults write com.apple.screensaver askForPasswordDelay -int 0
 
 # Save screenshots in PNG format (other options: BMP, GIF, JPG, PDF, TIFF)
@@ -118,11 +130,12 @@ defaults write com.apple.screencapture type -string "png"
 # Disable shadow in screenshots
 defaults write com.apple.screencapture disable-shadow -bool true
 
-# Enable subpixel font rendering on non-Apple LCDs
-# Reference: https://github.com/kevinSuttle/macOS-Defaults/issues/17#issuecomment-266633501
+# Font smoothing strength, 0-3. macOS dropped subpixel antialiasing, so this now
+# only controls how heavily text is stroked; 1 is the lightest smoothing.
 defaults write NSGlobalDomain AppleFontSmoothing -int 1
 
-# Enable HiDPI display modes (requires restart)
+# Enable HiDPI display modes. This is a system-wide domain rather than a user
+# one, which is why it needs sudo, and the window server only reads it at boot.
 sudo defaults write /Library/Preferences/com.apple.windowserver DisplayResolutionEnabled -bool true
 
 ###############################################################################
@@ -132,10 +145,10 @@ sudo defaults write /Library/Preferences/com.apple.windowserver DisplayResolutio
 # Finder: disable window animations and Get Info animations
 defaults write com.apple.finder DisableAllAnimations -bool true
 
-# Set Home as the default location for new Finder windows
-# For other paths, use `PfLo` and `file:///full/path/here/`
-defaults write com.apple.finder NewWindowTarget -string "PfDe"
-defaults write com.apple.finder NewWindowTargetPath -string "file://${HOME}"
+# Open new Finder windows on the Home. The codes are PfDe (Desktop), PfHm
+# (Home), PfDo (Documents) and PfLo (a path). NewWindowTargetPath below is read
+# only when the target is PfLo, so it has no effect as written.
+defaults write com.apple.finder NewWindowTarget -string "PfHm"
 
 # Show icons for hard drives, servers, and removable media on the desktop
 defaults write com.apple.finder ShowExternalHardDrivesOnDesktop -bool true
@@ -181,11 +194,15 @@ defaults write com.apple.finder FXPreferredViewStyle -string "Nlsv"
 # Disable the warning before emptying the Trash
 defaults write com.apple.finder WarnOnEmptyTrash -bool false
 
-# Enable AirDrop over Ethernet and on unsupported Macs running Lion
+# Enable AirDrop over Ethernet, and on Macs whose Wi-Fi hardware it skips
 defaults write com.apple.NetworkBrowser BrowseAllInterfaces -bool true
 
-# Show the ~/Library folder
-chflags nohidden ~/Library && xattr -d com.apple.FinderInfo ~/Library
+# Show the ~/Library folder. The Finder hides it two ways: the hidden flag, and
+# an extended attribute that older systems set. Deleting an attribute that is
+# not there prints "No such xattr" and exits non-zero -- the ordinary case, not
+# a failure, so it is swallowed rather than left to look like one.
+chflags nohidden ~/Library
+xattr -d com.apple.FinderInfo ~/Library 2>/dev/null || true
 
 # Show the /Volumes folder
 sudo chflags nohidden /Volumes
@@ -198,14 +215,14 @@ defaults write com.apple.finder FXInfoPanesExpanded -dict \
 	Privileges -bool true
 
 ###############################################################################
-# Dock, Dashboard, and hot corners                                            #
+# Dock, Spaces, and hot corners                                               #
 ###############################################################################
 
 # Enable highlight hover effect for the grid view of a stack (Dock)
 defaults write com.apple.dock mouse-over-hilite-stack -bool true
 
 # Change minimize/maximize window effect
-defaults write com.apple.dock mineffect -string "scale"
+defaults write com.apple.dock mineffect -string "scale"  # or "genie", "suck"
 
 # Enable spring loading for all Dock items
 defaults write com.apple.dock enable-spring-load-actions-on-all-items -bool true
@@ -223,8 +240,8 @@ defaults write com.apple.dock launchanim -bool false
 # (i.e. use the old Exposé behavior instead)
 defaults write com.apple.dock expose-group-by-app -bool false
 
-# Disable "Automatically rearrange spaces"
-defaults write com.apple.dock workspaces-auto-swoosh -bool NO
+# When switching to an app, do not also switch to the Space holding its windows
+defaults write com.apple.dock workspaces-auto-swoosh -bool false
 
 # Disable windows opening animations
 defaults write -g NSAutomaticWindowAnimationsEnabled -bool false
@@ -232,13 +249,8 @@ defaults write -g NSAutomaticWindowAnimationsEnabled -bool false
 # Disable "Displays have separate Spaces"
 defaults write com.apple.spaces spans-displays -bool true
 
-# Disable Dashboard
-defaults write com.apple.dashboard mcx-disabled -bool true
-
-# Don’t show Dashboard as a Space
-defaults write com.apple.dock dashboard-in-overlay -bool true
-
-# Don’t automatically rearrange Spaces based on most recent use
+# Do not reorder Spaces by most recent use -- the Mission Control checkbox
+# labelled "Automatically rearrange Spaces based on most recent use"
 defaults write com.apple.dock mru-spaces -bool false
 
 # Automatically hide and show the Dock
@@ -250,7 +262,11 @@ defaults write com.apple.dock showhidden -bool true
 # Don’t show recent applications in Dock
 defaults write com.apple.dock show-recents -bool false
 
-# Disable all hot corners
+# Disable all hot corners. 0 is no action; the others are 2 Mission Control,
+# 3 Application Windows, 4 Desktop, 5 Start Screen Saver, 6 Disable Screen
+# Saver, 7 Dashboard, 10 Put Display to Sleep, 11 Launchpad, 12 Notification
+# Centre, 13 Lock Screen. Each corner also has a wvous-*-modifier key, left
+# unset here because no corner does anything.
 defaults write com.apple.dock wvous-bl-corner -int 0
 defaults write com.apple.dock wvous-tr-corner -int 0
 defaults write com.apple.dock wvous-tl-corner -int 0
@@ -308,12 +324,6 @@ defaults write com.apple.Safari com.apple.Safari.ContentPageGroupIdentifier.WebK
 defaults write com.apple.Safari WebKitJavaScriptCanOpenWindowsAutomatically -bool false
 defaults write com.apple.Safari com.apple.Safari.ContentPageGroupIdentifier.WebKit2JavaScriptCanOpenWindowsAutomatically -bool false
 
-# Disable auto-playing video
-#defaults write com.apple.Safari WebKitMediaPlaybackAllowsInline -bool false
-#defaults write com.apple.SafariTechnologyPreview WebKitMediaPlaybackAllowsInline -bool false
-#defaults write com.apple.Safari com.apple.Safari.ContentPageGroupIdentifier.WebKit2AllowsInlineMediaPlayback -bool false
-#defaults write com.apple.SafariTechnologyPreview com.apple.Safari.ContentPageGroupIdentifier.WebKit2AllowsInlineMediaPlayback -bool false
-
 # Enable “Do Not Track”
 defaults write com.apple.Safari SendDoNotTrackHTTPHeader -bool true
 
@@ -352,7 +362,7 @@ defaults write com.apple.ActivityMonitor SortColumn -string "CPUUsage"
 defaults write com.apple.ActivityMonitor SortDirection -int 0
 
 ###############################################################################
-# Address Book, Dashboard, iCal, TextEdit, and Disk Utility                   #
+# TextEdit, Disk Utility, and QuickTime Player                                #
 ###############################################################################
 
 # Use plain text mode for new TextEdit documents
@@ -381,10 +391,10 @@ defaults write com.apple.SoftwareUpdate ScheduleFrequency -int 1
 # Download newly available updates in background
 defaults write com.apple.SoftwareUpdate AutomaticDownload -int 1
 
-# Install System data files & security updates
+# Install security updates (XProtect, MRT) without asking
 defaults write com.apple.SoftwareUpdate CriticalUpdateInstall -int 1
 
-# Automatically download apps purchased on other Macs
+# Install system data files, which is what delivers those definitions
 defaults write com.apple.SoftwareUpdate ConfigDataInstall -int 1
 
 # Turn on app auto-update
@@ -418,5 +428,12 @@ for app in "Activity Monitor" \
 	"iCal"; do
 	killall "${app}" &> /dev/null
 done
-echo "Done. Note that some of these changes require a logout/restart to take effect."
+echo "Done."
+echo
+echo "These need a logout before they apply:"
+echo "  tap to click at the login window, and the Dock and Finder changes above"
+echo "  that killall could not reach because the app was not running."
+echo "These need a restart:"
+echo "  HiDPI display modes (com.apple.windowserver DisplayResolutionEnabled)"
+echo "  separate Spaces per display (com.apple.spaces spans-displays)"
 {{ end -}}

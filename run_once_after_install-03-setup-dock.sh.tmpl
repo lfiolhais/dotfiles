@@ -1,6 +1,11 @@
 {{- if eq .chezmoi.os "darwin" -}}
 #!/usr/bin/env bash
+# Appends to the Dock rather than replacing it: there is no `dockutil --remove
+# all` here, so Apple's defaults stay and these six land after them. Editing this
+# script re-runs it (the run_once_ hash changes), which appends them again.
 
+# dockutil comes from the Brewfile, and this runs before any shell has loaded
+# Homebrew's environment. Apple Silicon prefix; an Intel Mac uses /usr/local.
 eval "$(/opt/homebrew/bin/brew shellenv)"
 
 dockutil --add /System/Applications/Mail.app
@@ -10,7 +15,9 @@ dockutil --add /Applications/Ghostty.app --after 'Tapestry'
 dockutil --add /System/Applications/Notes.app --after 'Ghostty'
 dockutil --add /System/Applications/Music.app --after 'Notes'
 
-# This echo mainly exists so that the script doesn't return a failure status
+# `dockutil --add` exits non-zero when the item is already in the Dock, which is
+# the ordinary case on a re-run. This echo is the last command, so the script
+# still reports success -- at the cost of hiding a genuine dockutil failure.
 echo "Completed Dock setup"
 
 {{ end -}}

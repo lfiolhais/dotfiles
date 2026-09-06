@@ -1,16 +1,29 @@
 {{- if eq .chezmoi.os "darwin" -}}
 #!/bin/bash
+# Homebrew is what installs everything else on macOS. There is no `set -e`: a
+# failure inside `brew bundle` leaves the rest of the bundle to run, but chezmoi
+# still records this run_once_ script as done, so a partial install is not
+# retried. `chezmoi state delete-bucket --bucket=scriptState` is what re-runs it.
 
 if ! command -v brew > /dev/null 2>&1; then
     /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
+    # The installer does not put brew on this shell's PATH. Apple Silicon
+    # prefix; an Intel Mac installs to /usr/local instead.
     eval "$(/opt/homebrew/bin/brew shellenv)"
 fi
 
+# Formulae, casks, Mac App Store apps and uv tools, all from one file. `mas`
+# entries need the App Store already signed in and fail one by one otherwise.
 brew bundle --file=~/.config/Brewfile
 
+# The Brewfile installs the `rustup` formula, which provides rustup-init; that
+# is what lays down the toolchain and puts rustup itself on PATH. The guard
+# tests for rustup rather than rustup-init, so this is skipped once a toolchain
+# exists. rustup-init prompts unless given -y, so an unattended apply stops here
+# waiting on it, and rustup is not on this shell's PATH afterwards, so the line
+# below reports "command not found" and -- with no set -e -- is ignored.
 if ! command -v rustup > /dev/null 2>&1; then
-    rustup-init
-    rustup install stable
+    rustup-init -y
 fi
 {{ end -}}

@@ -3,7 +3,13 @@ function __print_help_khard_rm
     echo -e "\t-h | --help        => Prints this message"
     echo -e "\t-a | --addressbook => Address book to delete from. Defaults to 'work'"
     echo -e "\t-n | --dry-run     => List the selected contacts and stop, deleting nothing"
-    echo -e "\t-N | --no-forget   => Delete the contacts but leave the chezmoi source state alone"
+    echo -e "\t-N | --no-forget   => Delete the contacts but leave the chezmoi source state alone."
+    echo -e "\t                      The source directory is exact_, so the next 'chezmoi"
+    echo -e "\t                      apply' restores every contact deleted this way."
+    echo
+    echo -e "\tDeletes the vcf under ~/.config/khard/work/default and drops its entry"
+    echo -e "\tfrom the chezmoi source. Recovering one afterwards means git history in"
+    echo -e "\t"(chezmoi source-path 2>/dev/null; or echo "the chezmoi source directory")"."
     echo
     echo -e "\tSelect with TAB in fzf, confirm with ENTER. Any trailing arguments are"
     echo -e "\tpassed to 'khard list' as search terms to narrow the picker."
@@ -81,7 +87,7 @@ function khard-rm --description "Delete several khard contacts at once and drop 
 
         # Resolve the uid to its vcf before deleting anything. This doubles as a
         # safety check: khard's remove takes free-text search terms, so if a
-        # "uid:" query ever stops meaning what we expect it would happily match
+        # "uid:" query means something other than one card, khard would happily match
         # -- and delete -- the wrong card. Anything but exactly one hit is a skip.
         set -l file (khard filename -a $abook "uid:$uid" 2>/dev/null)
         if test (count $file) -ne 1
@@ -132,9 +138,13 @@ function khard-rm --description "Delete several khard contacts at once and drop 
 
     echo
     echo "Next steps:"
-    echo "  chezmoi diff                      # review"
-    echo "  cd "(chezmoi source-path)"        # commit the deletions"
-    echo "  chezmoi update                    # on your other machines"
+    echo "  chezmoi diff"
+    echo "  cd "(chezmoi source-path)
+    echo "  git add -A && git commit -m 'khard: remove contacts' && git push"
+    echo
+    echo "On another machine: 'chezmoi apply' after pulling. 'chezmoi update'"
+    echo "pulls and applies in one step, and re-runs any bootstrap script whose"
+    echo "content changed with it."
 
     return $failed
 end

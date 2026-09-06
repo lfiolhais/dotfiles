@@ -18,7 +18,7 @@ How the argument is treated:
   refuses that. The first push sets the upstream to ``origin/<ref>`` instead,
   provided ``push.autoSetupRemote`` is on.
 
-The worktree path is printed on stdout, so ``cd (git wt-add <ref>)`` drops you
+The worktree path is printed on stdout, so ``cd (git wt-add <ref>)`` lands
 straight into it.
 """
 
