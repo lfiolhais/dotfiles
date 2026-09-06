@@ -1,8 +1,21 @@
 #!/usr/bin/env python3
 """Docker-based Linux validation.
 
-With ``--full`` it runs the real bootstrap in-container. Requires Docker.
-Usage::
+The default run renders and lints the source in a throwaway container for every
+distro in ``IMAGES`` crossed with sudo and no-sudo, and asks each distro's
+package manager whether every name the manifest targets at it resolves --
+installing nothing. That last check is what makes the one-transaction install in
+the 01 bootstrap script safe, and it is the reason to run this after editing
+packages.
+
+``--full`` additionally runs the real bootstrap in each container, installing the
+whole toolchain, TeX included: gigabytes, and a long wait. It also wants
+``GITHUB_TOKEN`` in the environment, because the no-sudo profile resolves most of
+mise's toolchain from GitHub releases and four no-sudo targets exhaust the
+unauthenticated rate limit.
+
+Requires Docker. Usage::
+
    python3 tests/linux.py
    python3 tests/linux.py --full
 """
@@ -17,14 +30,17 @@ from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
 
+# The distro matrix is shared with the chezmoi-packages command, so it lives in
+# the deployed library rather than being spelled out in both places.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "dot_local" / "lib" / "python"))
+
+from linux_distros import IMAGES
+
 REPO = Path(__file__).resolve().parent.parent
 ENTRYPOINT = "/src/tests/docker/entrypoint.sh"
-IMAGES = {
-    "ubuntu": "ubuntu:24.04",
-    "fedora": "fedora:41",
-    "rocky": "rockylinux:9",
-    "alma": "almalinux:9",
-}
+# Both profiles the dotfiles support: with sudo the distro package manager
+# installs the toolchain, without it mise does. Each is crossed with every
+# image, because the bootstrap takes a different path for each.
 SUDO_MODES = (True, False)
 
 
@@ -62,6 +78,7 @@ def run_target(target: Target, *, full: bool) -> bool:
         "run",
         "--rm",
         "-v",
+        # read-only: a --full bootstrap in the container must not write to the source
         f"{REPO}:/src:ro",
         "-e",
         f"SUDO={'true' if target.sudo else 'false'}",
@@ -90,7 +107,11 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--full", action="store_true", help="run the real bootstrap in-container")
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="also install the whole toolchain in each container (gigabytes; wants GITHUB_TOKEN)",
+    )
     args = parser.parse_args()
 
     probe = subprocess.run(["docker", "info"], capture_output=True, check=False)

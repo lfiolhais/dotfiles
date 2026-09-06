@@ -31,6 +31,7 @@ sh -c "$(curl -fsLS get.chezmoi.io)" -- -b /usr/local/bin
 # Throwaway chezmoi config: a fresh age key (real secrets stay excluded) plus the
 # sudo data flag under test. This bypasses .chezmoi.toml.tmpl's interactive prompt.
 mkdir -p "$HOME/.config/chezmoi"
+# age-keygen reports the public key on stderr as normal output, not an error.
 age-keygen -o "$HOME/.config/chezmoi/key.txt" 2> /dev/null
 recipient="$(age-keygen -y "$HOME/.config/chezmoi/key.txt")"
 cat > "$HOME/.config/chezmoi/chezmoi.toml" << EOF

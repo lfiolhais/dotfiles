@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """Safety harness for the chezmoi dotfiles.
 
-It confirms the source still renders and that shell scripts are sane, without
+It renders the source, lints the bootstrap scripts, checks the Brewfile against
+the Linux manifest, lints and imports this repo's Python under every interpreter
+on the host, runs the mount-nas unit tests, and prints a dry-run diff -- without
 touching ``$HOME`` and without running the ``run_*`` bootstrap scripts.
+
+Needs Python 3.11: ``enum.StrEnum`` below, and ``tomllib`` inside the manifest
+reader it imports. That is a higher floor than the 3.9 it holds the deployed
+libraries to, which is why it probes for other interpreters rather than assuming
+its own will do.
 
 Usage::
 
@@ -12,7 +19,6 @@ Usage::
 from __future__ import annotations
 
 import itertools
-import re
 import shutil
 import subprocess
 import sys
@@ -21,35 +27,48 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-# Sorted apart from the block above because ruff's isort targets Python 3.9 -- the
-# floor the deployed gitwt library must hold to -- and so files tomllib, new in
-# 3.11, as third-party. This harness itself already requires 3.11 for StrEnum.
-import tomllib
+# chezpkg is deployed rather than kept here, so it is not on sys.path. What the
+# two package files are, and what it means for them to agree, is described there
+# once -- by the command that maintains them -- rather than a second time here.
+# Importing it here is what sets this harness's 3.11 floor: the manifest reader
+# needs tomllib. `chezmoi-packages` reaches the same code through uv instead.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "dot_local" / "lib" / "python"))
+
+from chezpkg import TARGETS, Brewfile, Manifest
 
 REPO = Path(__file__).resolve().parent.parent
 BREWFILE = REPO / "private_dot_config" / "Brewfile"
 # Maps every Brewfile formula onto its per-distro Linux equivalent.
 MANIFEST = REPO / ".chezmoidata" / "packages.toml"
-# Where a [packages] entry can install a tool. An entry naming none of these
-# installs nowhere, which is a mistake unless it is `repo` (gh and starship, which
-# the 01 script installs from their own repository).
-TARGETS = frozenset({"apt", "fedora", "el", "mise"})
-# Every field a [packages] entry may carry, so a typo cannot go unnoticed.
-FIELDS = TARGETS | {"brew", "mise_exe", "repo", "note"}
+# The fields that mean "Linux installs this", for counting: a distro name, or
+# `repo` for gh and starship, which the 01 script installs from their own.
+LINUX = TARGETS | {"repo"}
 RUFF_CONFIG = REPO / "tests" / "pyproject.toml"
-# The gitwt library the two commands share. Globbed rather than listed, so
+# The libraries the deployed commands share. Globbed rather than listed, so
 # splitting a module in two cannot silently drop it out of the lint.
 LIB_PYTHON = REPO / "dot_local" / "lib" / "python"
-# The facade of each library there. Importing these is what catches an import
-# cycle or a construct too new for the oldest interpreter; ruff cannot see either.
-DEPLOYED_LIBRARIES = ("gitwt",)
+# The facade of each library that must import under the oldest interpreter on the
+# host. Importing these is what catches an import cycle or a construct too new
+# for 3.9; ruff cannot see either. `chezpkg` is deliberately absent: it needs
+# 3.11, which uv supplies to the command that uses it, so it is exercised by
+# CHEZMOI_PACKAGES below instead.
+DEPLOYED_LIBRARIES = ("caskupd", "gitwt", "linux_distros", "mountnas")
+# Runs under uv, which resolves its PEP 723 dependencies and supplies its own
+# interpreter -- so it is checked the way it really runs, not under each python3.
+CHEZMOI_PACKAGES = REPO / "dot_local" / "bin" / "executable_chezmoi-packages"
 DEPLOYED_ENTRY_POINTS = (
     REPO / "dot_local" / "bin" / "executable_git-wt-clone",
     REPO / "dot_local" / "bin" / "executable_git-wt-add",
+    REPO / "dot_local" / "bin" / "executable_cask-updates",
+    REPO / "dot_local" / "bin" / "executable_mount-nas",
 )
+# The one part of this repo with unit tests of its own: what mount-nas decides
+# is a table of outcomes, and most of them assert that no command was run --
+# being silent away from home is the behaviour, so it is what has to be tested.
+MOUNTNAS_TESTS = REPO / "tests" / "mountnas.py"
 # Deployed Python that ruff would not otherwise find: it lives outside tests/,
 # and the entry points have no .py extension because they are commands.
-DEPLOYED_PYTHON = (*sorted(LIB_PYTHON.glob("*.py")), *DEPLOYED_ENTRY_POINTS)
+DEPLOYED_PYTHON = (*sorted(LIB_PYTHON.glob("*.py")), *DEPLOYED_ENTRY_POINTS, CHEZMOI_PACKAGES)
 # Target paths that must never be deployed (kept out via .chezmoiignore).
 MUST_NOT_DEPLOY = ("CLAUDE.md", "LICENSE", "key.txt.age", "tests")
 # Exit code a shell uses for "command not found".
@@ -60,7 +79,7 @@ TIMED_OUT = 124
 TIMEOUT = 180
 # --no-tty: never open the terminal to ask a question. chezmoi prompts on
 # /dev/tty rather than stdin, so a prompt raised here would be invisible behind
-# our captured output and would hang the harness. --no-pager: never hand output
+# the captured output and would hang the harness. --no-pager: never hand output
 # to a pager, which would wait on the terminal for the same reason.
 CHEZMOI_FLAGS = ("--no-tty", "--no-pager")
 
@@ -236,7 +255,8 @@ def check_scripts(workdir: Path) -> list[Result]:
     """Lint every ``run_*`` bootstrap script; render ``.tmpl`` scripts via chezmoi first.
 
     ``bash -n`` and shellcheck errors are hard failures; shellcheck warnings are advisory.
-    Vendored app filters (for example aerc's) are config data, not ours, so they are skipped.
+    Only the ``run_*`` scripts at the repo root are in scope -- ``_scripts()`` does not
+    recurse, so shell shipped inside a config directory is not linted by anything.
 
     Args:
         workdir: A temporary directory for rendered templates.
@@ -275,6 +295,8 @@ def check_brewfile() -> Result:
         A passing, skipped, or advisory-warning result.
 
     """
+    # --no-upgrade: report only what is missing. Without it an installed but
+    # outdated package counts as unmet, and every machine merely behind fails.
     check = run("brew", "bundle", "check", "--file", str(BREWFILE), "--no-upgrade")
 
     if check.ok:
@@ -286,77 +308,33 @@ def check_brewfile() -> Result:
     return Result(Status.WARN, "Brewfile has unmet entries", check.output)
 
 
-def _manifest_problems(packages: dict, skip: dict) -> list[str]:
-    """Compare the manifest against the Brewfile and check it is self-consistent.
-
-    Args:
-        packages: The manifest's ``[packages]`` table, tool name to per-target names.
-        skip: The manifest's ``[skip]`` table, formula name to reason.
-
-    Returns:
-        One human-readable line per problem, empty when the manifest is clean.
-
-    """
-    formulae = set(re.findall(r'^(?:brew|uv)\s+"([^"]+)"', BREWFILE.read_text(), re.MULTILINE))
-    claimed = {entry["brew"] for entry in packages.values() if "brew" in entry}
-
-    problems = [
-        f"{name}: in the Brewfile, unaccounted for in the manifest"
-        for name in sorted(formulae - claimed - set(skip))
-    ]
-    problems += [
-        f"{name}: claimed by the manifest but no longer in the Brewfile"
-        for name in sorted(claimed - formulae)
-    ]
-    problems += [
-        f"{name}: names no target, so it installs nowhere -- add one or move it to [skip]"
-        for name, entry in sorted(packages.items())
-        if not TARGETS & entry.keys() and "repo" not in entry
-    ]
-    problems += [
-        f"{name}: unknown field(s) {', '.join(sorted(entry.keys() - FIELDS))}"
-        for name, entry in sorted(packages.items())
-        if entry.keys() - FIELDS
-    ]
-
-    # The mise names all land in one generated [tools] table, where a repeat is a
-    # TOML error that would break the no-sudo profile's config.
-    owner: dict[str, str] = {}
-    for name, entry in sorted(packages.items()):
-        tool = entry.get("mise")
-        if tool is None:
-            continue
-        if tool in owner:
-            problems.append(f"{name}: mise tool {tool!r} already claimed by {owner[tool]}")
-        owner.setdefault(tool, name)
-
-    return problems
-
-
 def check_package_parity() -> Result:
-    """Check the Linux package manifest still accounts for every Brewfile formula.
+    """Check the Linux package manifest still accounts for every Brewfile entry.
 
     macOS installs from the Brewfile and Linux from ``.chezmoidata/packages.toml``,
     so the two drift apart silently -- a ``brew bundle dump`` widens the gap with no
-    warning. Every formula must therefore be mapped in ``[packages]`` or listed in
-    ``[skip]`` with a reason. Pure text, so it runs on Linux too, where there is
-    no ``brew`` to ask.
+    warning. Every ``brew``/``uv`` entry must therefore be claimed by a manifest
+    entry, and one that installs nowhere on Linux must say why. The comparison
+    itself lives in ``chezpkg``, so the command that maintains the two files and
+    the harness that gates them cannot disagree about what agreement means. Pure
+    text, so it runs on Linux too, where there is no ``brew`` to ask.
 
     Returns:
         A failing result listing every problem, otherwise a passing result.
 
     """
-    manifest = tomllib.loads(MANIFEST.read_text())
-    packages, skip = manifest["packages"], manifest["skip"]
-    problems = _manifest_problems(packages, skip)
+    manifest = Manifest.read(MANIFEST)
+    problems = manifest.problems(Brewfile.read(BREWFILE))
 
     if problems:
         return Result(Status.FAIL, "Brewfile <-> package manifest", "\n".join(problems))
 
+    installed = sum(1 for entry in manifest.packages.values() if entry.keys() & LINUX)
+
     return Result(
         Status.OK,
         f"package manifest in step with the Brewfile "
-        f"({len(packages)} mapped, {len(skip)} not installed on Linux)",
+        f"({installed} installed on Linux, {len(manifest.packages) - installed} not)",
     )
 
 
@@ -370,6 +348,9 @@ def check_python() -> Result:
     targets = [str(REPO / "tests"), *(str(path) for path in DEPLOYED_PYTHON)]
     config = ["--config", str(RUFF_CONFIG)]
 
+    # --preview repeats what tests/pyproject.toml sets, because the DOC
+    # (pydoclint) rules only fire in preview and a config that loses the setting
+    # would otherwise disable them silently rather than failing.
     lint = run("ruff", "check", "--preview", *config, *targets)
     if not lint.ok:
         return Result(Status.FAIL, "ruff check", lint.output)
@@ -426,6 +407,53 @@ def check_python_imports() -> Result:
     return Result(Status.OK, f"python: imports clean ({len(interpreters)} interpreter(s))")
 
 
+def check_mountnas() -> Result:
+    """Run the NAS mount unit tests.
+
+    They stub out the network and every subprocess, so this starts no mount and
+    reads no Keychain -- safe with the share mounted and away from home alike.
+
+    Returns:
+        A failing result if any test fails, a warning if the host has no
+        python3, otherwise a passing result.
+
+    """
+    interpreters = _interpreters()
+    if not interpreters:
+        return Result(Status.WARN, "mount-nas tests skipped (no python3 found)")
+
+    # -B: never leave a __pycache__ behind in the source directory.
+    tested = run(interpreters[0], "-B", str(MOUNTNAS_TESTS))
+    if not tested.ok:
+        return Result(Status.FAIL, "mount-nas unit tests", tested.output)
+
+    return Result(Status.OK, f"mount-nas: {tested.output.splitlines()[-1]}")
+
+
+def check_uv_script() -> Result:
+    """Run ``chezmoi-packages --help`` the way it really runs: through uv.
+
+    Its shebang is a PEP 723 script, so uv supplies both the interpreter and
+    ``tomlkit`` -- there is no TOML writer in the standard library, and Homebrew
+    packages none. Running it here is what proves the dependency block resolves
+    and that ``chezpkg`` imports under the interpreter uv picks.
+
+    Returns:
+        A failing result if it will not run, a warning if the host has no uv,
+        otherwise a passing result.
+
+    """
+    helped = run("uv", "run", "--script", str(CHEZMOI_PACKAGES), "--help")
+
+    if helped.missing:
+        return Result(Status.WARN, "chezmoi-packages skipped (uv not installed)")
+
+    if not helped.ok:
+        return Result(Status.FAIL, "chezmoi-packages --help (uv)", helped.output)
+
+    return Result(Status.OK, "chezmoi-packages runs under uv")
+
+
 def _dry_run() -> None:
     # --force answers apply's "overwrite/remove?" prompts up front, so the diff is
     # complete rather than truncated at the first question. It changes nothing on
@@ -465,6 +493,8 @@ def main() -> int:
             check_package_parity(),
             check_python(),
             check_python_imports(),
+            check_mountnas(),
+            check_uv_script(),
         ]
         hard_failure = _report(results)
         _dry_run()

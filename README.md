@@ -1,100 +1,247 @@
 # dotfiles
 
-macOS is the primary target. Linux is supported in two profiles, chosen by the
-`sudo` prompt at `chezmoi init` time: **with sudo**, where apt or dnf installs
-everything, and **without sudo**, where [mise](https://mise.jdx.dev) installs a
-rootless toolchain under `~/.local`.
+This repository is a [chezmoi](https://www.chezmoi.io) source directory. The
+files here are not the files that run: chezmoi renders them into `$HOME`,
+applying the naming conventions below on the way. The rendered copy under
+`$HOME` is overwritten on every apply, so a change made there is lost — edit the
+file here and apply it.
 
-## Handy Scripts and Tools
+Source filenames encode what happens to the target, which is why nothing here
+looks like a dotfile:
 
-### Fish Shell
+| source                 | target                       | meaning                                            |
+| ---                    | ---                          | ---                                                |
+| `dot_foo`              | `~/.foo`                     | a leading dot                                      |
+| `private_dot_ssh/`     | `~/.ssh`                     | target is `chmod 600`                              |
+| `encrypted_x.age`      | `~/x`                        | age-encrypted here, decrypted on apply             |
+| `exact_default/`       | `~/…/default`                | target holds exactly these entries, strays deleted |
+| `executable_mount-nas` | `~/.local/bin/mount-nas`     | target is `0755`                                   |
+| `config.fish.tmpl`     | `~/.config/fish/config.fish` | rendered as a Go template                          |
+| `run_once_…`           | —                            | script run once, tracked by content hash           |
+| `run_onchange_…`       | —                            | script re-run when its own content changes         |
 
-* `update` => updates the machine afterwards, walking whichever package
-  managers it finds (brew and mas, apt or dnf, mise, rustup, uv), then silences
-  any newly installed app's own updater with `cask-updates` on macOS.
-* `get_contact` => searches a contact in khard's database through fzf.
-* `khard-rm` => deletes contacts in khard. Will pop an fzf window and allow you
-  to select the contacts to delete.
-* `khard-track` => updates chezmoi's khard's state. Runs `chezmoi add
-  ~/.config/khard/work/default`.
+macOS is the primary target. Linux is supported in two profiles, chosen by a
+prompt the first time chezmoi initialises the machine: with sudo, where apt or
+dnf installs the toolchain, and without sudo, where
+[mise](https://mise.jdx.dev) installs a rootless one under `~/.local`.
+Everything is CLI-only on Linux; the macOS GUI configs and the Brewfile never
+deploy there.
 
-### Git
+## Installing on a new machine
 
-* `executable_git-wt-clone` => git subcommand to clone a repository as a bare
-  clone plus per-ref worktrees. Can be used as `git wt-clone <URL> [DIRECTORY]`;
-  without a directory the folder is named after the repository. The worktree for
-  the default branch is created straight away, tracking `origin`.
+### chezmoi first
 
-* `executable_git-wt-add` => git subcommand to add a worktree to a repository.
-  Can be used as `git wt-add <BRANCH|REF|TAG>`. Will create a branch
-  automatically if it doesn't exist. A branch that already exists on `origin`
-  tracks it; a tag or commit is checked out detached; a brand-new branch is left
-  with no upstream, so `git push` (with `push.autoSetupRemote`) publishes it as
-  `origin/<branch>` rather than refusing because the branch it forked from is
-  named something else.
+chezmoi renders the repository, so it has to exist before anything else. It
+installs itself without a package manager:
 
-### Packages
+```sh
+sh -c "$(curl -fsLS get.chezmoi.io)" -- -b ~/.local/bin
+```
 
-* `chezmoi-packages` => adds, removes and looks up the packages these dotfiles
-  install, keeping the Brewfile and the Linux manifest in sync. Finds the source
-  directory through `chezmoi source-path`, so it runs from anywhere. See
-  [Packages](#packages) below.
+On a Mac that already has Homebrew, `brew install chezmoi` is equivalent. There
+are no other prerequisites — the bootstrap installs everything else, including
+Homebrew.
 
-* `cask-updates` => stops the apps Homebrew installed from updating themselves,
-  so `brew` stays the only thing that moves their versions. macOS only; run by
-  `update` on every macOS run. See
-  [Keeping Homebrew in charge of app versions](#keeping-homebrew-in-charge-of-app-versions)
-  below.
+### One command
 
-### NAS
+```sh
+~/.local/bin/chezmoi init --apply lfiolhais/dotfiles
+```
 
-* `mount-nas` => mounts the `Book2` share from `nas.botasal.xyz` whenever the
-  NAS is reachable, clears the mount when it stops answering, and does nothing
-  at all otherwise. macOS only; a LaunchAgent runs it on every network change.
-  See [Mounting the NAS](#mounting-the-nas) below.
+`init` clones the repository into `~/.local/share/chezmoi`, which is the source
+directory and the only copy to edit. `--apply` then renders it into `$HOME` and
+runs the bootstrap scripts. Add `--ssh` to clone over SSH rather than HTTPS.
+
+Two prompts interrupt it:
+
+- On Linux, `Do you have sudo on this machine`. The answer selects the profile
+  and is remembered, so a later `chezmoi init` does not ask again. Changing it
+  afterwards means editing `[data] sudo` in `~/.config/chezmoi/chezmoi.toml`,
+  because the answer decides the package manager, how fish becomes the login
+  shell, and whether `~/.config/mise` is deployed at all.
+- A passphrase for `key.txt.age`, which holds the age key that decrypts
+  everything else. The passphrase is not in this repository and cannot be
+  recovered from it. Without it, `chezmoi apply --exclude=encrypted,scripts`
+  renders every unencrypted file and leaves mail, contacts and the bootstrap
+  alone.
+
+On macOS the apply asks for the sudo password early, and holds it for the rest
+of the run: `02-setup-darwin` writes settings that need root.
+
+### What the first apply changes
+
+The bootstrap rebuilds a machine, and on a Mac already in use it is not a
+reversible operation. In order:
+
+| script                       | effect                                                                     |
+| ---                          | ---                                                                        |
+| `setup-xcode-cli`            | installs Xcode Command Line Tools and Rosetta 2                            |
+| `decrypt-private-key`        | writes `~/.config/chezmoi/key.txt`                                         |
+| `01-install-packages-darwin` | installs Homebrew, then the whole Brewfile, then rustup                    |
+| `01-install-packages-linux`  | apt/dnf and the `gh`/`starship` repos, or a rootless mise                  |
+| `02-setup-darwin` | rewrites preferences across the Dock, Finder, Safari, trackpad, keyboard, screenshots and Software Update, then kills the affected apps to reload them |
+| `03-setup-dock`              | appends six apps to the Dock, leaving existing items in place              |
+| `04-setup-fish`              | adds fish to `/etc/shells` and makes it the login shell with `chsh`        |
+| `05-setup-bat`               | builds bat's theme cache                                                   |
+| `06-setup-mail`              | prints the manual mail steps; changes nothing                              |
+| `07-setup-nas`               | loads the NAS LaunchAgent and prints its one manual step                   |
+
+The Brewfile is 113 formulae, 41 casks and 22 Mac App Store apps, so the first
+run is long and needs the App Store already signed in — `mas` cannot sign in and
+fails per-app without it. On macOS and Linux with sudo the login shell changes for the
+account being set up, and `chsh -s /bin/zsh` puts it back; without sudo the
+`exec` line in `~/.bashrc` is what to remove.
+
+Scripts that do not apply to the current OS render empty, and chezmoi skips
+empty scripts, so the darwin-only entries above simply do not exist on Linux.
+
+### Confirming it worked
+
+```sh
+chezmoi status      # prints nothing when the target matches the source
+chezmoi doctor      # chezmoi's own environment check
+```
+
+`exec fish` starts the new shell without logging out.
+
+### When a bootstrap script fails
+
+A `run_once_` script is recorded as done, by its content hash, only when it
+exits 0. Most of these scripts set `-eu` and so fail loudly and are retried by
+the next apply on their own. `01-install-packages-darwin` is the exception: it
+sets no `-e`, so a `brew bundle` that fails partway still exits 0, is recorded,
+and never runs again. The same holds for `02`, `03`, `06`, `setup-xcode-cli` and
+the decrypt script. Clearing the record is what re-runs one:
+
+```sh
+chezmoi state delete-bucket --bucket=scriptState   # forget every run_once_ hash
+chezmoi apply -v                                   # run them all again
+```
+
+That re-runs every `run_once_` script, so they are written to be safe to repeat.
+Editing a script also re-runs it, but reverting the edit restores the original
+hash and it does not run again — the state bucket is the reliable route.
+
+`chezmoi state dump` shows what is currently recorded.
+
+A failure decrypting the age key leaves a `~/.config/chezmoi/key.txt` that
+exists but is unusable, and the existence check in the decrypt script then skips
+it silently while every encrypted file fails to render. Delete the file and
+apply again:
+
+```sh
+rm ~/.config/chezmoi/key.txt
+chezmoi apply -v
+```
+
+## Everyday use
+
+```sh
+chezmoi diff        # what applying the source would change in $HOME
+chezmoi apply -v    # render source -> $HOME, running any pending run_ scripts
+chezmoi status      # files that differ between source and target
+chezmoi cd          # a shell in the source directory
+```
+
+Changes flow both ways. Editing a file here and running `chezmoi apply` is the
+normal direction. For a config changed by hand under `$HOME`, `chezmoi re-add`
+pulls it back into the source, and `chezmoi add ~/path` starts tracking a new
+file with the naming conventions applied.
+
+`chezmoi re-add` only updates source files whose target still exists, so it
+cannot express a deletion. `chezmoi forget <path>` is what drops an entry from
+the source state.
+
+Encrypted files are edited through chezmoi, which decrypts to a temporary file
+and re-encrypts on save:
+
+```sh
+chezmoi edit ~/.notmuch-config      # not the .age blob in the source directory
+```
+
+`update` walks every package manager on the machine — brew and mas, apt or dnf,
+mise, rustup, uv — skipping the ones that are absent and listing failures at the
+end rather than stopping at the first. It deliberately leaves `chezmoi update`
+alone, because applying dotfiles can re-run bootstrap scripts.
+
+## Commands
+
+These deploy to `~/.local/bin`, which is on `PATH` on every profile.
+
+| command                    | what it does                                              |
+| ---                        | ---                                                       |
+| `git wt-clone <URL> [DIR]` | clone a repository as a bare clone plus per-ref worktrees |
+| `git wt-add <REF>`         | check a branch, tag or commit out into its own folder     |
+| `chezmoi-packages`         | maintain the Brewfile and the Linux manifest together     |
+| `cask-updates`             | stop Homebrew's apps updating themselves (macOS)          |
+| `mount-nas`                | keep the NAS share mounted while it is reachable (macOS)  |
+
+`git-wt-clone` names the folder after the repository when no directory is given,
+and creates the default branch's worktree straight away, tracking `origin`.
+`git-wt-add` creates a branch that does not exist yet. A branch already on
+`origin` tracks it; a tag or commit is checked out detached; a brand-new branch
+is left with no upstream, so `git push` with `push.autoSetupRemote` publishes it
+as `origin/<branch>` rather than refusing because the branch it forked from has
+a different name.
+
+The fish functions live in `~/.config/fish/functions`, one function per file,
+named after the function. `functions -v <name>` prints what each one is for;
+these are the ones worth knowing about:
+
+| function      | what it does                                                       |
+| ---           | ---                                                                |
+| `update`      | update every package on the machine, whatever installed it         |
+| `get_contact` | pick a contact out of khard with fzf                               |
+| `khard-rm`    | delete contacts and drop them from the source state                |
+| `khard-track` | record contacts added with `khard new` (see [Contacts](#contacts)) |
 
 ## Packages
 
-The packages installed by the dotfiles reside in two files:
+Two files decide what is installed, and they are written by different hands:
 
-| file | holds |
-| --- | --- |
-| `private_dot_config/Brewfile` | what macOS installs — formulae, casks, Mac App Store apps |
-| `.chezmoidata/packages.toml` | what each Linux target calls the same tool, or why it is not installed there |
+| file                          | holds                                                          |
+| ---                           | ---                                                            |
+| `private_dot_config/Brewfile` | what macOS installs — formulae, casks, Mac App Store apps      |
+| `.chezmoidata/packages.toml`  | what each Linux target calls the same tool, or why it has none |
 
-The goal is to always keep both files in sync. They are not the same kind of
-file, though, and that decides who writes them:
+The Brewfile is derived. `brew bundle dump` writes it from what the Mac has
+installed, descriptions and taps and casks and Mac App Store apps included, so
+an edit made by hand is gone at the next dump. The manifest is authored: it
+records a decision — what Linux calls this tool, or why Linux does without it —
+that no machine can be asked for.
 
-- the **Brewfile is derived** — `brew bundle dump` writes it from what the Mac
-  actually has installed, descriptions and taps and casks and Mac App Store apps
-  included. Nothing else should edit it; the next dump would undo the edit
-  anyway.
-- the **manifest is authored** — it records a decision (what Linux calls this,
-  or why Linux does without it) that no machine can be asked for.
+A tool the distro's own package manager does not carry is not installed on
+Linux, which keeps the dotfiles clear of tracking where each project publishes
+its packages and what it considers the recommended way to install them. `gh` and
+`starship` are the two exceptions. Fedora packages `gh` itself; Debian, Ubuntu
+and the RHEL rebuilds take it from GitHub's own repository. `starship` comes
+from its installer everywhere, because no base repository has it and it is the
+shell prompt.
 
-To avoid overcomplicating the dotfiles, we ignore tool's that aren't natively
-supported by the distro's package manager. This is done to avoid keeping track
-of the multiple repos tools live and their "recommended way" of installing
-them. There are two exceptions: `gh` (from GitHub's own apt/dnf repository) and
-`starship` (from its installer), because neither is in any base repository and
-starship is the shell prompt.
-
-The Linux packages are kept in `.chezmoidata/packages.toml`, one entry per tool:
+One manifest entry per tool:
 
 ```toml
 [packages.<NAME>]
 brew = "<HOMEBREW_NAME>"
-apt = "<APT_NAME>"
-fedora = "<DNF_NAME>"
-el = "<RHEL_NAME>"
-mise = "<MISE_NAME>"
+apt = "<APT_NAME>"        # Debian, Ubuntu, Pop!_OS
+fedora = "<DNF_NAME>"     # Fedora
+el = "<RHEL_NAME>"        # RHEL rebuilds: Rocky, AlmaLinux, CentOS Stream
+mise = "<MISE_NAME>"      # the no-sudo profile, where mise is the package manager
+mise_exe = "<EXE_NAME>"   # the binary mise installs, when it differs from the tool
+repo = "<REASON>"         # installed from its own repository by the 01 script
 note = "Anything surprising about the above."
 ```
 
-A target that isn't named doesn't install the tool.
+A tool is installed on the targets its entry names. An entry naming none of
+`apt`, `fedora`, `el` or `mise` installs nowhere on Linux, and `note` is where
+it says why — that is the whole mechanism for skipping a tool, and `tests/check.py`
+fails on an entry that installs nowhere and gives no reason. It also fails on a
+misspelled field name, so the list above is the complete set.
 
-Both files are handled with `chezmoi-packages`, a deployed command under
-`~/.local/bin`.
+The manifest is generated: every edit rewrites the file whole, so a comment
+added by hand does not survive. Annotations belong in `note`.
+
+`chezmoi-packages` maintains both files:
 
 | command       | description                                                               |
 | ---           | ---                                                                       |
@@ -104,53 +251,62 @@ Both files are handled with `chezmoi-packages`, a deployed command under
 | `dump`        | refresh the Brewfile from this Mac, then say what the manifest still owes |
 
 `add` and `remove` drive both ends on purpose: a package that is only half
-removed — gone from the manifest but still installed, still in the Brewfile — is
-exactly what `tests/check.py` fails on. Use `--no-install` / `--no-uninstall` to
-edit the manifest alone (the tool is already there, or this is not a Mac).
+removed — gone from the manifest but still installed and still in the Brewfile —
+is what `tests/check.py` fails on. `--no-install` and `--no-uninstall` edit the
+manifest alone, for a tool that is already present or a machine that is not a
+Mac.
 
-The manifest is **generated**: every edit rewrites it from the header in
-`chezpkg_manifest.py` and one table per entry, so a comment written into it by
-hand will not survive. Annotations belong in `note`. Writing TOML is the one
-thing the standard library cannot do and Homebrew packages no writer for, so the
-command's shebang runs it through `uv`, which fetches `tomlkit` (~6 ms warm) and
-supplies the interpreter.
+`dump`, `add` and `remove` all rewrite the Brewfile from what this Mac currently
+has. On a machine whose Brewfile install did not finish, that writes the shorter
+list out over the full one. `git diff private_dot_config/Brewfile` shows what
+changed, and `git restore private_dot_config/Brewfile` puts it back.
 
 ### Adding a package
 
-Don't guess at names — ask:
+Ask what each platform calls the tool:
 
 ```sh
 chezmoi-packages search ripgrep
 ```
 
-That queries Homebrew and mise on this machine and each distro's real
-repositories in throwaway containers, prints what every platform calls the tool,
-and then prints the command to run:
+That queries Homebrew and mise on this machine, and each distro's repositories
+in throwaway Docker containers. Without Docker it reports `docker is not
+available; only brew and mise will be searched` and still suggests a command —
+one with no distro fields, which looks exactly like a tool no distro packages.
+Start Docker before trusting the answer.
+
+The output ends with the command to run:
 
 ```sh
 chezmoi-packages add ripgrep --apt ripgrep --fedora ripgrep --el ripgrep --mise ripgrep
 ```
 
 which installs it with Homebrew, re-dumps the Brewfile, and records the entry.
-`--brew` names the formula when it differs from the tool (a tap-qualified name);
-`--no-brew` records a Linux-only tool that macOS never installs. Then verify,
-from the source directory (`chezmoi cd`):
+`--brew` names the formula when it differs from the tool, for a tap-qualified
+name; `--no-brew` records a Linux-only tool that macOS never installs. Then
+verify from the source directory (`chezmoi cd`):
 
 ```sh
 python3 tests/check.py    # the two files still agree
-python3 tests/linux.py    # every name really resolves in the repo it claims
+python3 tests/linux.py    # every name resolves in the repository it claims
 ```
 
 `tests/linux.py` is the one that catches a wrong name: it asks apt and dnf
-whether each package exists, without installing anything. If a distro turns out
-not to have the tool, drop that field and re-run.
+whether each package exists, installing nothing. When a distro turns out not to
+have the tool, remove that target from the entry — the manifest is generated, so
+re-run `chezmoi-packages add` with the remaining flags rather than editing the
+file:
+
+```sh
+chezmoi-packages add ripgrep --no-install --apt ripgrep --fedora ripgrep --mise ripgrep
+```
 
 ### Adding a cask
 
-A cask is not a manifest entry. `.chezmoidata/packages.toml` accounts for
-`brew` and `uv` entries only — the CLI tools the Linux profiles mirror — so
-`tests/check.py` never asks a cask to be claimed, and `chezmoi-packages add`
-(which always writes an entry) is the wrong verb for one. Two steps:
+A cask is not a manifest entry. The manifest accounts for `brew` and `uv`
+entries only — the CLI tools the Linux profiles mirror — so `tests/check.py`
+never asks a cask to be claimed, and `chezmoi-packages add` always writes an
+entry, which makes it the wrong verb here:
 
 ```sh
 brew install --cask ghostty
@@ -158,28 +314,26 @@ chezmoi-packages dump      # the only sanctioned path to the Brewfile
 python3 tests/check.py
 ```
 
-Removing one *is* covered: `chezmoi-packages remove ghostty` finds the
-`cask "ghostty"` line, uninstalls it, and re-dumps. If the new app embeds
-Sparkle it will be silenced by the next `update` run — `cask-updates disable`
-does it immediately (see *Keeping Homebrew in charge of app versions* below).
+Removing one is covered: `chezmoi-packages remove ghostty` finds the
+`cask "ghostty"` line, uninstalls it, and re-dumps. An app that embeds Sparkle
+is silenced by the next `update` run, or immediately with `cask-updates disable`
+(see [Keeping Homebrew in charge of app versions](#keeping-homebrew-in-charge-of-app-versions)).
 
 ### Removing a package, or not installing one
 
 ```sh
-chezmoi-packages remove gurk                          # off the Mac, the Brewfile, and the manifest
+chezmoi-packages remove gurk                                   # off the Mac, the Brewfile, and the manifest
 chezmoi-packages add dockutil --note "drives the macOS Dock"   # macOS keeps it, Linux never gets it
 ```
 
 `remove` uninstalls by whatever route the Brewfile used — `brew uninstall` for a
 formula or a cask, `uv tool uninstall` for a uv tool, both when the Brewfile
-lists both — then re-dumps and drops the entry. Every `brew`/`uv` entry in the
-Brewfile must be claimed by a manifest entry, and `tests/check.py` fails
-otherwise; that is what stops a `brew bundle dump` on the Mac from quietly
-widening the gap between the two files.
+lists both — then re-dumps and drops the entry. Every `brew` and `uv` entry in
+the Brewfile must be claimed by a manifest entry, which is what stops a
+`brew bundle dump` on the Mac from quietly widening the gap between the two
+files.
 
 ### Looking names up by hand
-
-`search` is a convenience, not the only route:
 
 ```sh
 brew search --formula NAME
@@ -194,10 +348,9 @@ by side.
 
 ## Keeping Homebrew in charge of app versions
 
-Most casks ship the vendor's own updater — **29 of the 41 installed casks
-declare `auto_updates true`** — so an app quietly replaces itself and the
+Most casks ship the vendor's own updater, so an app replaces itself and the
 Caskroom ends up describing a version that is no longer on disk. The next
-`brew upgrade --greedy` then reinstalls it, or walks it *backwards* when the
+`brew upgrade --greedy` then reinstalls it, or walks it backwards when the
 vendor's updater got there first.
 
 Homebrew has no switch for this; it ships the vendor's binary as-is. What works
@@ -206,43 +359,46 @@ automatic-check settings from the app's own user-defaults domain, where they
 beat the same keys inside the bundle. `cask-updates` writes them.
 
 ```sh
-cask-updates status     # what self-updates, and what is already silent
+cask-updates status     # what self-updates, what is silenced, and what cannot be reached
 cask-updates disable    # silence the Sparkle apps Homebrew owns (--dry-run works)
 cask-updates enable     # undo it
 ```
 
-`update` runs `disable` on every macOS run, so a cask installed since the last
-one is caught automatically. Nothing inside an app bundle is touched, so no code
-signature is disturbed and `enable` puts every app back exactly as it was found
-— the keys are deleted, not set true.
+`status` is the current tally; no count is recorded here, because installing one
+cask would falsify it. It reads the set from `brew list --cask` and decides each
+app by looking inside its bundle for Sparkle, so a cask installed since the last
+run needs no list to be updated anywhere.
 
-What it covers, honestly:
+`update` runs `disable` on every macOS run. Nothing inside an app bundle is
+touched, so no code signature is disturbed, and `enable` puts every app back as
+it was found — the keys are deleted rather than set true.
 
-| | count | |
-| --- | --- | --- |
-| silenced | 17 | every Sparkle app Homebrew owns |
-| exempt | 5 | adguard, little-snitch, proton-mail-bridge, protonvpn, tor-browser |
-| beyond reach | 7 | google-chrome, signal, claude, drawio, zoom, busycal, shottr |
+Apps installed by hand are never touched. Homebrew does not know about them, so
+nothing else would update them.
 
-The exempt five are a deliberate choice: security tools ship fixes on their own
-schedule, and the gap until the next `update` is real exposure for a firewall, a
-VPN, or a hardened browser. Edit `EXEMPT` in
-`dot_local/lib/python/caskupd_app.py` to change your mind.
+Five casks are exempt by name — adguard, little-snitch, proton-mail-bridge,
+protonvpn, tor-browser — because a firewall, a VPN and a hardened browser ship
+fixes on their own schedule, and the gap until the next `update` is real
+exposure. `status` prints them with the reason. To change that list, edit
+`EXEMPT` in `dot_local/lib/python/caskupd_app.py` from the source directory and
+apply:
 
-The other seven update through Keystone, Electron or their own installer, none
-of which expose a preference key worth chasing. `status` lists them by name
-rather than quietly implying they are handled; `brew upgrade --greedy` still
-owns their versions whenever it wins the race.
+```sh
+chezmoi cd
+$EDITOR dot_local/lib/python/caskupd_app.py
+chezmoi apply -v
+```
 
-Apps installed by hand are never touched — Homebrew does not know about them, so
-nothing else would ever update them.
+Apps that update through Keystone, Electron or their own installer expose no
+preference key worth chasing. `status` lists them by name, and
+`brew upgrade --greedy` owns their versions whenever it wins the race.
 
 ## Mounting the NAS
 
-`nas.botasal.xyz` serves the share `Book2` over SMB. It should be mounted
-whenever the network allows and absent, without comment, when it does not — no
-authentication sheet, no connection-failed alert, and no "the server connection
-was interrupted" dialog after leaving the house.
+`nas.botasal.xyz` serves the share `Book2` over SMB. It is mounted whenever the
+network allows and absent, without comment, when it does not — no authentication
+sheet, no connection-failed alert, and no "the server connection was
+interrupted" dialog after leaving the house.
 
 ```sh
 mount-nas             # mount when reachable, unmount when not (what launchd runs)
@@ -251,21 +407,26 @@ mount-nas mount       # mount now, saying why if it cannot (--dry-run works)
 mount-nas unmount     # unmount now
 ```
 
-Staying quiet takes three guards, because three separate things raise a dialog:
+Staying quiet takes a guard for each thing that raises a dialog:
 
-* Nothing is attempted until TCP 445 on the NAS answers, so away from home the
+- Nothing is attempted until TCP 445 on the NAS answers, so away from home the
   whole thing is a no-op. Testing the port rather than the network name means
   Ethernet and VPN count as being home just as Wi-Fi does.
-* `mount volume` raises an authentication sheet when the login Keychain holds no
+- `mount volume` raises an authentication sheet when the login Keychain holds no
   password for the server, so the Keychain is consulted first and a missing
   entry is a reason to do nothing rather than a reason to ask.
-* A mount whose server has vanished produces interrupted-connection alerts until
+- A mount whose server has vanished produces interrupted-connection alerts until
   it is cleared, so an unreachable NAS that is still mounted is force unmounted.
 
-### The one manual step
+The share is found in `mount(8)` by its device column, `//user@host/share`,
+rather than by `/Volumes/Book2`. A leftover directory of that name makes macOS
+mount at `/Volumes/Book2-1` instead, and a check that looked only at the
+expected path would mount a second copy every five minutes.
+
+### Seeding the password
 
 The password lives in the login Keychain and nowhere in this repository. Until
-it is seeded the agent mounts nothing and says nothing:
+it is there the agent mounts nothing and says nothing:
 
 ```sh
 security add-internet-password -r "smb " -s nas.botasal.xyz -a lfiolhais \
@@ -274,44 +435,88 @@ security add-internet-password -r "smb " -s nas.botasal.xyz -a lfiolhais \
   -U -w
 ```
 
-Then `mount-nas status`, which should report the password present.
+The trailing space in `-r "smb "` is deliberate: Keychain protocol codes are
+four characters, and `smb` is three. `-w` comes last with no value so `security`
+prompts, rather than the password reaching `ps` and the shell history. `-T`
+names NetAuthAgent because that is what reads the item — `mount volume` hands
+the authentication to it, and an item created by `security` is otherwise trusted
+only by `security`. Should the first mount raise a Keychain prompt anyway,
+Always Allow grants the same access permanently.
 
-`-w` comes last with no value so `security` prompts for the password instead of
-taking it from the command line, where it would reach `ps` and the shell
-history. `-T` names NetAuthAgent because that is what actually reads the item:
-`mount volume` hands the authentication to it, and an item created by `security`
-is otherwise trusted only by `security`. Should the first mount raise a Keychain
-prompt anyway, Always Allow grants the same access permanently.
+The account name is this machine's; on a NAS account with a different user,
+change `-a lfiolhais` and `USER` in `dot_local/lib/python/mountnas.py` together,
+because the lookup matches on both.
+
+Confirm it with `mount-nas status`, which prints one line per share:
+
+```
+Book2: nas.botasal.xyz reachable, password in Keychain, mounted at /Volumes/Book2
+```
+
+The Keychain is only reported on the reachable branch, so away from the NAS this
+says `not reachable` and tells nothing about the password. Confirm the seeding
+from home.
 
 Connecting once through Finder -> Go -> Connect to Server ->
 `smb://nas.botasal.xyz/Book2` writes an equivalent item. Type that URL rather
 than picking the NAS out of the sidebar: the item records whatever name was used
 to connect, `mount-nas` looks it up by `nas.botasal.xyz`, and a mismatch means
-the agent finds no password, mounts nothing, and says nothing about it.
+the agent finds no password, mounts nothing, and says nothing about it. To see
+which name an existing item is filed under:
 
-`mount-nas status` is what distinguishes that from an ordinary evening away, so
-it is the first thing to run when the share is not appearing.
+```sh
+security find-internet-password -s nas.botasal.xyz    # what mount-nas looks for
+security find-internet-password -s DELTA7             # the NetBIOS name Finder may have used
+```
+
+`security delete-internet-password -s DELTA7` removes one filed under the wrong
+name, after which the block above seeds the right one.
 
 ### What runs it
 
 `~/Library/LaunchAgents/xyz.botasal.mount-nas.plist` runs `mount-nas` at login,
-on every write to `/var/run/resolv.conf` — which macOS rewrites on every network
-transition, so the agent fires on joining a network rather than polling for one
-— and every 300 seconds as a backstop for wake-from-sleep. The `07` bootstrap
-script loads it, and reloads it whenever the plist changes.
+on every write to `/var/run/resolv.conf` or
+`/Library/Preferences/SystemConfiguration/NetworkInterfaces.plist` — which macOS
+rewrites on every network transition, so the agent fires on joining a network
+rather than polling for one — and every 300 seconds as a backstop for
+wake-from-sleep.
+
+It is a user agent rather than a `/Library/LaunchDaemons` job because a root
+daemon can read neither the login Keychain nor mount into the login session.
 
 It appears under System Settings -> General -> Login Items & Extensions as a
-background item and has to stay enabled. It is a user agent rather than a
-`/Library/LaunchDaemons` job because a root daemon can read neither the login
-Keychain nor mount into the login session.
+background item, and mounts nothing while it is switched off there. To check and
+to load it again:
 
-`mount-nas` prints nothing while nothing is wrong, so `~/.local/state/mount-nas.log`
-stays empty and a line in it is always worth reading.
+```sh
+launchctl print gui/$(id -u)/xyz.botasal.mount-nas
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/xyz.botasal.mount-nas.plist
+```
 
-### Checking the NAS itself
+launchd caches a job's definition when it is bootstrapped, so an edited plist is
+read only on a fresh one. The `07-setup-nas` script carries the plist's digest
+and reloads the agent whenever it changes, which is why that script is
+`run_onchange_` rather than `run_once_`.
 
-A wrong hostname produces exactly the same silence as being away from home.
-`tests/nasprobe.py` tells the two apart by asking the server what it is:
+`mount-nas` prints nothing while nothing is wrong, so
+`~/.local/state/mount-nas.log` stays empty and a line in it is always worth
+reading.
+
+### When the share is not appearing
+
+`mount-nas status` separates the causes, since being away from home and being
+misconfigured look identical from the Finder:
+
+| status line | cause | fix |
+| --- | --- | --- |
+| `not reachable` | away from home, or the NAS is off | nothing, or check the NAS |
+| `reachable, …` then `no password in the Keychain for …` | never seeded, or filed under another name | seed it, above |
+| `reachable, password in Keychain, not mounted` | the agent is not loaded | `launchctl bootstrap`, below |
+| `not reachable, mounted at …` | the NAS vanished while mounted | `mount-nas unmount` |
+
+A hostname that has stopped pointing at a file server produces the same silence
+as being away. `tests/nasprobe.py` tells them apart by asking the server what it
+is:
 
 ```sh
 python3 tests/nasprobe.py
@@ -321,14 +526,86 @@ It prints the SMB dialect the server negotiates, and fails with a reason when
 the name does not resolve, the port is closed, or something that is not an SMB
 server answers.
 
+autofs would mount lazily and handle the network coming and going for free, but
+`automountd` runs as root and cannot reach a login Keychain, so the password
+would have to live in `/var/root/.nsmbrc`.
+
+## Contacts
+
+khard's address book is `work`: one age-encrypted vCard per contact, in
+`private_dot_config/khard/work/exact_default/` here and
+`~/.config/khard/work/default/<uid>.vcf` on the machine. chezmoi is what carries
+contacts between machines — vdirsyncer is not part of this setup, and CardDAV is
+not used.
+
+The `exact_` prefix makes deletions propagate: it declares the target directory
+to hold exactly the entries the source has, so chezmoi deletes any card whose
+source entry is gone.
+
+That cuts both ways:
+
+> A contact created with `khard new` has no source entry yet, so the next
+> `chezmoi apply` deletes it. Run `khard-track` after adding or editing a
+> contact, before the next apply.
+
+```sh
+khard new                 # create a contact
+khard-track               # chezmoi add ~/.config/khard/work/default
+chezmoi diff              # the new .vcf appears as an addition
+```
+
+`khard-rm` deletes contacts and drops them from the source state in one step. It
+opens an fzf picker, multi-select with TAB and confirm with ENTER:
+
+```sh
+khard-rm [-a|--addressbook NAME] [-n|--dry-run] [-N|--no-forget] [search terms...]
+```
+
+It resolves every uid through `khard filename` first and skips anything that
+does not match exactly one card, because khard's `remove` takes free-text search
+terms and has no `--uid` flag. `--dry-run` lists the selection and stops;
+`--no-forget` deletes the contacts but leaves the source state alone.
+
+Deletions reach other machines when the source directory is committed and
+pushed. Those machines pick them up with `chezmoi update`, which pulls and
+applies — and so may re-run bootstrap scripts whose content has changed.
+
+## Email
+
+mbsync pulls mail into `~/.local/share/mail`, notmuch indexes it, aerc reads it
+and msmtp sends it. The isync and notmuch configs are age-encrypted here;
+passwords are not in this repository at all. On macOS they live in the login
+Keychain, on Linux in `pass`.
+
+`06-setup-mail` prints the steps for the current OS during the bootstrap and
+changes nothing itself, so it can be read at any time:
+
+```sh
+chezmoi execute-template < run_once_after_install-06-setup-mail.sh.tmpl
+```
+
+Proton Mail is reached through Proton Mail Bridge, whose TLS certificates are
+exported from its Settings -> Advanced pane into `~/.config`. After any
+credential or config change:
+
+```sh
+mbsync -a && notmuch new
+```
+
 ## Testing
 
-There is no build. "Testing" a change means `chezmoi diff`, then the harness:
-`tests/check.py` on the host, `tests/linux.py` for the Linux targets in Docker,
-`tests/macos.py` for macOS in a Lume VM. See [tests/README.md](tests/README.md),
-which also covers the `pre-push` hook that runs `check.py` before a push to
-`main`:
+There is no build. Testing a change means `chezmoi diff`, then the harness:
+`tests/check.py` on this host, `tests/linux.py` for the Linux targets in Docker,
+`tests/macos.py` for macOS in a Lume VM. `tests/check.py` needs Python 3.11 or
+newer, plus `ruff` and `shellcheck`; it performs no destructive action and never
+runs the bootstrap scripts.
+
+Other machines pull `main`, so a broken `main` breaks them. A `pre-push` hook
+runs `check.py` before any push to `main`; `core.hooksPath` is a local git
+setting, so enable it once per clone:
 
 ```sh
 git config core.hooksPath tests/githooks
 ```
+
+[tests/README.md](tests/README.md) documents the harness and the hook in full.
