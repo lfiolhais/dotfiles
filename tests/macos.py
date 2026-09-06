@@ -16,9 +16,14 @@ dependency and ships its own ``lume ssh``, so no password plumbing is needed::
     python3 tests/macos.py --keep
     python3 tests/macos.py --full
 
-``--keep`` reuses the VM between runs instead of pulling a fresh one, which is
-much faster to iterate with and means the guest carries state from the last run:
-with ``--full`` that is no longer a clean-machine test.
+The harness enables Lume's image layer cache (``lume config cache enable``; Lume
+ships with it off), so ``lume pull`` writes the image layers to ``~/.lume/cache``
+and the next run reuses them: only the first run downloads the image.
+
+``--keep`` goes further: it reuses the VM between runs instead of rebuilding its
+disk and cold-booting, which is faster still to iterate with and means the guest
+carries state from the last run -- with ``--full`` that is no longer a
+clean-machine test.
 """
 
 from __future__ import annotations
@@ -73,6 +78,31 @@ def _lume(*argv: str) -> int:
 
     """
     return subprocess.run(["lume", *argv], check=False).returncode
+
+
+def _ensure_layer_cache() -> None:
+    """Turn on Lume's OCI layer cache so repeated pulls reuse downloaded layers.
+
+    Lume ships with caching off. With it on, ``lume pull`` writes image layers to
+    ``~/.lume/cache`` and reuses them on the next pull, so only the first run of
+    the default (no ``--keep``) mode downloads the image. The setting persists in
+    Lume's config, so a later run finds it already on and returns early.
+    """
+    probe = subprocess.run(
+        ["lume", "config", "get"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if "Caching enabled: true" in probe.stdout:
+        return
+    print("enabling Lume's image layer cache (lume config cache enable)", flush=True)
+    if _lume("config", "cache", "enable") != 0:
+        print(
+            "warning: could not enable Lume's cache; every run will re-download the image",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _vm_exists(vm: str) -> bool:
@@ -152,9 +182,10 @@ def run_target(target: Target, *, full: bool, keep: bool) -> bool:
     Args:
         target: The macOS image to validate.
         full: Whether to run the real bootstrap in-guest after render + lint.
-        keep: Whether to keep the VM (and reuse an existing one) instead of pulling a
-            fresh copy and deleting it. Each pull is tens of gigabytes, so this makes
-            repeated runs cheap at the cost of the throwaway guarantee.
+        keep: Whether to keep the VM (and reuse an existing one) instead of rebuilding
+            its disk and deleting it afterwards. The pull itself is layer-cached, but a
+            cached pull still re-materialises the VM disk and cold-boots it, so this
+            stays the faster path -- at the cost of the throwaway guarantee.
 
     Returns:
         True if the in-guest validation exited zero.
@@ -224,6 +255,8 @@ def main() -> int:
     if shutil.which("lume") is None:
         print(f"lume is not installed ({INSTALL_HINT})", file=sys.stderr)
         return 1
+
+    _ensure_layer_cache()
 
     targets = [Target(name=name, image=IMAGES[name]) for name in args.only or IMAGES]
     failed = [t.name for t in targets if not run_target(t, full=args.full, keep=args.keep)]

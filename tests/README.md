@@ -199,12 +199,15 @@ default `lume`/`lume` credentials, so there is no ssh password plumbing:
 /bin/bash -c "$(curl -fsSL https://cua.ai/lume/install.sh)"
 ```
 
-The VM is pulled fresh and deleted after each run, including a pre-run delete
-that clears a VM left behind by an interrupted one, so the host is never touched.
-That means every run re-downloads the image; `--keep` reuses an existing
-`chezmoi-test-<image>` VM and leaves it stopped, which is much faster to iterate
-with at the cost of the throwaway guarantee. Apple Silicon only, and each image
-is a large sparse disk — budget well over 50 GB free.
+The VM is pulled and deleted after each run, including a pre-run delete that
+clears a VM left behind by an interrupted one, so the host is never touched.
+`macos.py` enables Lume's image layer cache (`lume config cache enable`; Lume
+ships with it off), so `lume pull` writes the image layers to `~/.lume/cache` and
+the next run reuses them: only the first run downloads the image. `--keep` goes
+further and reuses an existing `chezmoi-test-<image>` VM left stopped, skipping
+the disk rebuild and cold boot too, at the cost of the throwaway guarantee. Apple
+Silicon only; the layer cache and each VM disk are large sparse files — budget
+well over 50 GB free.
 
 `IMAGES` at the top of `macos.py` holds Tahoe alone, and `--only` accepts only
 what is in it. Tahoe is the only family packaged as Lume's native
