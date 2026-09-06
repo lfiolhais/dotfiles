@@ -1,8 +1,13 @@
 {{- /*
-Which column of .chezmoidata/packages.toml applies to this machine: "apt" for
-Debian/Ubuntu/Pop!_OS, "fedora" for Fedora, "el" for the RHEL rebuilds (Rocky,
-AlmaLinux, CentOS Stream) which need EPEL and CRB. Shared so the two bootstrap
-scripts and the test harness cannot disagree about what distro they are on.
+Which column of .chezmoidata/packages.toml applies to this machine: "fedora" for
+Fedora, "el" for the RHEL rebuilds (Rocky, AlmaLinux, CentOS Stream) which need
+EPEL and CRB, and "apt" for everything else. Shared so the two bootstrap scripts
+and the test harness cannot disagree about what distro they are on.
+
+"apt" is the fallback rather than a match, so a distro outside these families --
+Arch, openSUSE, Alpine, or a machine whose osRelease is empty -- renders the apt
+branch and runs a package manager it does not have. Only the three families are
+supported; adding a fourth means a branch here and a column in the manifest.
 
 Note the ordering: Rocky and Alma report idLike "rhel centos fedora", so only an
 exact id of "fedora" means Fedora -- every other match in the family is "el".

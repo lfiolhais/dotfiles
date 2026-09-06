@@ -3,6 +3,10 @@ The distro package names for this machine, one entry per line (an entry may hold
 more than one name, e.g. "nodejs npm"). Shared by the 01 bootstrap script, which
 installs them, and by tests/docker/entrypoint.sh, which asks the package manager
 whether they all resolve before anything is installed.
+
+private_dot_config/mise/config.toml.tmpl is the third reader of the manifest. It
+reads .packages directly rather than through this template, because the no-sudo
+profile needs mise names and versions rather than one distro column.
 */ -}}
 {{- $target := includeTemplate "linux-target" . -}}
 {{- range $tool, $p := .packages }}
