@@ -1,4 +1,3 @@
-tap "fenio/tap"
 tap "nikitabobko/tap", trusted: true
 tap "riscv-software-src/riscv", trusted: true
 # Core application library for C
@@ -233,8 +232,6 @@ cask "adguard"
 cask "nikitabobko/tap/aerospace"
 # AirPods companion app
 cask "airbuddy"
-# GUI for mounting Linux filesystems
-cask "fenio/tap/anylinuxfs-gui", trusted: true
 # Display management tool
 cask "betterdisplay"
 # Calendar software focusing on flexibility and reliability
