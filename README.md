@@ -14,7 +14,7 @@ looks like a dotfile:
 | `dot_foo`              | `~/.foo`                     | a leading dot                                      |
 | `private_dot_ssh/`     | `~/.ssh`                     | target is `chmod 600`                              |
 | `encrypted_x.age`      | `~/x`                        | age-encrypted here, decrypted on apply             |
-| `exact_default/`       | `~/…/default`                | target holds exactly these entries, strays deleted |
+| `exact_foo/`           | `~/foo`                      | target holds exactly these entries, strays deleted |
 | `executable_mount-nas` | `~/.local/bin/mount-nas`     | target is `0755`                                   |
 | `config.fish.tmpl`     | `~/.config/fish/config.fish` | rendered as a Go template                          |
 | `run_once_…`           | —                            | script run once, tracked by content hash           |
@@ -80,17 +80,30 @@ reversible operation. In order:
 | `01-install-packages-darwin` | installs Homebrew, then the whole Brewfile, then rustup                    |
 | `01-install-packages-linux`  | apt/dnf and the `gh`/`starship` repos, or a rootless mise                  |
 | `02-setup-darwin` | rewrites preferences across the Dock, Finder, Safari, trackpad, keyboard, screenshots and Software Update, then kills the affected apps to reload them |
-| `03-setup-dock`              | appends six apps to the Dock, leaving existing items in place              |
+| `03-setup-dock`              | appends the apps it names to the Dock, leaving existing items in place     |
 | `04-setup-fish`              | adds fish to `/etc/shells` and makes it the login shell with `chsh`        |
 | `05-setup-bat`               | builds bat's theme cache                                                   |
 | `06-setup-mail`              | prints the manual mail steps; changes nothing                              |
 | `07-setup-nas`               | loads the NAS LaunchAgent and prints its one manual step                   |
+| `08-setup-ssh`               | puts each deployed key's passphrase in the login Keychain; asks for it     |
+| `09-build-aerc-filters`      | compiles aerc's `colorize` and `wrap` filters from their C sources         |
 
-The Brewfile is 113 formulae, 41 casks and 22 Mac App Store apps, so the first
-run is long and needs the App Store already signed in — `mas` cannot sign in and
-fails per-app without it. On macOS and Linux with sudo the login shell changes for the
-account being set up, and `chsh -s /bin/zsh` puts it back; without sudo the
-`exec` line in `~/.bashrc` is what to remove.
+The whole Brewfile is installed, which takes a while — `grep -c '^brew ' ~/.config/Brewfile`
+and the same for `^cask ` and `^mas ` say how much there is. The App Store part
+needs the App Store already signed in; `mas` cannot sign in, so those entries
+fail one by one and `01-install-packages-darwin` says so at the end without
+stopping the apply. Everything else is installed first and a failure there does
+stop it, because the rest of the bootstrap needs those packages.
+
+On macOS and Linux with sudo the login shell changes for the account being set
+up, and `chsh -s /bin/zsh` puts it back. Without sudo the login shell is left
+alone and `~/.bashrc` starts fish instead, which is what `dot_bashrc.tmpl`
+renders on that profile.
+
+`04-setup-fish` and `08-setup-ssh` both stop and wait: the first for the account
+password, which `sudo` and `chsh` each ask for, and the second for each key's
+passphrase. An apply with no terminal skips the passphrases and prints the
+command to run later.
 
 Scripts that do not apply to the current OS render empty, and chezmoi skips
 empty scripts, so the darwin-only entries above simply do not exist on Linux.
@@ -107,11 +120,15 @@ chezmoi doctor      # chezmoi's own environment check
 ### When a bootstrap script fails
 
 A `run_once_` script is recorded as done, by its content hash, only when it
-exits 0. Most of these scripts set `-eu` and so fail loudly and are retried by
-the next apply on their own. `01-install-packages-darwin` is the exception: it
-sets no `-e`, so a `brew bundle` that fails partway still exits 0, is recorded,
-and never runs again. The same holds for `02`, `03`, `06`, `setup-xcode-cli` and
-the decrypt script. Clearing the record is what re-runs one:
+exits 0. Most of these set `-eu`, so they fail loudly and the next apply retries
+them on its own. `01-install-packages-darwin` sets no `-e` — it has two halves
+that fail for different reasons — and instead checks `brew bundle` itself: it
+exits non-zero when anything but the App Store failed, so that case is retried
+too, and reports an App Store failure without stopping the apply.
+
+`02`, `03`, `06`, `setup-xcode-cli` and the decrypt script set no `-e` and are
+not checked, so a command that fails inside one of them leaves the script exiting
+0 and recorded. Clearing the record is what re-runs one:
 
 ```sh
 chezmoi state delete-bucket --bucket=scriptState   # forget every run_once_ hash
@@ -150,7 +167,12 @@ file with the naming conventions applied.
 
 `chezmoi re-add` only updates source files whose target still exists, so it
 cannot express a deletion. `chezmoi forget <path>` is what drops an entry from
-the source state.
+the source state. It also never overwrites a template, so a file whose source
+ends in `.tmpl` has to be edited here by hand.
+
+`chezmoi-sync` does the re-add and then names both of the things it could not
+do — the templates, and the untracked files sitting beside tracked ones. See
+[Commands](#commands).
 
 Encrypted files are edited through chezmoi, which decrypts to a temporary file
 and re-encrypts on save:
@@ -188,12 +210,45 @@ The fish functions live in `~/.config/fish/functions`, one function per file,
 named after the function. `functions -v <name>` prints what each one is for;
 these are the ones worth knowing about:
 
-| function      | what it does                                                       |
-| ---           | ---                                                                |
-| `update`      | update every package on the machine, whatever installed it         |
-| `get_contact` | pick a contact out of khard with fzf                               |
-| `khard-rm`    | delete contacts and drop them from the source state                |
-| `khard-track` | record contacts added with `khard new` (see [Contacts](#contacts)) |
+| function        | what it does                                                          |
+| ---             | ---                                                                   |
+| `update`        | update every package on the machine, whatever installed it            |
+| `chezmoi-sync`  | pull this machine's configuration back into the source state          |
+| `brew`          | Homebrew, with the subcommands that desync the Brewfile blocked       |
+| `khard`         | khard, recording every contact it writes in the source state          |
+| `khard-status`  | which contacts differ between this machine and the source, by name    |
+| `khard-rm`      | delete contacts and drop them from the source state                   |
+| `khard-track`   | record a contact by hand (see [Contacts](#contacts))                  |
+| `get_contact`   | pick a contact out of khard with fzf                                  |
+| `zip`           | zip, never storing a `.git` directory                                 |
+
+Three of those wrap a command rather than adding one, because the machine and
+the source state come apart silently otherwise:
+
+- `brew install`, `uninstall`, `reinstall`, `remove`, `tap` and `untap` are
+  refused, because they change which packages exist without recording it and the
+  next `chezmoi-packages dump` on another machine then removes them everywhere.
+  `chezmoi-packages add`/`remove` do both halves. `command brew …` bypasses the
+  guard for one command, and `set -x DOTFILES_BREW_UNGUARDED 1` for a whole
+  shell — the message says both when it refuses. `brew update`, `upgrade`,
+  `cleanup`, `bundle` and every query go straight through.
+- `khard new`, `edit`, `add-email`, `merge`, `copy`, `move` and `modify` re-add
+  the address book afterwards. `set -x DOTFILES_KHARD_UNTRACKED 1` turns that
+  off for a change meant to stay on one machine.
+- `zip` puts `-x '*.git*'` after the archive name, which is the only place zip
+  reads it as an exclude rather than as the archive to write.
+
+`chezmoi-sync` is the one to run after editing configuration in place. It
+re-adds every managed file, then reports the two things a re-add cannot do:
+files whose source is a template, which chezmoi never overwrites and which have
+to be edited here instead, and files sitting inside a managed directory that
+nothing tracks — the ones that disappear at the next reinstall.
+
+```sh
+chezmoi-sync            # re-add, then report what is left
+chezmoi-sync --dry-run  # report only
+chezmoi-sync --all      # list every untracked file rather than a few per directory
+```
 
 ## Packages
 
@@ -404,8 +459,17 @@ interrupted" dialog after leaving the house.
 mount-nas             # mount when reachable, unmount when not (what launchd runs)
 mount-nas status      # reachability, Keychain, and where the share is
 mount-nas mount       # mount now, saying why if it cannot (--dry-run works)
-mount-nas unmount     # unmount now
+mount-nas flush       # write outstanding data back to every mounted volume
+mount-nas unmount     # flush, then unmount; refuses while a file is open
+mount-nas unmount -f  # tear it down anyway, discarding what has not been written
 ```
+
+`unmount` is deliberately not forced. A plain unmount refuses while something
+still has the share open, and that refusal is what stands between a mounted
+share and silently discarded data — `--force` is how to override it, and it says
+so when it refuses. A share whose server has already stopped answering is forced
+whatever was asked, because there is nothing left to write back to and the stale
+mount raises alerts until it is cleared.
 
 Staying quiet takes a guard for each thing that raises a dialog:
 
@@ -417,6 +481,7 @@ Staying quiet takes a guard for each thing that raises a dialog:
   entry is a reason to do nothing rather than a reason to ask.
 - A mount whose server has vanished produces interrupted-connection alerts until
   it is cleared, so an unreachable NAS that is still mounted is force unmounted.
+  That is the one case where forcing loses nothing.
 
 The share is found in `mount(8)` by its device column, `//user@host/share`,
 rather than by `/Volumes/Book2`. A leftover directory of that name makes macOS
@@ -533,26 +598,39 @@ would have to live in `/var/root/.nsmbrc`.
 ## Contacts
 
 khard's address book is `work`: one age-encrypted vCard per contact, in
-`private_dot_config/khard/work/exact_default/` here and
+`private_dot_config/khard/work/default/` here and
 `~/.config/khard/work/default/<uid>.vcf` on the machine. chezmoi is what carries
 contacts between machines — vdirsyncer is not part of this setup, and CardDAV is
 not used.
 
-The `exact_` prefix makes deletions propagate: it declares the target directory
-to hold exactly the entries the source has, so chezmoi deletes any card whose
-source entry is gone.
-
-That cuts both ways:
-
-> A contact created with `khard new` has no source entry yet, so the next
-> `chezmoi apply` deletes it. Run `khard-track` after adding or editing a
-> contact, before the next apply.
+A card written by `khard new` has no entry in the source, so it exists on that
+one machine and nowhere else. `khard` is wrapped in a fish function that re-adds
+the address book after every subcommand that writes a card, so the ordinary case
+needs nothing:
 
 ```sh
-khard new                 # create a contact
-khard-track               # chezmoi add ~/.config/khard/work/default
+khard new                 # create a contact; the wrapper records it
 chezmoi diff              # the new .vcf appears as an addition
 ```
+
+`khard-track` is the same step by hand, for a card written by something other
+than khard. `set -x DOTFILES_KHARD_UNTRACKED 1` turns the wrapper off for a
+change meant to stay on one machine.
+
+Because each file is named after a uid and encrypted, `git status` and
+`chezmoi status` name contacts in a way nobody can read. `khard-status` decrypts
+each card and reports it by name, in three groups: on this machine and not in
+the source, in the source and not on this machine, and different between the
+two.
+
+```sh
+khard-status              # what differs, by contact name
+khard-status -a work      # -a names the address book; `work` is the default
+```
+
+A contact dropped from the source is not deleted from a machine that already has
+it — the source directory is not `exact_`. `TODO.md` has the trade-off and what
+restoring `exact_` would mean.
 
 `khard-rm` deletes contacts and drops them from the source state in one step. It
 opens an fzf picker, multi-select with TAB and confirm with ENTER:
@@ -595,10 +673,18 @@ mbsync -a && notmuch new
 ## Testing
 
 There is no build. Testing a change means `chezmoi diff`, then the harness:
-`tests/check.py` on this host, `tests/linux.py` for the Linux targets in Docker,
-`tests/macos.py` for macOS in a Lume VM. `tests/check.py` needs Python 3.11 or
-newer, plus `ruff` and `shellcheck`; it performs no destructive action and never
-runs the bootstrap scripts.
+`tests/render-matrix.sh` first because it takes seconds, then `tests/check.py`
+on this host, `tests/linux.py` for the Linux targets in Docker, and
+`tests/macos.py` for macOS in a Lume VM. None of them performs a destructive
+action or runs a bootstrap script.
+
+`tests/render-matrix.sh` renders every template for all three profiles and
+parses the result — shell with `bash -n` and `shellcheck`, fish with `fish -n`.
+It needs no Docker, which is what makes it the one to run while editing; its
+header says what that render can and cannot prove.
+
+`tests/check.py` needs Python 3.11 or newer, plus `ruff`, `shellcheck` and
+`fish`.
 
 Other machines pull `main`, so a broken `main` breaks them. A `pre-push` hook
 runs `check.py` before any push to `main`; `core.hooksPath` is a local git

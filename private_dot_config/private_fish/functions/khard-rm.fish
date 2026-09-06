@@ -4,8 +4,9 @@ function __print_help_khard_rm
     echo -e "\t-a | --addressbook => Address book to delete from. Defaults to 'work'"
     echo -e "\t-n | --dry-run     => List the selected contacts and stop, deleting nothing"
     echo -e "\t-N | --no-forget   => Delete the contacts but leave the chezmoi source state alone."
-    echo -e "\t                      The source directory is exact_, so the next 'chezmoi"
-    echo -e "\t                      apply' restores every contact deleted this way."
+    echo -e "\t                      chezmoi recreates a managed file that is missing from"
+    echo -e "\t                      the target, so the next 'chezmoi apply' brings every"
+    echo -e "\t                      contact deleted this way straight back."
     echo
     echo -e "\tDeletes the vcf under ~/.config/khard/work/default and drops its entry"
     echo -e "\tfrom the chezmoi source. Recovering one afterwards means git history in"

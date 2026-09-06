@@ -1,9 +1,10 @@
 # Test harness
 
-Other machines pull `main`, so a broken `main` breaks them. These three commands
-are what stands between a change and that: `check.py` validates the current host,
-`linux.py` the Linux targets, `macos.py` a clean macOS. None of them is run
-automatically except through the `pre-push` hook at the end of this file.
+Other machines pull `main`, so a broken `main` breaks them. These are what stands
+between a change and that: `render-matrix.sh` parses every template for every
+profile in seconds, `check.py` validates the current host, `linux.py` the Linux
+targets, `macos.py` a clean macOS. None of them is run automatically except
+through the `pre-push` hook at the end of this file.
 
 Only `check.py` exercises the real age key. The container and VM harnesses run
 `chezmoi archive --exclude encrypted`, since neither has the key, so a change to
@@ -16,9 +17,9 @@ python3 tests/check.py
 ```
 
 It needs Python 3.11 or newer (it uses `enum.StrEnum`), `ruff`, `shellcheck`,
-`chezmoi`, and a working age key. Homebrew and `uv` are optional: their checks
-are skipped or advisory when absent. It runs on macOS and Linux, performs no
-destructive action, and never runs the `run_*` scripts.
+`fish`, `chezmoi`, and a working age key. Homebrew and `uv` are optional: their
+checks are skipped or advisory when absent. It runs on macOS and Linux, performs
+no destructive action, and never runs the `run_*` scripts.
 
 It:
 
@@ -30,7 +31,26 @@ It:
   hard failures; `--severity=warning` is advisory. This is OS-aware: a script
   gated off for the current OS renders empty and is skipped, and `linux.py`
   covers those;
-- checks the Brewfile, skipping it when `brew` is absent;
+- lints the deployed shell that is not a `run_*` script — `dot_bashrc.tmpl`,
+  aerc's filter scripts, notmuch's `post-new` hook. `_scripts()` finds only
+  `run_*` at the repo root, so these are listed by hand in `SHELL_FILES`, and an
+  rc file with no shebang carries a `# shellcheck shell=` directive instead;
+- parses every fish file under `private_dot_config/private_fish/` with
+  `fish -n`, rendering the templates first. fish is the login shell, so a parse
+  error here is what every new terminal opens with, and nothing else checks it:
+  ruff does not read fish and shellcheck refuses it;
+- hands the rendered ssh config to `ssh -G` and the rendered gitconfig to
+  `git config --list`, so the programs that read them are what say whether they
+  are valid. ssh rejects a whole config file over one option it does not know,
+  which stops every ssh on the machine rather than one host;
+- refuses a compiled binary or a program-written file anywhere in the source. A
+  binary is built for one architecture and one OS, and chezmoi copies it
+  unchanged to every machine; `BINARY_MAGIC` is the ELF and Mach-O magics and
+  `GENERATED_NAMES` the filenames — `.DS_Store` and the like — that no source
+  directory should carry;
+- checks the Brewfile, skipping it when `brew` is absent. `mas` entries are left
+  out of that check: verifying one runs `mas list`, which talks to the App Store
+  and hangs until the harness's timeout when there is no network;
 - checks the Brewfile against `.chezmoidata/packages.toml`. Every `brew "…"` and
   `uv "…"` entry must be claimed by a `[packages]` entry through its `brew`
   field, which is what stops a `brew bundle dump` on the Mac from silently
@@ -74,6 +94,30 @@ It:
 It ends with `All checks passed. Review the dry-run diff above, then push.` and
 exit code 0, or `FAILED — fix the issues above before pushing to main.` and exit
 code 1.
+
+## `render-matrix.sh` — every profile, in seconds
+
+```sh
+bash tests/render-matrix.sh                 # every template
+bash tests/render-matrix.sh dot_bashrc.tmpl # one or more source-relative paths
+```
+
+Needs `chezmoi`, and uses `shellcheck` and `fish` where they are installed. It
+renders every template for all three profiles — darwin, linux with sudo, linux
+without — and parses the result: `bash -n` and `shellcheck` for shell, `fish -n`
+for fish. A template gated off for a profile renders empty, and chezmoi skips an
+empty `run_` script, so empty is a pass.
+
+chezmoi fills `.chezmoi.os` from the machine it is running on, so the OS cannot
+be chosen through data. Each template is copied with `.chezmoi.os` rewritten to a
+`.fakeos` data variable, which is supplied alongside `.sudo`; everything else
+about the render is the real one.
+
+That substitution is the limit of what it proves. It says the other OS's branch
+renders and parses. It does not run a Linux chezmoi and knows nothing about that
+machine's package names or its `osRelease` — `linux.py` answers those, in
+containers, and is the authority. This one needs no Docker and takes seconds, so
+it is the one to run while editing.
 
 ## `linux.py` — Docker matrix
 

@@ -1,0 +1,21 @@
+# Both hosts use ~/.ssh/id_ed25519, which this repository deploys age-encrypted
+# beside the ~/.ssh/gh_sign that gitconfig signs commits with.
+#
+# AddKeysToAgent puts the key in the agent the first time ssh needs it, so the
+# passphrase is asked for once per agent rather than once per connection.
+{{ if eq .chezmoi.os "darwin" -}}
+# UseKeychain then stores that passphrase in the login Keychain, so it is asked
+# for once per machine rather than once per reboot. It is a macOS extension:
+# OpenSSH elsewhere rejects the whole file over it and every ssh on the machine
+# fails, which is why this file is a template and the line is darwin-only.
+{{ end -}}
+Host github.com
+  AddKeysToAgent yes
+{{ if eq .chezmoi.os "darwin" }}  UseKeychain yes
+{{ end }}  IdentityFile ~/.ssh/id_ed25519
+
+Host *.botasal.xyz
+  User lfiolhais
+  AddKeysToAgent yes
+{{ if eq .chezmoi.os "darwin" }}  UseKeychain yes
+{{ end }}  IdentityFile ~/.ssh/id_ed25519

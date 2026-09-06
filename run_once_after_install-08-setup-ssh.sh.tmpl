@@ -1,0 +1,52 @@
+{{- if eq .chezmoi.os "darwin" -}}
+#!/usr/bin/env bash
+# Both deployed keys are passphrase-protected. ssh_config's UseKeychain stores a
+# passphrase in the login Keychain the first time ssh asks for it, but git's
+# commit signing reads its key through the agent rather than through ssh, so
+# nothing puts gh_sign's passphrase there on its own -- and until it is there,
+# config.fish's `ssh-add --apple-load-keychain` finds nothing and every terminal
+# opened after a reboot asks again.
+#
+# `ssh-add --apple-use-keychain` is what stores it. Only a person can type a
+# passphrase, so this runs interactively when it has a terminal and prints the
+# command when it does not.
+set -u
+
+keys=("${HOME}/.ssh/id_ed25519" "${HOME}/.ssh/gh_sign")
+
+# Load whatever the Keychain already holds, so a key stored on an earlier run is
+# recognised below instead of being asked for again.
+ssh-add -q --apple-load-keychain > /dev/null 2>&1 || true
+
+loaded="$(ssh-add -l 2> /dev/null)"
+
+for key in "${keys[@]}"; do
+    if [ ! -f "${key}" ]; then
+        echo "${key} is not deployed; skipping." >&2
+        continue
+    fi
+
+    fingerprint="$(ssh-keygen -lf "${key}" | awk '{print $2}')"
+    if printf '%s\n' "${loaded}" | grep -qF -- "${fingerprint}"; then
+        echo "${key}: already in the agent."
+        continue
+    fi
+
+    if [ -t 0 ]; then
+        echo
+        echo "Adding ${key} to the agent and storing its passphrase in the login"
+        echo "Keychain. This asks for the key's passphrase; it is asked once."
+        ssh-add --apple-use-keychain "${key}" \
+            || echo "${key}: not added. Re-run this script to try again." >&2
+    else
+        echo
+        echo "${key} is not in the agent, and this apply has no terminal to ask"
+        echo "for its passphrase on. Run once, and every later shell is silent:"
+        echo "    ssh-add --apple-use-keychain ${key}"
+    fi
+done
+
+echo
+echo "'ssh-add -l' lists what the agent holds. A new terminal loads the same"
+echo "keys from the Keychain without asking."
+{{ end -}}

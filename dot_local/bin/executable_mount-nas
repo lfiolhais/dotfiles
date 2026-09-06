@@ -29,7 +29,9 @@ Usage::
     mount-nas              # mount when reachable, unmount when not
     mount-nas status       # reachability, Keychain, and where the share is
     mount-nas mount        # mount now, saying why if it cannot
-    mount-nas unmount      # unmount now
+    mount-nas flush        # write outstanding data back to every mounted volume
+    mount-nas unmount      # flush, then unmount; refuses while a file is open
+    mount-nas unmount -f   # tear the mount down anyway, discarding what is open
     mount-nas … --dry-run  # print the commands, run none of them
 """
 
@@ -53,6 +55,7 @@ from mountnas import (
     NasError,
     Outcome,
     PackagesError,
+    flush,
     mount,
     sync,
     table,
@@ -164,10 +167,37 @@ def cmd_mount(*, dry_run: bool) -> int:
     return 1 if failed else 0
 
 
-def cmd_unmount(*, dry_run: bool) -> int:
-    """Unmount every share that is mounted.
+def cmd_flush(*, dry_run: bool) -> int:
+    """Write outstanding data back to every mounted volume.
+
+    Worth running by hand before the network goes away -- shutting a laptop and
+    carrying it elsewhere is what turns an outstanding write into a lost one,
+    because the NAS is gone by the time anything notices.
 
     Args:
+        dry_run: Report the command without running it.
+
+    Returns:
+        Process exit code: 0. A flush that fails raises ``NasError``.
+
+    """
+    argv = flush(dry_run=dry_run)
+    print(f"{'would run' if dry_run else 'ran'}: {shlex.join(argv)}")
+    return 0
+
+
+def cmd_unmount(*, force: bool, dry_run: bool) -> int:
+    """Unmount every share that is mounted.
+
+    A share whose server still answers is flushed and then unmounted plainly, so
+    an open file or an outstanding write refuses the unmount instead of being
+    discarded; ``force`` is what overrides that refusal. A share whose server has
+    stopped answering is forced whatever was asked, because nothing can be
+    written back to it and the stale mount raises interrupted-connection alerts
+    until it is cleared.
+
+    Args:
+        force: Tear a reachable mount down without waiting for its writes.
         dry_run: Report the commands without running them.
 
     Returns:
@@ -175,14 +205,31 @@ def cmd_unmount(*, dry_run: bool) -> int:
 
     """
     snapshot = table()
-    failed = False
+    mounted = []
     for share in SHARES:
         path = share.mountpoint(snapshot)
-        if not path:
+        if path is None:
             print(f"{share.name}: not mounted")
-            continue
-        outcome = unmount(share, path, dry_run=dry_run)
+        else:
+            mounted.append((share, path, share.reachable()))
+
+    # One flush covers every volume, so it is done once rather than per share,
+    # and only while something it could still write to is answering.
+    if not force and any(reachable for _, _, reachable in mounted):
+        flush(dry_run=dry_run)
+
+    failed = False
+    for share, path, reachable in mounted:
+        gone = not reachable
+        outcome = unmount(share, path, force=force or gone, dry_run=dry_run)
         show(outcome, dry_run=dry_run)
+        if not outcome.ok and not (force or gone):
+            print(
+                f"{share.name}: something still has it open. Close that, or "
+                f"'mount-nas unmount --force' to tear it down and lose whatever "
+                f"has not been written back.",
+                file=sys.stderr,
+            )
         failed = failed or not outcome.ok
     return 1 if failed else 0
 
@@ -203,13 +250,24 @@ def main() -> int:
         "command",
         nargs="?",
         default="sync",
-        choices=("sync", "status", "mount", "unmount"),
+        choices=("sync", "status", "mount", "flush", "unmount"),
         help="what to do (default: sync)",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="print the commands instead of running them",
+    )
+    parser.add_argument(
+        "-f",
+        "--force",
+        action="store_true",
+        help=(
+            "unmount: tear the mount down even while the NAS answers and files "
+            "are open, discarding anything not yet written back. Without it a "
+            "busy mount refuses, and a NAS that has stopped answering is forced "
+            "anyway"
+        ),
     )
     args = parser.parse_args()
 
@@ -218,8 +276,10 @@ def main() -> int:
             return cmd_status()
         if args.command == "mount":
             return cmd_mount(dry_run=args.dry_run)
+        if args.command == "flush":
+            return cmd_flush(dry_run=args.dry_run)
         if args.command == "unmount":
-            return cmd_unmount(dry_run=args.dry_run)
+            return cmd_unmount(force=args.force, dry_run=args.dry_run)
         return cmd_sync(dry_run=args.dry_run)
     except (NasError, PackagesError) as exc:
         print(f"mount-nas: {exc}", file=sys.stderr)

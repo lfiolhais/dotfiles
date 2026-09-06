@@ -3,13 +3,18 @@ CLAUDE.md
 LICENSE
 tests
 README.md
+TODO.md
 **/__pycache__
 {{ if ne .chezmoi.os "darwin" }}
 .config/aerospace
 .config/linearmouse
 .config/leaderkey
 .config/Brewfile
+.local/bin/cask-updates
 .local/bin/mount-nas
+# Its shebang is `uv run --script`, and uv is a Homebrew and Fedora package
+# only. It also maintains the Brewfile, which is macOS's package list.
+.local/bin/chezmoi-packages
 Library/LaunchAgents/xyz.botasal.mount-nas.plist
 {{ end }}
 {{ if or (ne .chezmoi.os "linux") .sudo }}

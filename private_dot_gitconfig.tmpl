@@ -1,0 +1,98 @@
+[core]
+	excludesfile = ~/.gitignore_global
+	editor = nvim
+	pager = delta
+[interactive]
+    diffFilter = delta --color-only
+[delta]
+    navigate = true  # use n and N to move between diff sections
+    dark = true      # or light = true, or omit for auto-detection
+    features = catppuccin-mocha
+    line-numbers = true
+[diff]
+	# Detect copies as well as renames
+	renames = copies
+[diff "bin"]
+	# Use `hexdump` to diff binary files
+	textconv = hexdump -v -C
+[help]
+	# Automatically correct and execute mistyped commands
+	autocorrect = 1
+[merge]
+	# Include summaries of merged commits in newly created merge commit messages
+    log = true
+    conflictStyle = zdiff3
+[push]
+	default = simple
+	# Make `git push` push relevant annotated tags when pushing branches out.
+	followTags = true
+	autoSetupRemote = true
+[user]
+	name = Luís Fiolhais
+	email = luis.azenhas.fiolhais@tecnico.ulisboa.pt
+	# Absolute because git does not expand ~ here, and templated because the
+	# home directory is not /Users/lipe on Linux.
+	signingkey = {{ .chezmoi.homeDir }}/.ssh/gh_sign.pub
+[filter "lfs"]
+	clean = git-lfs clean -- %f
+	smudge = git-lfs smudge -- %f
+	process = git-lfs filter-process
+	required = true
+[init]
+	defaultBranch = main
+[pull]
+	rebase = true
+
+[delta "catppuccin-mocha"]
+	blame-palette = "#1e1e2e #181825 #11111b #313244 #45475a"
+	commit-decoration-style = "#6c7086" bold box ul
+	dark = true
+	file-decoration-style = "#6c7086"
+	file-style = "#cdd6f4"
+	hunk-header-decoration-style = "#6c7086" box ul
+	hunk-header-file-style = bold
+	hunk-header-line-number-style = bold "#a6adc8"
+	hunk-header-style = file line-number syntax
+	line-numbers-left-style = "#6c7086"
+	line-numbers-minus-style = bold "#f38ba8"
+	line-numbers-plus-style = bold "#a6e3a1"
+	line-numbers-right-style = "#6c7086"
+	line-numbers-zero-style = "#6c7086"
+	# 35% red 65% base
+	minus-emph-style = bold syntax "#694559"
+	# 20% red 80% base
+	minus-style = syntax "#493447"
+	# 35% green 65% base
+	plus-emph-style = bold syntax "#4e6356"
+	# 20% green 80% base
+	plus-style = syntax "#394545"
+	map-styles = \
+		bold purple => syntax "#5b4e74", \
+		bold blue => syntax "#445375", \
+		bold cyan => syntax "#446170", \
+		bold yellow => syntax "#6b635b"
+	# Should match the name of the bat theme
+	syntax-theme = Catppuccin Mocha
+
+[sendemail]
+    # Absolute on macOS: git send-email runs this through a shell that a GUI
+    # launch does not give Homebrew's prefix to. On Linux msmtp comes from the
+    # distribution package and is already on every PATH -- except on the no-sudo
+    # profile, which installs no mail stack at all: msmtp, isync, notmuch and
+    # aerc each have no `mise` field in the manifest. Sending mail there means
+    # installing msmtp by hand first; this line is what it will then find.
+{{- if eq .chezmoi.os "darwin" }}
+    sendmailCmd = /opt/homebrew/bin/msmtp -a ist
+{{- else }}
+    sendmailCmd = msmtp -a ist
+{{- end }}
+	annotate = yes
+[gpg]
+	format = ssh
+[commit]
+	gpgsign = true
+[rebase]
+	autoSquash = true
+	autoStash = true
+[format]
+	signOff = yes

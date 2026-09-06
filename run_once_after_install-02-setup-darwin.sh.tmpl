@@ -145,9 +145,9 @@ sudo defaults write /Library/Preferences/com.apple.windowserver DisplayResolutio
 # Finder: disable window animations and Get Info animations
 defaults write com.apple.finder DisableAllAnimations -bool true
 
-# Open new Finder windows on the Home. The codes are PfDe (Desktop), PfHm
-# (Home), PfDo (Documents) and PfLo (a path). NewWindowTargetPath below is read
-# only when the target is PfLo, so it has no effect as written.
+# Open new Finder windows on the Home directory. The codes are PfDe (Desktop),
+# PfHm (Home), PfDo (Documents) and PfLo (an arbitrary path). Only PfLo reads a
+# companion NewWindowTargetPath; the other three name the directory themselves.
 defaults write com.apple.finder NewWindowTarget -string "PfHm"
 
 # Show icons for hard drives, servers, and removable media on the desktop

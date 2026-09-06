@@ -1,0 +1,408 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["tomlkit>=0.13,<1"]
+# ///
+r"""Add, remove, and look up the packages these dotfiles install.
+
+Two files describe every package. ``private_dot_config/Brewfile`` is what macOS
+installs, and ``.chezmoidata/packages.toml`` maps each of those onto its name on
+each Linux target -- or records why it is not installed there. Keeping them in
+step by hand means knowing whether a tool exists on another distro and what it is
+called there, which is what ``search`` answers.
+
+They are not the same kind of file. The Brewfile is a *dump* of what this Mac
+has: ``brew bundle dump`` writes it, and nothing here edits it by hand. The
+manifest is *authored*, and this command is its editor -- so ``add`` and
+``remove`` drive both ends, installing or uninstalling the package and then
+re-dumping, rather than leaving half the job undone.
+
+An entry naming no Linux target is not installed on Linux, and its ``note`` says
+why; there is no separate list of skipped packages.
+
+Usage::
+
+    chezmoi-packages search ripgrep
+    chezmoi-packages add ripgrep --apt ripgrep --fedora ripgrep --mise ripgrep
+    chezmoi-packages add dockutil --note "drives the macOS Dock"
+    chezmoi-packages remove ripgrep
+    chezmoi-packages dump
+
+It edits the chezmoi source directory, wherever that is, so it can be run from
+anywhere. ``search`` needs Docker for the distribution repositories; ``dump``,
+and the install half of ``add``/``remove``, need Homebrew.
+
+Afterwards, from the source directory (``chezmoi cd``),
+``python3 tests/check.py`` confirms the two files still agree and
+``python3 tests/linux.py`` confirms every name resolves in the repositories it
+claims to.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+# The shared library sits beside this script's bin directory, not on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib" / "python"))
+
+from chezpkg import (
+    TARGETS,
+    Brewfile,
+    Entry,
+    Manifest,
+    PackagesError,
+    Search,
+    Source,
+    have,
+)
+
+# The fields `add` takes as flags. `brew` is not among them: it defaults to the
+# tool's own name, and --brew/--no-brew override that.
+FLAGS = ("apt", "fedora", "el", "mise", "mise_exe", "repo", "note")
+# One line per flag, because "its el name" tells a reader nothing about what el
+# is or when a flag is required.
+FLAG_HELP = {
+    "apt": "package name on Debian, Ubuntu and Pop!_OS",
+    "fedora": "package name on Fedora",
+    "el": "package name on the RHEL rebuilds (Rocky, AlmaLinux, CentOS Stream)",
+    "mise": "tool name in mise, the package manager of the no-sudo Linux profile",
+    "mise_exe": "binary mise installs, when it differs from the tool name",
+    "repo": "why the 01 script installs it from its own repository (gh, starship)",
+    "note": "why it installs nowhere on Linux; required when no target is named",
+}
+# What to run after an edit, printed once at the end of one.
+AFTERWARDS = "Now run: python3 tests/check.py  &&  python3 tests/linux.py in the source directory"
+
+
+def _order(entry: Entry) -> tuple[str, str]:
+    """Sort entries by kind, then name.
+
+    Args:
+        entry: The entry to place.
+
+    Returns:
+        Its sort key.
+
+    """
+    return (entry.kind, entry.name)
+
+
+def _report_dump(source: Source, before: Brewfile, after: Brewfile) -> None:
+    """Say what the refreshed Brewfile gained and lost.
+
+    Args:
+        source: The source directory.
+        before: The Brewfile as it was.
+        after: The Brewfile as it now is.
+
+    """
+    added = sorted(set(after.entries) - set(before.entries), key=_order)
+    gone = sorted(set(before.entries) - set(after.entries), key=_order)
+
+    print(f"{source.name(after.path)} refreshed from this machine")
+    for entry in added:
+        print(f"  + {entry}")
+    for entry in gone:
+        print(f"  - {entry}")
+    if not added and not gone:
+        print("  (no packages added or removed)")
+
+
+def _report_parity(manifest: Manifest, brewfile: Brewfile) -> None:
+    """Say what the two files still disagree about.
+
+    The same comparison ``tests/check.py`` fails on, reported here while the
+    change that caused it is still in mind.
+
+    Args:
+        manifest: The manifest to check.
+        brewfile: The Brewfile to check it against.
+
+    """
+    problems = manifest.problems(brewfile)
+    if not problems:
+        print("\nthe manifest accounts for every Brewfile entry")
+        return
+
+    print("\nthe two files disagree:")
+    for problem in problems:
+        print(f"  {problem}")
+    print("\n  chezmoi-packages search NAME    what Linux calls it")
+    print("  chezmoi-packages remove NAME    drop it from the manifest")
+
+
+def dump(source: Source, _args: argparse.Namespace) -> int:
+    """Rewrite the Brewfile from what this machine has installed.
+
+    Args:
+        source: The source directory.
+        _args: Unused; ``dump`` takes no arguments.
+
+    Returns:
+        Process exit code, always 0.
+
+    """
+    before = Brewfile.read(source.brewfile)
+    after = Brewfile.refresh(source.brewfile)
+
+    _report_dump(source, before, after)
+    _report_parity(Manifest.read(source.manifest), after)
+
+    return 0
+
+
+def search(args: argparse.Namespace) -> int:
+    """Report what every platform calls a tool, then print the ``add`` to run.
+
+    Args:
+        args: The parsed command line.
+
+    Returns:
+        Process exit code: 0 if any platform had it, 1 if none did.
+
+    """
+    if not have("docker"):
+        print(
+            "docker is not available; only brew and mise will be searched",
+            file=sys.stderr,
+        )
+
+    found = Search.everywhere(args.name)
+
+    print(f"\n{found.query}\n")
+    for match in found.matches:
+        print(f"  {match.platform:<8}  {match.summary}")
+
+    if found.empty:
+        print(f"\nNo platform has {found.query}. Nothing to add.")
+        return 1
+
+    print("\nExact matches only; check the near-matches above for a rename.\n")
+    print(f"  {found.add_command}")
+    if "brew" not in found.exact:
+        print(
+            f"\n  (no Homebrew formula named {found.query}; --no-brew records a Linux-only tool)",
+        )
+
+    return 0
+
+
+def _fields(args: argparse.Namespace) -> dict[str, str]:
+    """Turn the ``add`` flags into a manifest entry.
+
+    Args:
+        args: The parsed command line.
+
+    Returns:
+        The entry's fields.
+
+    Raises:
+        PackagesError: If the entry would install nowhere without saying why.
+
+    """
+    fields = {} if args.no_brew else {"brew": args.brew or args.name}
+    fields.update(
+        {field: getattr(args, field) for field in FLAGS if getattr(args, field, None)},
+    )
+
+    targeted = bool(TARGETS & fields.keys()) or "repo" in fields
+    if not targeted and "note" not in fields:
+        message = (
+            f"{args.name}: this entry installs nowhere on Linux. Name a target "
+            f"(--apt/--fedora/--el/--mise), or say why it does not with --note"
+        )
+        raise PackagesError(message)
+    if not targeted and "brew" not in fields:
+        message = f"{args.name}: --no-brew with no Linux target would record nothing"
+        raise PackagesError(message)
+
+    return fields
+
+
+def add(source: Source, args: argparse.Namespace) -> int:
+    """Install a package and record what every target calls it.
+
+    Args:
+        source: The source directory.
+        args: The parsed command line.
+
+    Returns:
+        Process exit code, always 0 -- anything that fails raises instead.
+
+    """
+    fields = _fields(args)
+    formula = fields.get("brew")
+
+    if formula and not args.no_install:
+        if have("brew"):
+            Brewfile.install(formula)
+            _report_dump(
+                source,
+                Brewfile.read(source.brewfile),
+                Brewfile.refresh(source.brewfile),
+            )
+        else:
+            print(
+                "no Homebrew here; recording the entry without installing",
+                file=sys.stderr,
+            )
+
+    manifest = Manifest.read(source.manifest)
+    verb = "updated" if args.name in manifest.packages else "added"
+    manifest.added(args.name, fields).save()
+
+    print(f"{verb} [packages.{args.name}] in {source.name(source.manifest)}")
+    if not (TARGETS & fields.keys()) and "repo" not in fields:
+        print(f"  not installed on Linux: {fields['note']}")
+    print(f"\n{AFTERWARDS}")
+
+    return 0
+
+
+def _detach(source: Source, entries: tuple[Entry, ...], *, uninstall: bool) -> None:
+    """Take a package off this machine, then refresh the Brewfile from it.
+
+    The refresh happens either way. ``--no-uninstall`` is for a package that is
+    already gone from the machine, and re-dumping is exactly what drops the line
+    it left behind in the Brewfile.
+
+    Args:
+        source: The source directory.
+        entries: Every Brewfile line naming the package.
+        uninstall: Whether to uninstall it first.
+
+    """
+    if not have("brew"):
+        print("no Homebrew here; leaving the Brewfile alone", file=sys.stderr)
+        return
+
+    if uninstall:
+        for done in Brewfile.uninstall(entries):
+            print(f"  {done}")
+
+    _report_dump(
+        source,
+        Brewfile.read(source.brewfile),
+        Brewfile.refresh(source.brewfile),
+    )
+
+
+def remove(source: Source, args: argparse.Namespace) -> int:
+    """Remove a package from this machine, the Brewfile, and the manifest.
+
+    Args:
+        source: The source directory.
+        args: The parsed command line.
+
+    Returns:
+        Process exit code, always 0 -- anything that fails raises instead.
+
+    Raises:
+        PackagesError: If neither file has ever heard of the name.
+
+    """
+    manifest = Manifest.read(source.manifest)
+    known = args.name in manifest.packages
+    entries = Brewfile.read(source.brewfile).declaring(manifest.formula(args.name))
+
+    if not known and not entries:
+        message = f"{args.name} is in neither the manifest nor the Brewfile"
+        raise PackagesError(message)
+
+    if entries:
+        _detach(source, entries, uninstall=not args.no_uninstall)
+
+    if known:
+        manifest.removed(args.name).save()
+        print(f"removed [packages.{args.name}] from {source.name(source.manifest)}")
+
+    print(f"\n{AFTERWARDS}")
+
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Define the command line.
+
+    Returns:
+        The configured parser.
+
+    """
+    parser = argparse.ArgumentParser(
+        prog="chezmoi-packages",
+        description=__doc__.splitlines()[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    found = commands.add_parser(
+        "search",
+        help="what each platform calls a tool (needs Docker)",
+    )
+    found.add_argument("name", help="the tool to look for, as macOS names it")
+
+    new = commands.add_parser("add", help="install a package and record it")
+    new.add_argument("name", help="the manifest key, normally the macOS name")
+    formula = new.add_mutually_exclusive_group()
+    formula.add_argument("--brew", help="its formula, when it differs from the name")
+    formula.add_argument(
+        "--no-brew",
+        action="store_true",
+        help="a Linux-only tool: macOS neither installs nor records it",
+    )
+    for field in FLAGS:
+        new.add_argument(f"--{field.replace('_', '-')}", help=FLAG_HELP[field])
+    new.add_argument(
+        "--no-install",
+        action="store_true",
+        help="record it without installing it (it is already there, or this is not a Mac)",
+    )
+
+    gone = commands.add_parser(
+        "remove",
+        help="uninstall a package, re-dump the Brewfile, and drop its entry",
+    )
+    gone.add_argument("name", help="the manifest key to remove")
+    gone.add_argument(
+        "--no-uninstall",
+        action="store_true",
+        help="it is already off this machine: re-dump and drop the entry, uninstalling nothing",
+    )
+
+    commands.add_parser(
+        "dump",
+        help="refresh the Brewfile from this Mac (needs Homebrew)",
+    )
+
+    return parser
+
+
+def main() -> int:
+    """Dispatch the subcommand.
+
+    Returns:
+        Process exit code: 0 on success, 1 on a reported failure.
+
+    """
+    args = build_parser().parse_args()
+
+    try:
+        if args.command == "search":
+            return search(args)
+
+        # `search` is dispatched before this table because it is the one
+        # subcommand that must not call Source.discover(): it answers "what is
+        # this called elsewhere", which is worth asking from a machine that has
+        # no chezmoi source directory at all.
+        handler = {"add": add, "remove": remove, "dump": dump}[args.command]
+
+        return handler(Source.discover(), args)
+    except PackagesError as exc:
+        print(f"chezmoi-packages: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

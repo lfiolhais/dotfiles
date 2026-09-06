@@ -1,45 +1,45 @@
 {{- if eq .chezmoi.os "darwin" -}}
 #!/usr/bin/env bash
 
-# $? below is grep's status, since it ends the pipeline: non-zero means either
-# pkgutil found no such package or its output had no version line. Adding a
-# command between these two lines breaks the test silently.
-xcode_version=$(pkgutil --pkg-info=com.apple.pkg.CLTools_Executables | grep version)
-
-if [[ $? != 0 ]]; then
+# The pipeline's status is grep's, since grep ends it: non-zero means either
+# pkgutil found no such package or its output had no version line. Both mean the
+# command-line tools have to be installed.
+if xcode_version=$(pkgutil --pkg-info=com.apple.pkg.CLTools_Executables | grep version); then
+    # $xcode_version is grep's whole matching line, i.e. "version: 15.3.0.0.1".
+    echo "Found Xcode CLI ${xcode_version}"
+    echo "Skipping install"
+else
+    echo "Installing the Xcode command-line tools."
+    echo "A window opens and asks to confirm; this waits until it has finished."
     xcode-select --install
 
     # `xcode-select --install` opens a GUI installer and returns immediately, so
     # block until a developer directory is selected. This reports the directory
     # rather than the package, so it can succeed slightly before the install has
     # finished writing.
-    until $(xcode-select --print-path &> /dev/null); do
-      sleep 5;
+    until xcode-select --print-path > /dev/null 2>&1; do
+        sleep 5
     done
-else
-    # $xcode_version is grep's whole matching line, i.e. "version: 15.3.0.0.1".
-    echo "Found Xcode CLI ${xcode_version}"
-    echo "Skipping install"
 fi
 
 # oahd is Rosetta's translation daemon: it runs only on Apple Silicon with
 # Rosetta installed. On an Intel Mac it never matches and --install-rosetta
 # fails, so this script exits 1 and stops the bootstrap -- Apple Silicon is
 # assumed here and by the /opt/homebrew paths in scripts 01, 03, 04 and 05.
-if /usr/bin/pgrep oahd >/dev/null 2>&1 ; then
-        echo "Rosetta 2 is already installed"
+if /usr/bin/pgrep oahd > /dev/null 2>&1; then
+    echo "Rosetta 2 is already installed"
+else
+    echo "Rosetta 2 is missing - installing"
+    echo
+    # --agree-to-license accepts Apple's licence without a prompt, so an
+    # unattended apply is not left waiting on one.
+    /usr/sbin/softwareupdate --install-rosetta --agree-to-license
+    echo
+    if /usr/bin/pgrep oahd > /dev/null 2>&1; then
+        echo "Rosetta 2 is now installed"
     else
-        echo "Rosetta 2 is missing - installing"
-        echo
-        # --agree-to-license accepts Apple's licence without a prompt, so an
-        # unattended apply is not left waiting on one.
-        /usr/sbin/softwareupdate --install-rosetta --agree-to-license
-        echo
-        if /usr/bin/pgrep oahd >/dev/null 2>&1 ; then
-            echo "Rosetta 2 is now installed"
-        else
-            echo "Rosetta 2 installation failed"
-            exit 1
-        fi
+        echo "Rosetta 2 installation failed"
+        exit 1
     fi
+fi
 {{ end -}}
