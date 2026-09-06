@@ -17,6 +17,8 @@ brew "notmuch"
 brew "aerc"
 # Simple, modern, secure file encryption
 brew "age"
+# Automate deployment, configuration, and upgrading
+brew "ansible"
 # Collection of portable C++ source libraries
 brew "boost"
 # Formatter/translator for text files to numerous formats
@@ -47,12 +49,16 @@ brew "chawan"
 brew "chezmoi"
 # Cross-platform make
 brew "cmake"
+# Fix common misspellings in source code and text files
+brew "codespell"
 # GNU File, Shell, and Text utilities
 brew "coreutils"
 # Lightweight unit testing framework for C
 brew "cunit"
 # Compiler for writing C extensions for the Python language
 brew "cython"
+# Debugger for the Go programming language
+brew "delve"
 # Tool for managing dock items
 brew "dockutil"
 # Text processing system for reStructuredText
@@ -75,6 +81,8 @@ brew "fish-lsp"
 brew "fzf"
 # GNU awk utility
 brew "gawk"
+# GNU debugger
+brew "gdb"
 # GitHub command-line tool
 brew "gh"
 # Distributed revision control system
@@ -93,6 +101,8 @@ brew "glab"
 brew "gnu-tar"
 # Command-driven, interactive function plotting
 brew "gnuplot"
+# Open source programming language to build simple/reliable/efficient software
+brew "go"
 # Package compiler and linker metadata toolkit
 brew "pkgconf"
 # Multi-threaded malloc() and performance analysis tools
@@ -103,10 +113,6 @@ brew "graphviz"
 brew "gurk"
 # Popular GNU data compression program
 brew "gzip"
-# Access DVDs as block devices without the decryption
-brew "libdvdcss"
-# Open-source video transcoder available for Linux, Mac, and Windows
-brew "handbrake"
 # Improved top (interactive process viewer)
 brew "htop"
 # Verilog simulation and synthesis tool
@@ -129,6 +135,8 @@ brew "khard"
 brew "latexdiff"
 # Graphical front-end for GCC's coverage testing tool (gcov)
 brew "lcov"
+# Access DVDs as block devices without the decryption
+brew "libdvdcss"
 # Fast, minimalist directory tree viewer
 brew "lstr"
 # Language Server for the Lua language
@@ -183,6 +191,8 @@ brew "rustup"
 brew "yosys"
 # Front-end for Yosys-based formal verification flows
 brew "sby"
+# Small man page generator
+brew "scdoc"
 # Static analysis and lint tool, for (ba)sh scripts
 brew "shellcheck"
 # Autoformat shell script source code
@@ -261,8 +271,6 @@ cask "font-tex-gyre-termes"
 cask "ghostty"
 # Web browser
 cask "google-chrome"
-# Open-source video transcoder
-cask "handbrake-app"
 # Keyboard shortcuts for every button on your screen
 cask "homerow"
 # Convert your caps lock key or any of your modifier keys to the hyper key
@@ -279,8 +287,6 @@ cask "linearmouse"
 cask "little-snitch"
 # Video format converter (transcoder)
 cask "makemkv"
-# Open-source software for live streaming and screen recording
-cask "obs"
 # Utility to uninstall apps and remove leftover files from old/uninstalled apps
 cask "pearcleaner"
 # Bridges Proton Mail to email clients supporting IMAP and SMTP protocols
@@ -313,13 +319,13 @@ mas "GarageBand", id: 682658836
 mas "IceCubesApp", id: 6444915884
 mas "iMovie", id: 408981434
 mas "Infuse", id: 1136220934
-mas "Keynote", id: 409183694
 mas "Keynote", id: 361285480
+mas "Keynote", id: 409183694
 mas "Noir", id: 1592917505
 mas "Numbers", id: 409203825
 mas "Numbers", id: 361304891
-mas "Pages", id: 409201541
 mas "Pages", id: 361309726
+mas "Pages", id: 409201541
 mas "Qwant for Safari", id: 1645050159
 mas "SponsorBlock", id: 1573461917
 mas "StopTheMadness Pro", id: 6471380298
