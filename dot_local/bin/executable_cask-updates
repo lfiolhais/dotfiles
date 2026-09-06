@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""Keep Homebrew the only thing that updates the apps it installed.
+
+Most casks ship the vendor's own updater, so an app replaces itself behind
+Homebrew's back: the Caskroom's idea of the installed version drifts from what is
+in ``/Applications``, and ``brew upgrade --greedy`` then reinstalls -- or walks
+back -- an app that was already current.
+
+There is no general switch for this. What there is, is Sparkle: the update
+framework most Mac apps embed reads its automatic-checking settings from the
+app's own user-defaults domain, where they beat the same keys in the bundle's
+``Info.plist``. This writes those two keys, for exactly the apps Homebrew
+installed, and reports honestly on the ones it cannot reach.
+
+Nothing inside an app bundle is touched, so no code signature is disturbed and
+``enable`` puts every app back the way it was found.
+
+Usage::
+
+    cask-updates status              # what self-updates, and what is already silent
+    cask-updates disable             # silence the Sparkle apps Homebrew owns
+    cask-updates enable              # undo it: the keys are deleted, not set true
+    cask-updates disable --dry-run   # name what would change, write nothing
+
+Apps installed by hand are ignored: Homebrew does not know about them, so
+nothing else would ever update them. Security tools are exempt on purpose --
+see ``EXEMPT`` in ``caskupd_app.py``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+# The shared library sits beside this script's bin directory, not on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib" / "python"))
+
+from caskupd import EXEMPT, App, PackagesError, Sparkle, have
+
+# How wide the cask token column is before the bundle identifier starts.
+TOKEN = 22
+
+
+def _summary(silenced: int, already: int, exempt: int, beyond: int) -> str:
+    """Build the one-line result an `update` step can be read from.
+
+    Args:
+        silenced: Apps silenced by this run.
+        already: Apps that were silent before it.
+        exempt: Apps left alone on purpose.
+        beyond: Apps that self-update with no lever to pull.
+
+    Returns:
+        The summary line.
+
+    """
+    return f"silenced {silenced}, already silent {already}, exempt {exempt}, beyond reach {beyond}"
+
+
+def _note_running(apps: list[App]) -> None:
+    """Say which of these apps are open, if any are.
+
+    Args:
+        apps: The apps that were just written to.
+
+    """
+    open_now = App.running(tuple(apps))
+    if open_now:
+        print(
+            f"\n  open right now, so re-run once they have quit: {', '.join(sorted(open_now))}",
+        )
+
+
+def status(_args: argparse.Namespace) -> int:
+    """Report what updates each app Homebrew installed.
+
+    Args:
+        _args: Unused; ``status`` takes no arguments.
+
+    Returns:
+        Process exit code, always 0.
+
+    """
+    apps = App.discover()
+    managed = [app for app in apps if app.manageable]
+    beyond = [app for app in apps if app.beyond_reach]
+    exempt = [app for app in apps if app.exempt]
+    states = {app.token: Sparkle.silenced(app.bundle_id) for app in managed}
+
+    self_updating = sum(1 for app in apps if app.auto_updates)
+    print(f"{len(apps)} apps from casks, {self_updating} of which update themselves\n")
+
+    print(f"Sparkle, so silenceable ({len(managed)})")
+    for app in managed:
+        mark = "off" if states[app.token] else "ON "  # padded to align the column
+        print(f"  {mark}  {app.token:<{TOKEN}} {app.bundle_id}")
+
+    print(f"\nleft alone on purpose ({len(exempt)})")
+    for app in exempt:
+        print(f"       {app.token:<{TOKEN}} {EXEMPT[app.token]}")
+
+    print(f"\nbeyond reach ({len(beyond)}) -- they self-update through something else")
+    for app in beyond:
+        print(f"       {app.token:<{TOKEN}} {app.bundle_id}")
+
+    already = sum(1 for silent in states.values() if silent)
+    print(
+        f"\n{already} of {len(managed)} silenced, {len(exempt)} exempt, {len(beyond)} beyond reach",
+    )
+    return 0
+
+
+def disable(args: argparse.Namespace) -> int:
+    """Silence the self-updater of every Sparkle app Homebrew owns.
+
+    Args:
+        args: The parsed command line.
+
+    Returns:
+        Process exit code, always 0 -- anything that fails raises instead.
+
+    """
+    apps = App.discover()
+    managed = [app for app in apps if app.manageable]
+    todo = [app for app in managed if not Sparkle.silenced(app.bundle_id)]
+
+    for app in todo:
+        if not args.dry_run:
+            Sparkle.disable(app.bundle_id)
+        verb = "would silence" if args.dry_run else "silenced"
+        print(f"  {verb} {app.token:<{TOKEN}} {app.bundle_id}")
+
+    exempt = sum(1 for app in apps if app.exempt)
+    beyond = sum(1 for app in apps if app.beyond_reach)
+    print(_summary(len(todo), len(managed) - len(todo), exempt, beyond))
+
+    if todo and not args.dry_run:
+        _note_running(todo)
+    return 0
+
+
+def enable(args: argparse.Namespace) -> int:
+    """Hand every app its own updater back.
+
+    Args:
+        args: The parsed command line.
+
+    Returns:
+        Process exit code, always 0 -- anything that fails raises instead.
+
+    """
+    apps = App.discover()
+    # `app.sparkle` rather than `app.manageable`: `disable` skips exempt apps, so
+    # matching that filter here would strand SUEnableAutomaticChecks=false on an
+    # app silenced before it joined EXEMPT. `state()` returns "" for an unset key,
+    # so `any(...)` means "at least one of the two keys is currently set".
+    todo = [app for app in apps if app.sparkle and any(Sparkle.state(app.bundle_id).values())]
+
+    for app in todo:
+        if not args.dry_run:
+            Sparkle.restore(app.bundle_id)
+        verb = "would restore" if args.dry_run else "restored"
+        print(f"  {verb} {app.token:<{TOKEN}} {app.bundle_id}")
+
+    print(f"restored {len(todo)}; every other app was already untouched")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the command line.
+
+    Returns:
+        The parser, with one subcommand per verb.
+
+    """
+    parser = argparse.ArgumentParser(
+        prog="cask-updates",
+        description="Keep Homebrew the only thing that updates the apps it installed.",
+        epilog="with no command: status",
+    )
+    commands = parser.add_subparsers(dest="command")
+
+    commands.add_parser("status", help="what self-updates, and what is already silent")
+
+    for name, help_text in (
+        ("disable", "silence the Sparkle apps Homebrew owns"),
+        ("enable", "hand every app its own updater back"),
+    ):
+        verb = commands.add_parser(name, help=help_text)
+        verb.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="say what would change, write nothing",
+        )
+
+    return parser
+
+
+def main() -> int:
+    """Parse arguments and run the requested verb.
+
+    Returns:
+        Process exit code: 0 on success, 1 on a reported failure.
+
+    """
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if sys.platform != "darwin":
+        print("cask-updates: macOS only; nothing here applies", file=sys.stderr)
+        return 1
+
+    if not have("brew"):
+        print("cask-updates: no Homebrew here, so it owns nothing", file=sys.stderr)
+        return 1
+
+    verbs = {"status": status, "disable": disable, "enable": enable}
+    try:
+        return verbs[args.command or "status"](args)
+    except PackagesError as exc:
+        print(f"cask-updates: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
