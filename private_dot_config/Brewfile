@@ -1,6 +1,5 @@
 tap "fenio/tap"
 tap "nikitabobko/tap", trusted: true
-tap "nohajc/anylinuxfs"
 tap "riscv-software-src/riscv", trusted: true
 # Core application library for C
 brew "glib"
@@ -226,8 +225,6 @@ brew "z3"
 brew "zig"
 # Language Server for Zig
 brew "zls"
-# Mount any linux-supported filesystem read/write using nfs and a microVM
-brew "nohajc/anylinuxfs/anylinuxfs", trusted: true
 # RISC-V toolchain including gcc (with newlib), simulator (spike), and pk
 brew "riscv-software-src/riscv/riscv-tools"
 # Stand alone ad blocker

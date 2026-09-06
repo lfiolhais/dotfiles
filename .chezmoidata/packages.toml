@@ -45,10 +45,6 @@ el = "age"
 brew = "ansible"
 mise = "ansible"
 
-[packages.anylinuxfs]
-brew = "nohajc/anylinuxfs/anylinuxfs"
-note = "mounts Linux filesystems on macOS"
-
 [packages.asciidoc]
 brew = "asciidoc"
 apt = "asciidoc"
