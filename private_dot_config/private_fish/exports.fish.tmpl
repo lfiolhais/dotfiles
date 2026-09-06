@@ -1,0 +1,90 @@
+# PATH first: everything below asks whether a command exists, and nothing that
+# is not yet on PATH can answer yes.
+#
+# fish_add_path --path writes $PATH itself and skips a directory that is not
+# there, so a machine part-way through its bootstrap collects no dead entries
+# and the order below is the order they are searched. A universal
+# fish_user_paths would outlive this file -- a directory dropped from the list
+# would go on being prepended by every shell on a machine that had already run
+# the old one -- so it is erased rather than written.
+set -e -U fish_user_paths
+
+{{ if eq .chezmoi.os "darwin" -}}
+# ~/.local/bin holds the commands in dot_local/bin. The rest is Homebrew: its
+# own directories, and the kegs that are not linked into them -- the GNU
+# coreutils and tar that shadow the BSD ones, Ruby, and the JDK.
+fish_add_path --global --path --move \
+    $HOME/.local/bin \
+    /opt/homebrew/opt/ruby/bin \
+    /opt/homebrew/opt/gnu-tar/libexec/gnubin \
+    /opt/homebrew/opt/openjdk@11/bin \
+    /opt/homebrew/sbin \
+    /opt/homebrew/bin \
+    /opt/homebrew/opt/coreutils/libexec/gnubin \
+    $HOME/.cargo/bin \
+    "/Applications/Little Snitch.app/Contents/Components"
+{{ else -}}
+# Debian and Ubuntu ship bat and fd as batcat and fdfind, so the 01 bootstrap
+# script symlinks them under their real names into ~/.local/bin, which also
+# holds the commands in dot_local/bin and the mise the no-sudo profile installs.
+fish_add_path --global --path --move \
+    $HOME/.local/bin \
+    $HOME/.cargo/bin
+{{ end -}}
+
+# rustc is asked once and the answer reused: each `rustc --print` is a process
+# spawn, and three settings below want the same sysroot. It is absent until the
+# bootstrap's rustup-init has run.
+set -l rust_sysroot
+command --query rustc; and set rust_sysroot (rustc --print sysroot)
+
+if test -n "$rust_sysroot"
+    # The toolchain's own bin, which carries what ~/.cargo/bin has no shim for.
+    # Appended rather than prepended: it duplicates several cargo shims and the
+    # shims are the ones that follow `rustup override`.
+    fish_add_path --global --path --append $rust_sysroot/bin
+    set -gx LD_LIBRARY_PATH $rust_sysroot/lib $LD_LIBRARY_PATH
+    set -gx RUST_SRC_PATH $rust_sysroot/lib/rustlib/src/rust/src/
+end
+
+test -r "$HOME/.opam/opam-init/init.fish"
+and source "$HOME/.opam/opam-init/init.fish" > /dev/null 2> /dev/null
+or true
+
+# Make vim the default editor.
+set -gx EDITOR nvim
+
+# Make Python use UTF-8 encoding for output to stdin, stdout, and stderr.
+set -gx PYTHONIOENCODING UTF-8
+
+# Colour manual pages where less renders them. `me` and `ue` are the resets: set
+# only the two that turn an attribute on and the first heading never turns it
+# off again. `string collect` keeps the escape sequence one argument, since
+# set_color writes no trailing newline and command substitution would otherwise
+# split it.
+set -gx LESS_TERMCAP_md (set_color --bold yellow | string collect)
+set -gx LESS_TERMCAP_me (set_color normal | string collect)
+set -gx LESS_TERMCAP_us (set_color --underline green | string collect)
+set -gx LESS_TERMCAP_ue (set_color normal | string collect)
+
+# bat-extras: batman makes bat the pager for man, batpipe makes less show
+# archives and binaries through bat. Homebrew is the only source -- no distro
+# packages it and mise's registry has no entry -- so a Linux shell does without
+# both, which is what the guards are for. Piping into `source` rather than
+# `eval` because each prints fish, not POSIX shell.
+if command --query batman
+    batman --export-env | source
+end
+if command --query batpipe
+    batpipe | source
+end
+
+# XDG Spec
+set -gx XDG_DATA_HOME $HOME/.local/share
+set -gx XDG_CONFIG_HOME $HOME/.config
+set -gx XDG_CACHE_HOME $HOME/.cache
+set -gx XDG_STATE_HOME $HOME/.local/state
+
+# Homebrew updates itself implicitly on every install, which makes an install
+# unpredictably slow. The `update` function runs `brew update` explicitly.
+set -gx HOMEBREW_NO_AUTO_UPDATE 1

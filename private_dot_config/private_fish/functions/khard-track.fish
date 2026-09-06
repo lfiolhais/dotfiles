@@ -1,4 +1,4 @@
-function khard-track --description "Track new khard contacts in chezmoi so exact_ does not delete them"
+function khard-track --description "Record khard contacts in the chezmoi source so they reach other machines"
     if not command -q chezmoi
         set_color red
         echo "khard-track: chezmoi is not installed" >&2
@@ -6,11 +6,14 @@ function khard-track --description "Track new khard contacts in chezmoi so exact
         return 1
     end
 
-    # The contacts directory is exact_ in the chezmoi source, so a card created
-    # by 'khard new' that has never been added is deleted by the next apply.
-    # Run this after adding or editing a contact. Safe to run at any time.
+    # A card written by 'khard new' has no entry in the chezmoi source, so it
+    # exists on this machine and nowhere else: a reinstall, or a second machine,
+    # never sees it, and nothing reports that because an untracked file is not a
+    # difference chezmoi knows about. The khard wrapper runs this after every
+    # write; this is the same step by hand, and safe to run at any time.
     chezmoi add ~/.config/khard/work/default
     or return 1
 
-    echo "Tracked. Review with 'chezmoi diff', then commit in "(chezmoi source-path)
+    echo "Tracked. 'khard-status' lists any contact still loose, by name."
+    echo "Review with 'chezmoi diff', then commit in "(chezmoi source-path)
 end

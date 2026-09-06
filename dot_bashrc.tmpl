@@ -1,0 +1,44 @@
+# shellcheck shell=bash
+# fish is the interactive shell this machine is set up for. bash covers what
+# fish does not: a shell started by something that insists on bash, and the
+# no-sudo Linux profile, where fish cannot be made the login shell.
+
+# bash sources this file for non-interactive shells as well, and `exec fish` in
+# one would replace the interpreter of every script that does.
+case $- in
+    *i*) ;;
+    *) return ;;
+esac
+
+{{ if and (eq .chezmoi.os "linux") (not .sudo) -}}
+# Without sudo neither /etc/shells nor chsh can be changed, so bash stays the
+# login shell and hands over to the fish mise installed. INSIDE_FISH is exported
+# so that a bash started from that fish falls through instead of execing fish
+# again.
+fish_path="$HOME/.local/share/mise/shims/fish"
+if [ -z "${INSIDE_FISH:-}" ] && [ -x "$fish_path" ]; then
+    export INSIDE_FISH=1
+    exec "$fish_path"
+fi
+
+{{ end -}}
+# eza is the ls this machine installs. A machine part-way through its bootstrap
+# does not have it yet, and aliasing ls to a missing command takes l, ll and la
+# down with it -- each reports "eza: command not found" for a request to list a
+# directory.
+if command -v eza > /dev/null 2>&1; then
+    alias ls="eza"
+fi
+alias l="ls -l"
+alias ll="ls -l"
+alias la="ls -la"
+
+if [ -f ~/.fzf.bash ]; then
+    # fzf writes this file; its contents are not ours to check.
+    # shellcheck source=/dev/null
+    source ~/.fzf.bash
+fi
+
+if command -v starship > /dev/null 2>&1; then
+    eval "$(starship init bash)"
+fi

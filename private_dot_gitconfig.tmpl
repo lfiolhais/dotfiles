@@ -30,7 +30,9 @@
 [user]
 	name = Luís Fiolhais
 	email = luis.azenhas.fiolhais@tecnico.ulisboa.pt
-	signingkey = /Users/lipe/.ssh/gh_sign.pub
+	# Absolute because git does not expand ~ here, and templated because the
+	# home directory is not /Users/lipe on Linux.
+	signingkey = {{ .chezmoi.homeDir }}/.ssh/gh_sign.pub
 [filter "lfs"]
 	clean = git-lfs clean -- %f
 	smudge = git-lfs smudge -- %f
@@ -73,7 +75,17 @@
 	syntax-theme = Catppuccin Mocha
 
 [sendemail]
+    # Absolute on macOS: git send-email runs this through a shell that a GUI
+    # launch does not give Homebrew's prefix to. On Linux msmtp comes from the
+    # distribution package and is already on every PATH -- except on the no-sudo
+    # profile, which installs no mail stack at all: msmtp, isync, notmuch and
+    # aerc each have no `mise` field in the manifest. Sending mail there means
+    # installing msmtp by hand first; this line is what it will then find.
+{{- if eq .chezmoi.os "darwin" }}
     sendmailCmd = /opt/homebrew/bin/msmtp -a ist
+{{- else }}
+    sendmailCmd = msmtp -a ist
+{{- end }}
 	annotate = yes
 [gpg]
 	format = ssh

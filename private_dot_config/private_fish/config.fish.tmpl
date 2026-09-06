@@ -1,28 +1,36 @@
-{{ if eq .chezmoi.os "linux" -}}
-# Debian and Ubuntu ship bat and fd as batcat and fdfind, so the 01 bootstrap
-# script (run_once_after_install-01-install-packages-linux.sh.tmpl) symlinks them
-# under their real names into ~/.local/bin, which this adds to PATH. macOS gets
-# the same directory from fish_user_paths in exports.fish instead.
-fish_add_path $HOME/.local/bin
-{{ end -}}
-{{ if and (eq .chezmoi.os "linux") (not .sudo) -}}
-# no-sudo Linux only: activate mise so its toolchain is on PATH.
+# PATH is built in exports.fish, so it is sourced before anything that looks a
+# command up. On macOS nothing has put /opt/homebrew/bin on PATH at this point --
+# the Homebrew installer writes no /etc/paths.d entry on Apple Silicon -- and on
+# Linux nothing has put ~/.local/bin there, which is where the 01 script puts
+# mise and the batcat/fdfind symlinks. Everything below depends on both.
+source $HOME/.config/fish/exports.fish
+{{ if and (eq .chezmoi.os "linux") (not .sudo) }}
+# no-sudo Linux only: mise is the package manager, and this is what puts its
+# shims on PATH. It comes after exports.fish because mise itself lives in
+# ~/.local/bin, which exports.fish is what adds.
 mise activate fish | source
-{{ end -}}
+{{ end }}
 # Installs fzf's Ctrl-T, Ctrl-R and Alt-C bindings. Order matters: setting
 # fish_key_bindings below re-runs the binding functions, so fzf has to be
 # sourced first for functions/fish_user_key_bindings.fish to find its bindings.
 fzf --fish | source
 
-source $HOME/.config/fish/exports.fish
 source $HOME/.config/fish/aliases.fish
 source $HOME/.config/fish/greet.fish
 
 {{ if eq .chezmoi.os "darwin" -}}
-# Loads the commit-signing key from the Keychain (gitconfig sets gpgsign with
-# format=ssh). Silent on purpose so a new shell prints nothing; a missing or
-# locked key therefore surfaces later, as a commit that will not sign.
-ssh-add -q --apple-use-keychain ~/.ssh/gh_sign &> /dev/null
+# git signs commits with an ssh key (gitconfig sets gpg.format=ssh), and signing
+# reads the key through the agent, so the agent has to hold it. `ssh-add -l`
+# exits non-zero when the agent holds nothing, which makes this the first shell
+# after a login rather than every terminal tab.
+#
+# --apple-load-keychain takes the passphrase from the login Keychain and asks
+# nothing. It finds one there only after the passphrase has been stored once,
+# which run_once_after_install-08-setup-ssh.sh does; without that step every
+# shell would stop at a passphrase prompt.
+if not ssh-add -l >/dev/null 2>&1
+    ssh-add -q --apple-load-keychain 2>/dev/null
+end
 {{ end -}}
 
 set -g fish_key_bindings fish_vi_key_bindings

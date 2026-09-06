@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Safety harness for the chezmoi dotfiles.
 
-It renders the source, lints the bootstrap scripts, checks the Brewfile against
-the Linux manifest, lints and imports this repo's Python under every interpreter
-on the host, runs the mount-nas unit tests, and prints a dry-run diff -- without
-touching ``$HOME`` and without running the ``run_*`` bootstrap scripts.
+It renders the source, lints the bootstrap scripts and the rest of the deployed
+shell, parses every fish file, hands the ssh config and the gitconfig to the
+programs that read them, refuses a compiled binary in the source, checks the
+Brewfile against the Linux manifest, lints and imports this repo's Python under
+every interpreter on the host, runs the mount-nas unit tests, and prints a
+dry-run diff -- without touching ``$HOME`` and without running the ``run_*``
+bootstrap scripts.
 
 Needs Python 3.11: ``enum.StrEnum`` below, and ``tomllib`` inside the manifest
 reader it imports. That is a higher floor than the 3.9 it holds the deployed
@@ -71,6 +74,34 @@ MOUNTNAS_TESTS = REPO / "tests" / "mountnas.py"
 DEPLOYED_PYTHON = (*sorted(LIB_PYTHON.glob("*.py")), *DEPLOYED_ENTRY_POINTS, CHEZMOI_PACKAGES)
 # Target paths that must never be deployed (kept out via .chezmoiignore).
 MUST_NOT_DEPLOY = ("CLAUDE.md", "LICENSE", "key.txt.age", "tests")
+# Deployed shell that `_scripts()` does not find, because it is not named run_*
+# and does not live at the repo root. An rc file has no shebang, so it carries a
+# `# shellcheck shell=` directive instead.
+SHELL_FILES = (
+    REPO / "dot_bashrc.tmpl",
+    REPO / "private_dot_config" / "aerc" / "executable_check-mail.sh",
+    REPO / "private_dot_config" / "aerc" / "private_filters" / "executable_html",
+    REPO / "private_dot_config" / "aerc" / "private_filters" / "executable_test.sh",
+    REPO / "dot_local" / "share" / "mail" / "dot_notmuch" / "hooks" / "executable_post-new",
+)
+# Every fish file this repository deploys. fish is the login shell, so a syntax
+# error here is a shell that greets a new terminal with a parse error -- and
+# nothing else in this harness parses fish.
+FISH_ROOT = REPO / "private_dot_config" / "private_fish"
+# A source file whose first bytes are one of these is a compiled binary. It was
+# built for one architecture and one operating system, and deploying it to any
+# other is a file that cannot be executed: `\x7fELF` is Linux, and the four
+# Mach-O magics are macOS, thin and fat, either byte order.
+BINARY_MAGIC = (
+    b"\x7fELF",
+    b"\xcf\xfa\xed\xfe",
+    b"\xce\xfa\xed\xfe",
+    b"\xca\xfe\xba\xbe",
+    b"\xbe\xba\xfe\xca",
+)
+# Names no source directory should carry: written by a program, never by hand,
+# and meaningless on the machine they are copied to.
+GENERATED_NAMES = ("dot_DS_Store", ".DS_Store", "dot_vimdid", "fish_variables")
 # Exit code a shell uses for "command not found".
 MISSING = 127
 # Exit code timeout(1) uses; reused for a command that outstayed TIMEOUT.
@@ -295,12 +326,20 @@ def check_brewfile() -> Result:
         A passing, skipped, or advisory-warning result.
 
     """
+    # `mas` entries are left out. Checking one runs `mas list`, which talks to
+    # the App Store: away from the network it hangs until this harness's timeout
+    # kills it, and a Brewfile check is then reported as a config failure.
+    text = BREWFILE.read_text(encoding="utf-8")
+    without_mas = "".join(
+        line for line in text.splitlines(keepends=True) if not line.startswith("mas ")
+    )
+
     # --no-upgrade: report only what is missing. Without it an installed but
     # outdated package counts as unmet, and every machine merely behind fails.
-    check = run("brew", "bundle", "check", "--file", str(BREWFILE), "--no-upgrade")
+    check = run("brew", "bundle", "check", "--file", "-", "--no-upgrade", stdin=without_mas)
 
     if check.ok:
-        return Result(Status.OK, "Brewfile satisfied")
+        return Result(Status.OK, "Brewfile satisfied (App Store entries not checked)")
 
     if check.missing:
         return Result(Status.OK, "Brewfile skipped (brew not installed)")
@@ -454,6 +493,163 @@ def check_uv_script() -> Result:
     return Result(Status.OK, "chezmoi-packages runs under uv")
 
 
+def check_shell_files() -> list[Result]:
+    """Lint the deployed shell that is not a bootstrap script.
+
+    Returns:
+        One result per file, rendering it first when it is a template.
+
+    """
+    results: list[Result] = []
+    for path in SHELL_FILES:
+        rel = path.relative_to(REPO)
+        if not path.exists():
+            results.append(Result(Status.FAIL, f"{rel}: missing", "listed in SHELL_FILES"))
+            continue
+        if path.name.endswith(".tmpl"):
+            with tempfile.TemporaryDirectory() as tmp:
+                script, error = _render_template(rel, path, Path(tmp))
+                if error is not None:
+                    results.append(error)
+                    continue
+                if script is None:
+                    continue
+                results.append(_lint(rel, script))
+        else:
+            results.append(_lint(rel, path))
+    return results
+
+
+def check_fish(workdir: Path) -> Result:
+    """Parse every deployed fish file with ``fish -n``.
+
+    fish is the login shell, so a parse error here is what every new terminal
+    opens with. Nothing else in this harness reads fish: ruff does not, and
+    shellcheck refuses it.
+
+    Args:
+        workdir: A temporary directory for rendered templates.
+
+    Returns:
+        A failing result naming the first file that will not parse, a warning if
+        fish is not installed, otherwise a passing result.
+
+    """
+    if shutil.which("fish") is None:
+        return Result(Status.WARN, "fish files not parsed (fish not installed)")
+
+    paths = sorted(FISH_ROOT.rglob("*.fish")) + sorted(FISH_ROOT.rglob("*.fish.tmpl"))
+    if not paths:
+        return Result(Status.FAIL, "fish", f"no fish files found under {FISH_ROOT}")
+
+    checked = 0
+    for path in paths:
+        rel = path.relative_to(REPO)
+        target = path
+        if path.name.endswith(".tmpl"):
+            rendered, error = _render_template(rel, path, workdir)
+            if error is not None:
+                return error
+            if rendered is None:
+                continue
+            target = rendered
+
+        parsed = run("fish", "-n", str(target))
+        if not parsed.ok:
+            return Result(Status.FAIL, f"{rel}: fish syntax", parsed.output)
+        checked += 1
+
+    return Result(Status.OK, f"fish: {checked} files parse")
+
+
+def check_ssh_config(workdir: Path) -> Result:
+    """Ask OpenSSH itself whether the deployed ssh config is valid.
+
+    ``ssh -G`` resolves a host against a config and connects to nothing. A
+    keyword the local OpenSSH does not know makes it exit non-zero, which is the
+    failure worth catching: ssh rejects the whole file over one bad option, so
+    every ssh on the machine stops working rather than just that one host.
+
+    Args:
+        workdir: A temporary directory for the rendered config.
+
+    Returns:
+        A failing result with ssh's complaint, otherwise a passing result.
+
+    """
+    source = REPO / "private_dot_ssh" / "config.tmpl"
+    rel = source.relative_to(REPO)
+    rendered, error = _render_template(rel, source, workdir)
+    if error is not None:
+        return error
+    if rendered is None:
+        return Result(Status.FAIL, f"{rel}: rendered empty")
+
+    resolved = run("ssh", "-F", str(rendered), "-G", "github.com")
+    if resolved.missing:
+        return Result(Status.WARN, "ssh config not checked (ssh not installed)")
+    if not resolved.ok:
+        return Result(Status.FAIL, f"{rel}: ssh rejects it", resolved.output)
+
+    return Result(Status.OK, "ssh config parses")
+
+
+def check_gitconfig(workdir: Path) -> Result:
+    """Ask git whether the deployed gitconfig parses.
+
+    Args:
+        workdir: A temporary directory for the rendered config.
+
+    Returns:
+        A failing result with git's complaint, otherwise a passing result.
+
+    """
+    source = REPO / "private_dot_gitconfig.tmpl"
+    rel = source.relative_to(REPO)
+    rendered, error = _render_template(rel, source, workdir)
+    if error is not None:
+        return error
+    if rendered is None:
+        return Result(Status.FAIL, f"{rel}: rendered empty")
+
+    listed = run("git", "config", "--file", str(rendered), "--list")
+    if not listed.ok:
+        return Result(Status.FAIL, f"{rel}: git rejects it", listed.output)
+
+    return Result(Status.OK, "gitconfig parses")
+
+
+def check_source_is_text() -> Result:
+    """Assert that no compiled binary or program-written file is in the source.
+
+    A binary in the source is built for whatever machine built it, and chezmoi
+    copies it unchanged to every other -- an arm64 Mach-O filter deployed to
+    Linux is a file that cannot run. Encrypted files are exempt: age armour is
+    text, so they never match anyway, and their plaintext is not read here.
+
+    Returns:
+        A failing result naming every offending file, otherwise a passing one.
+
+    """
+    offenders: list[str] = []
+    for path in sorted(REPO.rglob("*")):
+        rel = path.relative_to(REPO)
+        if not path.is_file() or rel.parts[0] in {".git", ".claude", ".ruff_cache", "tests"}:
+            continue
+        if path.name in GENERATED_NAMES or any(part in GENERATED_NAMES for part in rel.parts):
+            offenders.append(f"{rel}: written by a program, not by hand")
+            continue
+        with path.open("rb") as handle:
+            head = handle.read(4)
+        if head in BINARY_MAGIC:
+            offenders.append(f"{rel}: compiled binary; build it on the machine instead")
+
+    if offenders:
+        return Result(Status.FAIL, "source holds files it should not", "\n".join(offenders))
+
+    return Result(Status.OK, "source is text, and nothing in it is program-written")
+
+
 def _dry_run() -> None:
     # --force answers apply's "overwrite/remove?" prompts up front, so the diff is
     # complete rather than truncated at the first question. It changes nothing on
@@ -489,6 +685,11 @@ def main() -> int:
             check_render(workdir),
             check_no_leaks(),
             *check_scripts(workdir),
+            *check_shell_files(),
+            check_fish(workdir),
+            check_ssh_config(workdir),
+            check_gitconfig(workdir),
+            check_source_is_text(),
             check_brewfile(),
             check_package_parity(),
             check_python(),

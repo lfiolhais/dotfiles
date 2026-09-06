@@ -1,219 +1,264 @@
 # Backlog
 
-Code defects found while reviewing the documentation. Each was left unfixed
-because the correction changes behaviour, which is a separate decision from
-documenting it. Where a comment described the intended behaviour rather than the
-actual one, the comment now describes what the code does, so the source and the
-documentation agree on the current, defective state.
+Each item changes behaviour, so it is a decision rather than a correction.
+Nothing here has been applied. Nothing here has been tested on a live machine.
 
-Nothing here has been tested on a live machine.
+## Git
 
-## Bootstrap
+### `signOff` puts the trailer on a patch, not on a commit
 
-### `04-setup-fish` cannot add fish to `/etc/shells`, and aborts before trying
-
-`run_once_after_install-04-setup-fish.sh.tmpl:2,4,9,22`
-
-```sh
-set -eu
-has_fish=$(grep -c fish < /etc/shells)
-...
-if [ -z "${has_fish}" ]; then
-```
-
-Two independent faults on one line. `grep -c` exits 1 when it matches nothing —
-the fresh-machine case this code exists for — and under `set -e` that aborts the
-script at line 4. If it survives (a machine where fish is already listed),
-`grep -c` prints `0`, so `has_fish` is the string `0`, never empty, and the
-`[ -z ]` test is false either way. The `which fish | tee -a /etc/shells` line is
-unreachable in both directions.
-
-`chsh -s "$(which fish)"` at line 13 and 26 then runs unguarded and fails with
-"non-standard shell" on a machine where the append never happened. Because this
-script exits non-zero it is not recorded, so every apply retries it and stops
-there — scripts `05`, `06` and `07` never run.
-
-A working form tests membership rather than counting:
-
-```sh
-if ! grep -qxF "$(command -v fish)" /etc/shells; then
-    command -v fish | sudo tee -a /etc/shells
-fi
-```
-
-`chsh` also prompts for the account password, which is worth an `echo` before it
-so an unattended apply does not look like a hang.
-
-### `01-install-packages-darwin` blocks on a prompt, then runs a command that is not there
-
-`run_once_after_install-01-install-packages-darwin.sh.tmpl:26-28`
-
-```sh
-if ! command -v rustup > /dev/null 2>&1; then
-    rustup-init
-    rustup install stable
-fi
-```
-
-`rustup-init` is interactive without `-y`, so an unattended apply waits at a
-menu. After it finishes, `rustup` is in `~/.cargo/bin`, which this shell's
-`PATH` does not include, so line 28 reports "command not found". The script sets
-no `-e`, so that failure is ignored and the script still exits 0 — and a
-`run_once_` script that exits 0 is recorded and never runs again.
-
-`rustup-init -y` alone installs the stable toolchain, which makes line 28
-redundant.
-
-### The macOS package script records a partial install as complete
-
-`run_once_after_install-01-install-packages-darwin.sh.tmpl`
-
-No `set -e`, and `brew bundle` covers 113 formulae, 41 casks and 22 Mac App Store
-apps. `mas` entries fail individually when the App Store is not signed in. The
-script exits 0 regardless, chezmoi records it, and the machine is missing
-packages with nothing to indicate it.
-
-Deciding between `set -e` (stop at the first failure, retry the whole bundle) and
-an explicit exit-status check after `brew bundle` is the open question. Either
-makes the failure visible; today it is silent.
-
-## macOS defaults
-
-### New Finder windows open on the Desktop, and the path key is dead
-
-`run_once_after_install-02-setup-darwin.sh.tmpl:151-152`
-
-```sh
-defaults write com.apple.finder NewWindowTarget -string "PfDe"
-defaults write com.apple.finder NewWindowTargetPath -string "file://${HOME}"
-```
-
-`PfDe` is Desktop. `NewWindowTargetPath` is read only when the target is `PfLo`,
-so the second line has no effect. For Home, either `PfHm` with no path, or
-`PfLo` with the path. The comment now describes the Desktop behaviour, so
-changing the value means updating it too.
-
-## Deployed commands
-
-### `mount-nas unmount` force-unmounts a reachable share
-
-`dot_local/bin/executable_mount-nas:167-187`, `dot_local/lib/python/mountnas.py`
-
-`cmd_unmount` iterates every mounted share and calls `unmount()` with no
-reachability test. `unmount()` is forced. The safety argument for forcing is
-that `sync()` only reaches it once the server has gone, so nothing could be
-written back — which does not hold for this caller. Running `mount-nas unmount`
-while connected discards unwritten data with no warning.
-
-Either gate the forced path on `share.reachable()` being false and use a plain
-unmount otherwise, or require a flag to force. The docstring now states both
-callers rather than only the safe one.
-
-## Shell configuration
-
-### `zip` alias breaks ordinary use
-
-`private_dot_config/private_fish/aliases.fish:37`
-
-```fish
-alias zip="zip -x '*.git*'"
-```
-
-`-x` consumes every following non-option argument as an exclude pattern, so
-`zip out.zip dir` becomes `zip -x '*.git*' out.zip dir` and zip exits with
-"Nothing to do!". A function that places `-x` after the archive name is the fix.
-
-### Man-page highlighting is exported empty
-
-`private_dot_config/private_fish/exports.fish:37`
-
-```fish
-set -gx LESS_TERMCAP_md $yellow
-```
-
-`$yellow` is set nowhere in this repository, so the variable is exported empty
-and nothing is highlighted. A real value is an escape sequence, for example
-`(set_color -o yellow | string collect)`.
-
-### The greeting's disk-usage line matches nothing
-
-`private_dot_config/private_fish/greet.fish:13`
-
-```fish
-df -l -h | grep -e 'dev/(xvda|sd|mapper|disk)'
-```
-
-`grep -e` takes a basic regular expression, where `(`, `)` and `|` are literal
-characters, so the pattern matches no line. The "Disk usage:" heading above it
-prints on every new shell with nothing under it. `grep -E` makes the alternation
-work.
-
-### `gen-chisel-template` fails on both of its `sed` calls
-
-`private_dot_config/private_fish/functions/gen-chisel-template.fish:38-39`
-
-```fish
-sed -r -i "s/%NAME%/$proper_name/" build.sbt
-sed -r -i "s/%ORGANIZATION%/$proper_name" build.sbt
-```
-
-Line 39 is missing its closing `/`, so sed exits with a syntax error. Both lines
-use GNU syntax: BSD sed on macOS reads `-i` as taking a backup suffix and
-consumes the next argument. `sed -E -i ''` is the portable form on macOS.
-
-## Git and SSH
-
-### `signOff` does not apply to commits
-
-`private_dot_gitconfig:86`
+`private_dot_gitconfig.tmpl:85`
 
 ```ini
 [format]
 	signOff = yes
 ```
 
-`format.signOff` adds `Signed-off-by` to `git format-patch` output. It has no
-effect on `git commit`; there is no config that adds the trailer to every
-commit. A `prepare-commit-msg` hook, or `commit.template`, is the usual route.
+This is not dead — it is what puts `Signed-off-by` on `git format-patch` output,
+which is how a patch reaches a mailing list, and the `[sendemail]` block above it
+says that is a workflow this machine has. Keep it.
 
-### The SSH config names a key this repository does not deploy
+The gap is `git commit`. No git configuration adds the trailer to a commit, so a
+commit that goes out as a pull request rather than a patch carries no sign-off,
+and RISC-V's DCO rejects it.
 
-`private_dot_ssh/config:4`
+Three routes, and only the third covers `-m`, `--amend` and an editor commit
+alike:
+
+- `git commit -s`, or an alias for it. This is the step being forgotten, so
+  making it shorter does not help.
+- `commit.template`. git ignores the template when `-m` is given, and the
+  trailer would sit at the top of the buffer rather than after the body.
+- a `prepare-commit-msg` hook. git runs it for every commit, whatever wrote the
+  message.
+
+A hook has to be found, and `core.hooksPath` is how — but set globally it
+replaces `.git/hooks` in *every* repository, which silently disables husky,
+`pre-commit`, and this repository's own `tests/githooks/pre-push`. So it is
+scoped to the repositories that need it. git 2.36 added the conditional that
+does it; this machine has 2.55.
+
+In `private_dot_gitconfig.tmpl`, at the end:
+
+```ini
+# The DCO applies to some projects and not others, and core.hooksPath below
+# replaces .git/hooks for whatever it covers -- so it is turned on per remote
+# rather than globally. Add a pattern here for each project that wants it.
+[includeIf "hasconfig:remote.*.url:https://github.com/riscv/**"]
+	path = ~/.config/git/dco.inc
+[includeIf "hasconfig:remote.*.url:git@github.com:riscv/**"]
+	path = ~/.config/git/dco.inc
+[includeIf "hasconfig:remote.*.url:https://github.com/riscv-*/**"]
+	path = ~/.config/git/dco.inc
+[includeIf "hasconfig:remote.*.url:git@github.com:riscv-*/**"]
+	path = ~/.config/git/dco.inc
+```
+
+A new `private_dot_config/git/dco.inc`:
+
+```ini
+# Only the repositories the includeIf above matched read this file. A repository
+# here that has hooks of its own loses them: core.hooksPath replaces .git/hooks
+# rather than adding to it.
+[core]
+	hooksPath = ~/.config/git/hooks-dco
+```
+
+And a new `private_dot_config/git/hooks-dco/executable_prepare-commit-msg`:
+
+```sh
+#!/bin/sh
+# git passes the message file and how the message was produced: "message" for
+# -m, "commit" for --amend or -c, "merge", "squash", "template", or nothing at
+# all for an editor commit. Only a merge message is git's own to write.
+[ "$2" = "merge" ] && exit 0
+
+trailer="Signed-off-by: $(git config user.name) <$(git config user.email)>"
+
+# --amend re-runs this on a message that already has the trailer.
+grep -qF "$trailer" "$1" && exit 0
+
+# interpret-trailers puts it after the body, beside any trailer already there,
+# and above the comment block git strips -- which is where the DCO check looks.
+git interpret-trailers --in-place --trailer "$trailer" "$1"
+```
+
+This was tried in scratch repositories, one with a `riscv` remote and one
+without, under a `GIT_CONFIG_GLOBAL` holding the two files above. It behaves in
+all four cases that matter: a `-m` commit in the matching repository gets the
+trailer, the other repository gets nothing, amending twice does not duplicate
+it, and on a message that already has a `Reviewed-by:` the sign-off joins the
+trailer block underneath it rather than starting a second one.
+
+What was not tried is a real RISC-V repository, and the pattern list above is a
+guess at which remotes want it. `git config --get-all include.path` inside a
+clone says whether the conditional matched.
+
+## The NAS
+
+### Nothing writes outstanding data back before the network goes away
+
+`dot_local/bin/executable_mount-nas`, `dot_local/lib/python/mountnas.py`
+
+`mount-nas unmount` now flushes and unmounts plainly while the NAS answers, and
+forces only a share whose server has already gone — so the way this used to
+discard data is closed, and `mount-nas flush` runs the flush on demand.
+
+What is left is the case nothing can detect: a laptop shut and carried to
+another network. By the time anything notices, the NAS is unreachable and an
+outstanding write has nowhere to go.
+
+macOS gives launchd no sleep trigger, so a flush on sleep needs a process that
+is already running to be told. `sleepwatcher` is the usual one — a Homebrew
+formula that runs `~/.sleep` before sleep and `~/.wakeup` after:
+
+```sh
+chezmoi-packages add sleepwatcher --note "runs mount-nas flush before sleep"
+```
+
+then a `dot_sleep` holding `exec "$HOME/.local/bin/mount-nas" flush`, and
+`brew services start sleepwatcher` in the 07 script.
+
+The cost is one more formula, one more background daemon and one more entry
+under Login Items. The alternative is to run `mount-nas flush` by hand before
+closing the lid, which is the same class of thing as remembering to eject a
+disk.
+
+## Contacts
+
+### A contact deleted on one machine stays on every other
+
+`private_dot_config/khard/work/default/`
+
+The source directory is no longer `exact_`, so chezmoi no longer declares the
+target to hold exactly the entries the source has. Two consequences, and they
+pull in opposite directions:
+
+- a card `khard new` writes is no longer deleted by the next apply, which is
+  what `exact_` used to do and what made `khard-track` urgent;
+- a card dropped from the source is no longer deleted from any machine that
+  already has it. `khard-rm` forgets the source entry, the commit reaches the
+  other machine, and the contact stays there for good.
+
+The address book is only a shared source of truth if deletions propagate, which
+means restoring `exact_default`. The trap that made it dangerous is now covered
+from the other side: the `khard` wrapper re-adds the address book after every
+subcommand that writes a card, and `khard-status` lists by name — decrypting each
+card to do it — anything that is on the machine and not in the source, in the
+source and not on the machine, or different between the two.
+
+Restoring it is a directory rename:
+
+```sh
+git -C "$(chezmoi source-path)" mv \
+    private_dot_config/khard/work/default \
+    private_dot_config/khard/work/exact_default
+```
+
+Run `khard-status` on every machine before doing it. After the rename, a contact
+that is on a machine and not in the source is deleted at that machine's next
+apply.
+
+## Packages
+
+### Six formulae are in the Brewfile and in no manifest entry
+
+`python3 tests/check.py` fails on this now:
 
 ```
-IdentityFile ~/.ssh/id_ed25519
+ansible, codespell, delve, gdb, go, scdoc:
+    in the Brewfile, unaccounted for in the manifest
+handbrake:
+    claims the formula 'handbrake', which the Brewfile no longer has
 ```
 
-The repository deploys `gh_sign` and `gh_sign.pub`; `config.fish` loads
-`gh_sign` into the agent and the gitconfig signs with `gh_sign.pub`. Nothing
-creates `id_ed25519`.
+Every one needs a Linux name, or a `note` saying it installs nowhere there.
+Guessing the names would put unverified ones in the manifest, and the manifest is
+what the Linux bootstrap installs from in a single strict transaction — one bad
+name aborts the whole thing. `search` asks each platform:
 
-`UseKeychain yes` on line 3 is macOS-only, and this file is not in the non-darwin
-block of `.chezmoiignore`, so it deploys to Linux where OpenSSH rejects it as a
-bad configuration option.
+```sh
+chezmoi-packages search ansible      # then the add it prints
+chezmoi-packages search codespell
+chezmoi-packages search delve
+chezmoi-packages search gdb
+chezmoi-packages search go
+chezmoi-packages search scdoc
+```
 
-### `dot_bashrc` breaks on any machine without eza or starship
+`handbrake` is the other direction: the formula is gone from the Brewfile and the
+manifest entry still claims it. `chezmoi-packages remove handbrake` drops it.
 
-`dot_bashrc:1-4,8`
+Afterwards `python3 tests/linux.py` confirms each new name resolves in the
+repositories it claims to.
 
-`alias ls="eza"` with `l`, `ll` and `la` built on top means all four fail
-together, with an error naming `eza` rather than `ls`. Line 8 runs
-`starship init bash` unguarded and errors on every bash login where starship is
-absent. Both want a `command -v` guard.
+### Linux has no compiler, and aerc's filters are now built rather than shipped
 
-Separately, `04-setup-fish` appends `exec …/fish` to `~/.bashrc` on the no-sudo
-Linux profile, and chezmoi manages that file from `dot_bashrc` — so the next
-apply removes the line and the profile stops starting fish.
+`run_onchange_after_install-09-build-aerc-filters.sh.tmpl`,
+`.chezmoidata/packages.toml`
 
-## Dead code
+The `colorize` and `wrap` filters are compiled from the C sources this
+repository deploys, because a built one is specific to an architecture and an
+operating system. macOS has `cc` from the Xcode command-line tools, which
+`setup-xcode-cli` guarantees. No Linux target installs a compiler — the manifest
+has no `gcc` entry — so on Linux the script prints what is missing and exits 0,
+and aerc renders plain text and calendar parts unhighlighted.
 
-- `private_dot_config/private_fish/functions/__ssh_agent_is_started.fish` and
-  `__ssh_agent_start.fish` read and write `$SSH_ENV`, which nothing sets, and
-  neither function is called anywhere. `config.fish` loads the key with
-  `ssh-add` directly.
-- `private_dot_config/private_fish/functions/symlink_fzf_key_bindings.fish` is
-  not a function. It contains one path and defines nothing.
-- `private_dot_config/private_fish/functions/restart-wifi.fish` hardcodes the
-  `brcmfmac` driver and ends with `sudo nmcli device`, which lists devices
-  rather than restarting anything. `reboot-keyboard.fish` is X11-only. Both are
-  Linux-only in a repository whose primary target is macOS.
+Either add the compiler:
+
+```sh
+chezmoi-packages search gcc      # then the add it prints, with --no-install
+```
+
+or accept that aerc on Linux is unfiltered and say so in `README.md`. Adding
+`gcc` pulls a toolchain onto every Linux machine for two small filters, which is
+the trade-off.
+
+### `brew` is guarded and `mas` is not
+
+`private_dot_config/private_fish/functions/brew.fish`
+
+The Brewfile records App Store apps as well as formulae and casks, so
+`mas install` and `mas uninstall` desync it exactly as `brew install` does. A
+`mas.fish` alongside `brew.fish`, blocking the same two verbs and naming
+`chezmoi-packages dump`, would close it.
+
+Whether it is worth a second wrapper depends on how often the App Store is used
+outside the bundle.
+
+## Linux-only helpers on a macOS-first machine
+
+### `restart-wifi` lists the devices instead of restarting the interface
+
+`private_dot_config/private_fish/functions/restart-wifi.fish`
+
+```fish
+sudo modprobe -r brcmfmac; sudo modprobe brcmfmac
+sleep 2
+sudo nmcli device
+```
+
+The reload is real; the last line reports rather than acts, and the description
+now says so. It also names one driver, so it works on the machine it was written
+for and no other.
+
+Three ways out: delete it, replace the last line with
+`sudo nmcli networking off; and sudo nmcli networking on`, or take the driver as
+an argument. Which one depends on whether the Linux machine it was written for
+still exists.
+
+### `convert-vp9-to-x264` encodes with an NVIDIA-only encoder
+
+`private_dot_config/private_fish/functions/convert-vp9-to-x264.fish`
+
+```fish
+ffmpeg -i "$file" -c:v h264_nvenc …
+```
+
+`h264_nvenc` needs an NVIDIA GPU, so on this Mac every conversion fails at the
+encoder. `h264_videotoolbox` is the macOS equivalent and takes different quality
+flags — `-q:v` rather than `-cq:v -b:v 0` — so it is not a substitution, and
+`libx264` is the one that works everywhere at the cost of speed.
+
+Picking the encoder from `uname` would make the function work on both, but the
+quality settings have to be chosen per encoder rather than carried across.

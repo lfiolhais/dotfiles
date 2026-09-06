@@ -248,6 +248,61 @@ def test_stale_mount_falls_back_to_diskutil() -> None:
     assert recorder.calls[-1] == (mountnas.DISKUTIL, "unmount", "force", "/Volumes/Book2")
 
 
+# --- Unmounting on request, which is not clearing a stale mount --------------
+
+
+def test_requested_unmount_does_not_force() -> None:
+    """An unmount asked for by a person is plain, not forced.
+
+    A forced unmount of a server that still answers discards whatever has not
+    been written back, which is exactly the data a plain unmount refuses to
+    lose.
+    """
+    recorder = Recorder(AT_VOLUME)
+    with mock.patch.object(mountnas, "run", recorder):
+        outcome = mountnas.unmount(SHARE, "/Volumes/Book2")
+    assert outcome.action == UNMOUNTED
+    assert outcome.ok
+    assert recorder.calls == [(mountnas.UMOUNT, "/Volumes/Book2")]
+
+
+def test_requested_unmount_falls_back_without_forcing() -> None:
+    """When a plain umount refuses, diskutil is asked -- also without force."""
+    recorder = Recorder(AT_VOLUME, fails=mountnas.UMOUNT)
+    with mock.patch.object(mountnas, "run", recorder):
+        outcome = mountnas.unmount(SHARE, "/Volumes/Book2")
+    assert outcome.action == UNMOUNTED
+    assert recorder.calls[-1] == (mountnas.DISKUTIL, "unmount", "/Volumes/Book2")
+
+
+def test_forced_unmount_is_forced_at_both_steps() -> None:
+    """Asking for force forces both the umount and the diskutil fallback."""
+    recorder = Recorder(AT_VOLUME, fails=mountnas.UMOUNT)
+    with mock.patch.object(mountnas, "run", recorder):
+        outcome = mountnas.unmount(SHARE, "/Volumes/Book2", force=True)
+    assert outcome.action == UNMOUNTED
+    assert recorder.calls[0] == (mountnas.UMOUNT, "-f", "/Volumes/Book2")
+    assert recorder.calls[-1] == (mountnas.DISKUTIL, "unmount", "force", "/Volumes/Book2")
+
+
+def test_flush_runs_sync() -> None:
+    """The flush is one sync(8) over every volume, not a per-share command."""
+    recorder = Recorder(AT_VOLUME)
+    with mock.patch.object(mountnas, "run", recorder):
+        argv = mountnas.flush()
+    assert argv == (mountnas.SYNC,)
+    assert recorder.calls == [(mountnas.SYNC,)]
+
+
+def test_dry_run_flush_runs_nothing() -> None:
+    """A dry-run flush names sync without running it."""
+    recorder = Recorder(AT_VOLUME)
+    with mock.patch.object(mountnas, "run", recorder):
+        argv = mountnas.flush(dry_run=True)
+    assert argv == (mountnas.SYNC,)
+    assert recorder.calls == []
+
+
 def test_already_mounted_runs_nothing() -> None:
     """Reachable and mounted: there is nothing to do."""
     recorder = Recorder(AT_VOLUME)

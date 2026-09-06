@@ -4,11 +4,23 @@ set -eu
 {{ if eq .chezmoi.os "darwin" -}}
 eval "$(/opt/homebrew/bin/brew shellenv)"
 
-if ! grep -qxF "$(command -v fish)" /etc/shells; then
-    command -v fish | sudo tee -a /etc/shells
+fish_path="$(command -v fish)"
+
+# chsh refuses a shell /etc/shells does not list, so membership is what decides
+# whether to append. Matching a whole line (-x) and a fixed string (-F) keeps a
+# path that is a prefix of another entry from counting as present.
+if ! grep -qxF "${fish_path}" /etc/shells; then
+    echo "Adding ${fish_path} to /etc/shells. sudo asks for the account password."
+    printf '%s\n' "${fish_path}" | sudo tee -a /etc/shells > /dev/null
 fi
 
-chsh -s "$(which fish)"
+# The login shell recorded in Open Directory, which is what chsh changes -- $SHELL
+# describes the shell running this script and would still say the old one.
+login_shell="$(dscl . -read "/Users/$(id -un)" UserShell | awk '{print $2}')"
+if [ "${login_shell}" != "${fish_path}" ]; then
+    echo "Making ${fish_path} the login shell. chsh asks for the account password."
+    chsh -s "${fish_path}"
+fi
 {{- else if eq .chezmoi.os "linux" -}}
 {{ if .sudo -}}
 # Use sudo only when not already root (test containers run as root).
@@ -17,13 +29,30 @@ if [ "$(id -u)" -ne 0 ]; then
     SUDO=(sudo)
 fi
 
-if ! grep -qxF "$(command -v fish)" /etc/shells; then
-    command -v fish | sudo tee -a /etc/shells
+fish_path="$(command -v fish)"
+
+if ! grep -qxF "${fish_path}" /etc/shells; then
+    echo "Adding ${fish_path} to /etc/shells."
+    # ${SUDO[@]+...} because an empty array under `set -u` is an unbound
+    # variable to bash before 4.4, which Rocky and Alma still ship.
+    printf '%s\n' "${fish_path}" | ${SUDO[@]+"${SUDO[@]}"} tee -a /etc/shells > /dev/null
 fi
 
-chsh -s "$(which fish)"
+# Minimal container images carry neither chsh nor a password for the account it
+# would change, so a missing one is a fact about the image rather than a failure.
+login_shell="$(getent passwd "$(id -un)" | cut -d: -f7)"
+if [ "${login_shell}" != "${fish_path}" ]; then
+    if command -v chsh > /dev/null 2>&1; then
+        echo "Making ${fish_path} the login shell. chsh asks for the account password."
+        chsh -s "${fish_path}"
+    else
+        echo "chsh is not installed; the login shell stays ${login_shell}." >&2
+    fi
+fi
 {{- else -}}
-fish_path="$HOME/.local/share/mise/shims/fish"
-grep -qF "exec $fish_path" "$HOME/.bashrc" || echo "exec $fish_path" >> "$HOME/.bashrc"
+# The no-sudo profile cannot edit /etc/shells or run chsh, so bash stays the
+# login shell and starts fish itself. That line lives in dot_bashrc.tmpl, which
+# chezmoi manages: appending it here instead would be removed by the next apply.
+echo "fish starts from ~/.bashrc on this profile; nothing to configure."
 {{- end }}
 {{- end }}

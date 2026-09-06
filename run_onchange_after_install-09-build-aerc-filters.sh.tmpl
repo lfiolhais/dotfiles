@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# aerc's colorize and wrap filters are C. A compiled filter is specific to one
+# architecture and one operating system, so the sources are what this repository
+# deploys and the binaries are built here, next to them.
+#
+# The digests below put each source's content into this script, which is what
+# makes chezmoi re-run it when a source changes.
+# colorize.c: {{ include "private_dot_config/aerc/private_filters/colorize.c" | sha256sum }}
+# wrap.c: {{ include "private_dot_config/aerc/private_filters/wrap.c" | sha256sum }}
+set -eu
+
+filters="${HOME}/.config/aerc/filters"
+
+if ! command -v cc > /dev/null 2>&1; then
+    echo "No C compiler here, so aerc's colorize and wrap filters were not built." >&2
+    echo "aerc still runs; plain text and calendar parts render unhighlighted." >&2
+{{ if eq .chezmoi.os "darwin" -}}
+    echo "The Xcode command-line tools provide cc: xcode-select --install" >&2
+{{ else -}}
+    echo "Install a compiler (apt install gcc, or dnf install gcc), then:" >&2
+    echo "    chezmoi state delete-bucket --bucket=scriptState && chezmoi apply" >&2
+{{ end -}}
+    exit 0
+fi
+
+for name in colorize wrap; do
+    cc -O2 -o "${filters}/${name}" "${filters}/${name}.c"
+    echo "built ${filters}/${name}"
+done

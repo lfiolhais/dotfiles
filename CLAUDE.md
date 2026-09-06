@@ -19,8 +19,9 @@ only what an agent needs on top of it, and deliberately does not restate it.
   state; the next apply overwrites the target. Edit here.
 - A change for Linux must not alter the macOS render. Linux logic lives in
   `{{ if eq .chezmoi.os "linux" }}` blocks that render empty on darwin, and
-  chezmoi skips an empty `run_` script. Check both renders with
-  `chezmoi execute-template` before claiming a template works.
+  chezmoi skips an empty `run_` script. `bash tests/render-matrix.sh` renders
+  every template for all three profiles and parses the output; run it before
+  claiming a template works. It is read-only and takes seconds.
 - Python here must pass `ruff check` and `ruff format` with the config in
   `tests/pyproject.toml`. Google-style docstrings with `Args:`/`Returns:` are
   mandatory on public functions, because `D` and `DOC` are enabled under
@@ -36,7 +37,8 @@ because the change survives review and disappears at the next write.
 | `private_dot_config/Brewfile` | `brew bundle dump` | never hand-edit; `chezmoi-packages dump` is the only path |
 | `.chezmoidata/packages.toml` | `chezpkg_manifest.py` | never hand-edit; every write rewrites it whole, and hand-written comments are lost — use `note` |
 | `private_dot_config/mise/config.toml.tmpl` | rendered from the manifest | change the manifest, not this |
-| `private_dot_config/khard/work/exact_default/` | `chezmoi add` | one age-encrypted vCard per contact |
+| `private_dot_config/khard/work/default/` | the `khard` wrapper, via `chezmoi add` | one age-encrypted vCard per contact |
+| `~/.config/aerc/filters/colorize`, `wrap` | `run_onchange_…-09` compiles them | the C sources are what this repo tracks; a built filter is one architecture's |
 
 The manifest's field set is `brew`, `apt`, `fedora`, `el`, `mise`, `mise_exe`,
 `repo`, `note`; `tests/check.py` fails on any other field name. The distro
@@ -49,7 +51,9 @@ harness.
 - `dot_local/bin/` — the deployed commands, `0755` via `executable_`:
   `git-wt-clone`, `git-wt-add`, `chezmoi-packages`, `cask-updates`, `mount-nas`.
   The `git-` prefix is what makes git dispatch the first two as subcommands.
-  `cask-updates` and `mount-nas` are chezmoi-ignored off darwin.
+  `cask-updates`, `mount-nas` and `chezmoi-packages` are chezmoi-ignored off
+  darwin — the first two are macOS-only, and `chezmoi-packages` runs through uv,
+  which is a Homebrew and Fedora package only.
 - `dot_local/lib/python/` — the libraries those commands share. Deployed rather
   than kept in `tests/`, because `chezmoi-packages` runs from `~/.local/bin`,
   where `tests/` does not exist.
@@ -101,7 +105,10 @@ nothing else, so a split inside a family never touches the command.
 
 `mountnas.py`, behind `mount-nas`, is a family of one: `Share` (its URL, its
 device column, whether the NAS answers, where it is mounted, whether the
-Keychain has its password), `Outcome`, and `sync()` over them. It is both facade
+Keychain has its password), `Outcome`, `flush()`, and `sync()` over them.
+`unmount()` takes `force`, and only a caller that has established the server is
+gone may pass it -- `sync()` does, `cmd_unmount` does so only for a share that
+does not answer or when asked. It is both facade
 and implementation because the surface is a single dataclass; the entry point
 still imports from `mountnas` alone, so splitting it later changes nothing there.
 
@@ -131,40 +138,82 @@ it, so that module alone must stay stdlib-only and 3.9-clean.
 
 ## Bootstrap scripts
 
-Ten `run_` scripts execute in prefix order on apply. `README.md` has the table of
-what each one does to the machine; what matters when editing them:
+The `run_` scripts at the repo root execute in prefix order on apply -- `ls
+run_*` is the list. `README.md` has the table of what each one does to the
+machine; what matters when editing them:
 
-- Darwin-only scripts (`setup-xcode-cli`, `01-…-darwin`, `02`, `03`, `07`) are
-  wrapped so they render empty on Linux. `04` branches per OS and profile.
+- Darwin-only scripts (`setup-xcode-cli`, `01-…-darwin`, `02`, `03`, `07`, `08`)
+  are wrapped so they render empty on Linux. `04` branches per OS and profile;
+  `09` runs everywhere.
 - `run_once_` is tracked by content hash, so editing an already-run script
   re-runs it on the next apply. Keep them idempotent.
-- `07-setup-nas` is `run_onchange_` and embeds the plist's sha256 in a comment,
+- `07-setup-nas` and `09-build-aerc-filters` are `run_onchange_` and each embeds
+  a sha256 of the file it depends on in a comment. For `07` that is the plist,
   because launchd caches a job's definition at bootstrap and reads an edited
-  plist only on a fresh one. Leave that digest line in place.
+  plist only on a fresh one; for `09` it is the two C sources, so an edit to
+  either rebuilds the filter. Leave those digest lines in place.
 - `06-setup-mail` only prints instructions. It is safe to render and read with
   `chezmoi execute-template`.
+- `01-…-darwin` splits `brew bundle` in two, because the halves fail for
+  different reasons: everything except the App Store first, exiting non-zero if
+  it fails so chezmoi does not record the script, and the `mas` entries after,
+  reporting a failure without stopping the apply. `brew bundle install` has no
+  per-type filter, so the split is a filtered Brewfile on stdin.
+- `04-setup-fish` and `08-setup-ssh` both block on a prompt -- the account
+  password and each key's passphrase. Each announces it first; `08` prints the
+  command instead when stdin is not a terminal.
 
 ## The harness
 
 `tests/check.py` renders the source with `chezmoi archive`, confirms `CLAUDE.md`,
 `LICENSE`, `key.txt.age` and `tests` stay out of the target, lints every `run_`
-script with `bash -n` and shellcheck, checks the Brewfile against the manifest,
-lints this repo's Python with ruff, imports `caskupd`/`gitwt`/`linux_distros`/
-`mountnas` and runs the four stdlib entry points' `--help` under each `python3` on
-the host, runs the `mount-nas` unit tests, exercises `chezmoi-packages` through
-`uv run --script`, and prints a dry-run diff.
+script with `bash -n` and shellcheck, lints the deployed shell that is not a
+`run_` script, parses every fish file with `fish -n`, hands the rendered ssh
+config to `ssh -G` and the rendered gitconfig to `git config --list`, refuses a
+compiled binary or a program-written file anywhere in the source, checks the
+Brewfile against the manifest, lints this repo's Python with ruff, imports
+`caskupd`/`gitwt`/`linux_distros`/`mountnas` and runs the four stdlib entry
+points' `--help` under each `python3` on the host, runs the `mount-nas` unit
+tests, exercises `chezmoi-packages` through `uv run --script`, and prints a
+dry-run diff.
+
+Four of those lists are hand-maintained in `tests/check.py` and a new file has to
+be added to the right one: `SHELL_FILES` for deployed shell outside a `run_`
+script, `DEPLOYED_ENTRY_POINTS` for a new command in `dot_local/bin/`,
+`BINARY_MAGIC` for another executable format, and `GENERATED_NAMES` for another
+file a program writes. Everything else is globbed -- the library modules, and
+every fish file under `private_dot_config/private_fish/` -- so splitting one in
+two keeps it covered.
 
 Ruff covers `tests/` plus everything in `dot_local/lib/python/` and every entry
-point in `dot_local/bin/`. The library modules are globbed, so splitting one in
-two keeps it covered; a new entry point has to be added to
-`DEPLOYED_ENTRY_POINTS` in `tests/check.py` by hand.
+point in `dot_local/bin/`.
+
+`tests/render-matrix.sh` is the fast pre-check: it renders every template for
+darwin, linux-with-sudo and linux-without-sudo and parses the output. chezmoi
+takes `.chezmoi.os` from the machine it runs on, so it rewrites that to a
+`.fakeos` data variable -- which is why it proves the branch renders and parses,
+and nothing about that machine's packages. `tests/linux.py` is the authority
+there.
 
 `tests/linux.py` renders and lints every distro crossed with sudo/no-sudo —
 eight targets, from the four images in `linux_distros.IMAGES`. `tests/macos.py`
 does the same in Lume VMs. `tests/nasprobe.py` is the one test that talks to
 something real.
 
-The user runs these. Do not.
+The user runs these. Do not. `tests/render-matrix.sh` is the exception: it is
+read-only, runs no script and touches no `$HOME`.
+
+## Reviewing this repo
+
+`.claude/skills/dotfiles-review/` is the order to work in, and
+`.claude/agents/` holds the two reviewers it calls for:
+`dotfiles-drift-checker` (haiku, cheap, compares the lists this repo keeps in
+more than one place) and `dotfiles-deploy-auditor` (sonnet, the expensive pass
+that asks what fails on a machine where this has just been applied).
+
+A defect that changes behaviour goes in `TODO.md` for the user to approve. A
+comment, a document or a claim that disagrees with the system is corrected in
+place, because that is not a behaviour change.
 
 ## Conventions when adding to this repo
 
@@ -177,5 +226,12 @@ The user runs these. Do not.
 - A new deployed command goes in `dot_local/bin/` with `executable_`, imports a
   single facade from `dot_local/lib/python/`, and is added to
   `DEPLOYED_ENTRY_POINTS` in `tests/check.py`.
+- A command a program writes -- a compiled filter, a cache, an editor's state --
+  is not tracked. Track what it is built from and build it in a `run_onchange_`
+  script; `tests/check.py` fails on a binary or a program-written name anywhere
+  in the source.
+- A file that names a path, an option or a prefix that only one OS has is a
+  template, gated on `.chezmoi.os`. `UseKeychain`, `/opt/homebrew`, and a home
+  directory that is not `/Users/…` are the three that keep coming back.
 - Documentation for a person goes in `README.md`. This file is not documentation
   and is never cited to a user.

@@ -1,9 +1,13 @@
 {{- if eq .chezmoi.os "darwin" -}}
 #!/bin/bash
-# Homebrew is what installs everything else on macOS. There is no `set -e`: a
-# failure inside `brew bundle` leaves the rest of the bundle to run, but chezmoi
-# still records this run_once_ script as done, so a partial install is not
-# retried. `chezmoi state delete-bucket --bucket=scriptState` is what re-runs it.
+# Homebrew is what installs everything else on macOS, so this script fails loudly
+# rather than leaving a half-provisioned machine behind: chezmoi records a
+# run_once_ script only when it exits 0, and the next apply runs an unrecorded
+# one again. `chezmoi state delete-bucket --bucket=scriptState` is what re-runs
+# it after a success.
+set -u
+
+brewfile="${HOME}/.config/Brewfile"
 
 if ! command -v brew > /dev/null 2>&1; then
     /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
@@ -13,17 +17,55 @@ if ! command -v brew > /dev/null 2>&1; then
     eval "$(/opt/homebrew/bin/brew shellenv)"
 fi
 
-# Formulae, casks, Mac App Store apps and uv tools, all from one file. `mas`
-# entries need the App Store already signed in and fail one by one otherwise.
-brew bundle --file=~/.config/Brewfile
+# Two passes over one file, because the two halves fail for different reasons and
+# only one of them is fatal. `brew bundle install` takes no per-type filter, so
+# the type is chosen by feeding it a filtered Brewfile on stdin.
+#
+# Taps, formulae, casks and uv tools first: everything below this script depends
+# on them, and a missing fish makes 04 fail too.
+grep -v '^mas ' "${brewfile}" | brew bundle install --file=-
+bundle_status=${PIPESTATUS[1]}
 
-# The Brewfile installs the `rustup` formula, which provides rustup-init; that
-# is what lays down the toolchain and puts rustup itself on PATH. The guard
-# tests for rustup rather than rustup-init, so this is skipped once a toolchain
-# exists. rustup-init prompts unless given -y, so an unattended apply stops here
-# waiting on it, and rustup is not on this shell's PATH afterwards, so the line
-# below reports "command not found" and -- with no set -e -- is ignored.
-if ! command -v rustup > /dev/null 2>&1; then
-    rustup-init -y
+if [ "${bundle_status}" -ne 0 ]; then
+    echo >&2
+    echo "brew bundle failed (exit ${bundle_status}). Still missing:" >&2
+    grep -v '^mas ' "${brewfile}" \
+        | brew bundle check --file=- --no-upgrade --verbose >&2
+    echo >&2
+    echo "Fix the cause and re-run:" >&2
+    echo "    grep -v '^mas ' ${brewfile} | brew bundle install --file=-" >&2
+    echo >&2
+    echo "This script was not recorded, so 'chezmoi apply' also runs it again." >&2
+    exit 1
+fi
+
+# The App Store second. Each `mas` entry needs the App Store signed in with the
+# terms accepted, and there is no supported way to ask whether it is -- mas 7
+# removed `mas account`, which was that question -- so the failure is reported
+# rather than predicted. Nothing else in the bootstrap depends on these apps, so
+# this does not stop the apply.
+mas_status=0
+grep '^mas ' "${brewfile}" | brew bundle install --file=- || mas_status=$?
+
+if [ "${mas_status}" -ne 0 ]; then
+    echo
+    echo "The App Store apps in the Brewfile were not installed (exit ${mas_status})."
+    echo "The usual cause is an App Store that has never been signed in on this"
+    echo "machine, or terms that have not been accepted since the last update."
+    echo
+    echo "Open App Store.app, sign in, accept anything it asks for, then run:"
+    echo "    grep '^mas ' ${brewfile} | brew bundle install --file=-"
+    echo
+    echo "'mas list' prints the App Store apps this machine already has."
+fi
+
+# The Brewfile installs the `rustup` formula, which provides rustup-init; that is
+# what lays down a toolchain. -y takes its defaults -- the stable toolchain, and
+# no questions -- and --no-modify-path stops it appending its own PATH line to
+# ~/.bashrc, which chezmoi manages and would overwrite at the next apply. The
+# guard names ~/.cargo/bin directly because that is where rustup-init puts
+# rustup, and this shell's PATH does not include it.
+if ! "${HOME}/.cargo/bin/rustup" --version > /dev/null 2>&1; then
+    rustup-init -y --no-modify-path
 fi
 {{ end -}}

@@ -46,6 +46,7 @@ UMOUNT = "/sbin/umount"
 DISKUTIL = "/usr/sbin/diskutil"
 OSASCRIPT = "/usr/bin/osascript"
 SECURITY = "/usr/bin/security"
+SYNC = "/bin/sync"
 
 # What a pass over a share decided. `AWAY` and `NO_PASSWORD` are the two silent
 # outcomes: both mean the share cannot be mounted right now for a reason that is
@@ -241,32 +242,64 @@ def mount(share: Share, *, dry_run: bool = False) -> Outcome:
     return Outcome(share, MOUNTED, argv)
 
 
-def unmount(share: Share, path: str, *, dry_run: bool = False) -> Outcome:
-    """Unmount a share, forcibly.
+def flush(*, dry_run: bool = False) -> tuple[str, ...]:
+    """Write the buffer cache out to every mounted filesystem.
 
-    ``sync()`` reaches here only for a share whose server has stopped answering,
-    where an open file could not be written back whatever happened and leaving
-    the mount in place is what produces the interrupted-connection alerts. The
-    ``unmount`` command calls it directly, so it will also force a live share
-    down, discarding unwritten data. ``diskutil`` is the fallback because it also
-    tells Finder the volume went away.
+    This is what makes a later unmount safe: it is machine-wide rather than
+    per-share, and it only reaches the NAS while the NAS is still answering, so
+    it belongs before a network goes away rather than after.
+
+    Args:
+        dry_run: Report the command without running it.
+
+    Returns:
+        The command that was run, or would have been.
+
+    Raises:
+        NasError: If the flush itself failed.
+
+    """
+    argv = (SYNC,)
+    if dry_run:
+        return argv
+    try:
+        run(*argv, timeout=COMMAND_TIMEOUT)
+    except PackagesError as exc:
+        message = f"cannot flush the buffer cache: {exc}"
+        raise NasError(message) from exc
+    return argv
+
+
+def unmount(share: Share, path: str, *, force: bool = False, dry_run: bool = False) -> Outcome:
+    """Unmount a share.
+
+    A plain unmount refuses while a file is open or a write is outstanding, and
+    that refusal is the point: it is the only thing standing between a mounted
+    share and silently discarded data. ``force`` drops that guarantee, so it is
+    for the one case where the guarantee is already gone -- a server that has
+    stopped answering, where nothing could be written back whatever happened and
+    leaving the mount in place produces interrupted-connection alerts instead.
+
+    ``diskutil`` is the fallback in both modes because it also tells Finder the
+    volume went away, which ``umount`` alone does not.
 
     Args:
         share: The share being unmounted.
         path: Where it is mounted.
+        force: Tear the mount down without waiting for outstanding writes.
         dry_run: Report the command without running it.
 
     Returns:
         The outcome, carrying the reason when both attempts failed.
 
     """
-    argv = (UMOUNT, "-f", path)
+    argv = (UMOUNT, "-f", path) if force else (UMOUNT, path)
     if dry_run:
         return Outcome(share, UNMOUNTED, argv)
     try:
         run(*argv, timeout=COMMAND_TIMEOUT)
     except PackagesError:
-        fallback = (DISKUTIL, "unmount", "force", path)
+        fallback = (DISKUTIL, "unmount", "force", path) if force else (DISKUTIL, "unmount", path)
         try:
             run(*fallback, timeout=COMMAND_TIMEOUT)
         except PackagesError as exc:
@@ -296,7 +329,9 @@ def sync(shares: tuple[Share, ...] = SHARES, *, dry_run: bool = False) -> list[O
         path = share.mountpoint(snapshot)
         if not share.reachable():
             outcomes.append(
-                Outcome(share, AWAY) if path is None else unmount(share, path, dry_run=dry_run),
+                Outcome(share, AWAY)
+                if path is None
+                else unmount(share, path, force=True, dry_run=dry_run),
             )
         elif path is not None:
             outcomes.append(Outcome(share, PRESENT))
@@ -318,6 +353,7 @@ __all__ = [
     "Outcome",
     "PackagesError",
     "Share",
+    "flush",
     "mount",
     "sync",
     "table",
