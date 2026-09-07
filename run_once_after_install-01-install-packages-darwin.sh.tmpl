@@ -72,13 +72,30 @@ if [ "${mas_status}" -ne 0 ]; then
     echo "'mas list' prints the App Store apps this machine already has."
 fi
 
-# The Brewfile installs the `rustup` formula, which provides rustup-init; that is
-# what lays down a toolchain. -y takes its defaults -- the stable toolchain, and
-# no questions -- and --no-modify-path stops it appending its own PATH line to
-# ~/.bashrc, which chezmoi manages and would overwrite at the next apply. The
-# guard names ~/.cargo/bin directly because that is where rustup-init puts
-# rustup, and this shell's PATH does not include it.
-if ! "${HOME}/.cargo/bin/rustup" --version > /dev/null 2>&1; then
-    rustup-init -y --no-modify-path
+# Homebrew does not put rustup's copies of cargo, rustc and rustfmt in
+# /opt/homebrew/bin with everything else. They stay in rustup's own directory,
+# which `brew --prefix rustup`/bin names, and exports.fish adds that to PATH.
+#
+# Installing rustup installs no compiler. `rustup default stable` downloads one
+# and makes it the default.
+#
+# `brew --prefix` prints a path for any formula Homebrew knows, installed or
+# not, and the directory exists only once it is installed. The test below looks
+# for the rustup binary.
+#
+# Nothing else in the bootstrap needs Rust. If this fails the apply keeps going.
+rustup_prefix="$(brew --prefix rustup 2> /dev/null || true)"
+
+if [ -n "${rustup_prefix}" ] && [ -x "${rustup_prefix}/bin/rustup" ]; then
+    if ! "${rustup_prefix}/bin/rustup" default stable; then
+        echo
+        echo "No Rust toolchain was installed. Once the cause is fixed:"
+        echo "    ${rustup_prefix}/bin/rustup default stable"
+    fi
+else
+    echo
+    echo "rustup is not installed. It is in the Brewfile, so the bundle above"
+    echo "missed it. Re-run:"
+    echo "    grep -v '^mas ' ${brewfile} | brew bundle install --file=-"
 fi
 {{ end -}}
