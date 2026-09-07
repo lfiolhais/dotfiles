@@ -11,8 +11,13 @@ set -e -U fish_user_paths
 
 {{ if eq .chezmoi.os "darwin" -}}
 # ~/.local/bin holds the commands in dot_local/bin. The rest is Homebrew: its
-# own directories, and the kegs that are not linked into them -- the GNU
-# coreutils and tar that shadow the BSD ones, Ruby, and the JDK.
+# own directories, and the packages it keeps out of them -- the GNU coreutils
+# and tar that shadow the BSD ones, Ruby, the JDK, and rustup.
+#
+# rustup's directory holds its copies of cargo, rustc and rustfmt; ~/.cargo/bin
+# holds what `cargo install` writes. rustup's goes after /opt/homebrew/bin
+# because both hold a rust-analyzer, and the one the Brewfile installs is the
+# one that answers.
 fish_add_path --global --path --move \
     $HOME/.local/bin \
     /opt/homebrew/opt/ruby/bin \
@@ -21,6 +26,7 @@ fish_add_path --global --path --move \
     /opt/homebrew/sbin \
     /opt/homebrew/bin \
     /opt/homebrew/opt/coreutils/libexec/gnubin \
+    /opt/homebrew/opt/rustup/bin \
     $HOME/.cargo/bin \
     "/Applications/Little Snitch.app/Contents/Components"
 {{ else -}}
