@@ -35,15 +35,16 @@ if [ "${bundle_status}" -ne 0 ]; then
     echo "Fix the cause and re-run:" >&2
     echo "    grep -v '^mas ' ${brewfile} | brew bundle install --file=-" >&2
     echo >&2
-    echo "This script was not recorded, so 'chezmoi apply' also runs it again." >&2
+    echo "This script was not recorded, so the next 'chezmoi apply' runs it" >&2
+    echo "again, and stops here again until the bundle installs cleanly." >&2
     exit 1
 fi
 
 # The App Store second. Each `mas` entry needs the App Store signed in with the
-# terms accepted, and there is no supported way to ask whether it is -- mas 7
-# removed `mas account`, which was that question -- so the failure is reported
-# rather than predicted. Nothing else in the bootstrap depends on these apps, so
-# this does not stop the apply.
+# terms accepted, and `mas` cannot say whether it is: it has `signout` and
+# nothing that reports the current state. So this tries the install and prints
+# what to do when it fails. Nothing else in the bootstrap depends on these apps,
+# so a failure does not stop the apply.
 mas_status=0
 grep '^mas ' "${brewfile}" | brew bundle install --file=- || mas_status=$?
 

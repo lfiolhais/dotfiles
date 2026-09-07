@@ -40,7 +40,7 @@ echo "  pass insert email/smtp"
 echo "The IMAP and SMTP passwords, in the login Keychain. The account and"
 echo "server to use are the ones the configs already name:"
 echo
-echo "  grep -iE 'user|host' ~/.config/isyncrc ~/.config/msmtp/config"
+echo "  rg -i 'user|host' ~/.config/isyncrc ~/.config/msmtp/config"
 echo
 echo "  Then, once per password. -w goes last with no value so security prompts"
 echo "  rather than taking the password from the command line, where it would"

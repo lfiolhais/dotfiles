@@ -1,5 +1,5 @@
-# PATH first: everything below asks whether a command exists, and nothing that
-# is not yet on PATH can answer yes.
+# PATH first: the `command --query` checks below answer no for anything not yet
+# on PATH, and each of them then skips the settings it guards.
 #
 # fish_add_path --path writes $PATH itself and skips a directory that is not
 # there, so a machine part-way through its bootstrap collects no dead entries
@@ -33,15 +33,18 @@ fish_add_path --global --path --move \
 {{ end -}}
 
 # rustc is asked once and the answer reused: each `rustc --print` is a process
-# spawn, and three settings below want the same sysroot. It is absent until the
-# bootstrap's rustup-init has run.
+# spawn, and the settings below want the same sysroot. It stays empty until a
+# toolchain exists: on macOS the 01 bootstrap script installs one, and on Linux
+# nothing in this repository does, so until one is installed by hand the
+# settings below are skipped.
 set -l rust_sysroot
 command --query rustc; and set rust_sysroot (rustc --print sysroot)
 
 if test -n "$rust_sysroot"
-    # The toolchain's own bin, which carries what ~/.cargo/bin has no shim for.
-    # Appended rather than prepended: it duplicates several cargo shims and the
-    # shims are the ones that follow `rustup override`.
+    # The toolchain's own bin. It carries binaries the commands above do not,
+    # and duplicates the rest. This directory is one fixed toolchain, while the
+    # commands above follow `rustup override`, so it goes on the end and they
+    # answer first.
     fish_add_path --global --path --append $rust_sysroot/bin
     set -gx LD_LIBRARY_PATH $rust_sysroot/lib $LD_LIBRARY_PATH
     set -gx RUST_SRC_PATH $rust_sysroot/lib/rustlib/src/rust/src/
@@ -51,10 +54,12 @@ test -r "$HOME/.opam/opam-init/init.fish"
 and source "$HOME/.opam/opam-init/init.fish" > /dev/null 2> /dev/null
 or true
 
-# Make vim the default editor.
+# nvim is the editor, and aliases.fish points `vi` and `vim` at it too, so what
+# a command opens through EDITOR and what the shell opens by name agree.
 set -gx EDITOR nvim
 
-# Make Python use UTF-8 encoding for output to stdin, stdout, and stderr.
+# Make Python read and write its three standard streams as UTF-8, whatever the
+# locale says.
 set -gx PYTHONIOENCODING UTF-8
 
 # Colour manual pages where less renders them. `me` and `ue` are the resets: set

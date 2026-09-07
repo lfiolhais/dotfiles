@@ -39,6 +39,12 @@ yours to run.
 
 ## When chezmoi says "operation not permitted"
 
+The shell's sandbox and the file-editing tools do not share a deny list. A write
+refused on a path inside the repository itself fails from a shell command with
+`Operation not permitted` and goes through the Edit tool unchanged. An EPERM on
+a repository path is a reason to reach for the editing tool, not evidence that
+the file cannot be written.
+
 The sandbox denies the real `~/.config/chezmoi`, so chezmoi fails before doing
 anything. Give it a throwaway config, cache and state under `$TMPDIR` — never
 `/tmp`, which parallel jobs share:

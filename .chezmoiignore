@@ -12,8 +12,8 @@ TODO.md
 .config/Brewfile
 .local/bin/cask-updates
 .local/bin/mount-nas
-# Its shebang is `uv run --script`, and uv is a Homebrew and Fedora package
-# only. It also maintains the Brewfile, which is macOS's package list.
+# It maintains the Brewfile, which is macOS's package list, so there is
+# nothing for it to do on a Linux machine.
 .local/bin/chezmoi-packages
 Library/LaunchAgents/xyz.botasal.mount-nas.plist
 {{ end }}

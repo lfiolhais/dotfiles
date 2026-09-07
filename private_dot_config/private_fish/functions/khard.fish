@@ -1,4 +1,4 @@
-function khard --wraps khard --description "khard, recording every change it makes in the chezmoi source"
+function khard --wraps khard --description "khard, recording every card it writes in the chezmoi source"
     # Each contact is a separate file in the chezmoi source, and a card khard
     # has just written has no source entry at all -- so it exists on this
     # machine only, and a reinstall or a second machine never sees it. Nothing

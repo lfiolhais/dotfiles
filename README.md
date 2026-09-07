@@ -38,8 +38,9 @@ installs itself without a package manager:
 sh -c "$(curl -fsLS get.chezmoi.io)" -- -b ~/.local/bin
 ```
 
-On a Mac that already has Homebrew, `brew install chezmoi` is equivalent. There
-are no other prerequisites — the bootstrap installs everything else, including
+On a Mac that already has Homebrew, `command brew install chezmoi` is
+equivalent — `command` because the fish this repository deploys blocks a bare
+`brew install`. There are no other prerequisites — the bootstrap installs everything else, including
 Homebrew.
 
 ### One command
@@ -52,21 +53,25 @@ Homebrew.
 directory and the only copy to edit. `--apply` then renders it into `$HOME` and
 runs the bootstrap scripts. Add `--ssh` to clone over SSH rather than HTTPS.
 
-Two prompts interrupt it:
+Prompts interrupt it:
 
 - On Linux, `Do you have sudo on this machine`. The answer selects the profile
   and is remembered, so a later `chezmoi init` does not ask again. Changing it
-  afterwards means editing `[data] sudo` in `~/.config/chezmoi/chezmoi.toml`,
-  because the answer decides the package manager, how fish becomes the login
-  shell, and whether `~/.config/mise` is deployed at all.
+  afterwards means editing `[data] sudo` in `~/.config/chezmoi/chezmoi.toml`
+  and then `chezmoi apply -v`, because the answer decides the package manager,
+  how fish becomes the login shell, and whether `~/.config/mise` is deployed at
+  all. Nothing uninstalls what the previous profile installed, so those packages
+  stay until they are removed by hand.
 - A passphrase for `key.txt.age`, which holds the age key that decrypts
   everything else. The passphrase is not in this repository and cannot be
   recovered from it. Without it, `chezmoi apply --exclude=encrypted,scripts`
   renders every unencrypted file and leaves mail, contacts and the bootstrap
   alone.
 
-On macOS the apply asks for the sudo password early, and holds it for the rest
-of the run: `02-setup-darwin` writes settings that need root.
+On macOS the sudo password is asked for once, at the start of `02-setup-darwin`,
+which is after the whole Brewfile has installed — so the long unattended stretch
+comes first and the prompt after it. `02` writes settings that need root, and
+refreshes the timestamp every 60 seconds so it does not lapse mid-run.
 
 ### What the first apply changes
 
@@ -77,7 +82,7 @@ reversible operation. In order:
 | ---                          | ---                                                                        |
 | `setup-xcode-cli`            | installs Xcode Command Line Tools and Rosetta 2                            |
 | `decrypt-private-key`        | writes `~/.config/chezmoi/key.txt`                                         |
-| `01-install-packages-darwin` | installs Homebrew, then the whole Brewfile, then rustup                    |
+| `01-install-packages-darwin` | updates or installs Homebrew, then the whole Brewfile, then Rust's stable toolchain |
 | `01-install-packages-linux`  | apt/dnf and the `gh`/`starship` repos, or a rootless mise                  |
 | `02-setup-darwin` | rewrites preferences across the Dock, Finder, Safari, trackpad, keyboard, screenshots and Software Update, then kills the affected apps to reload them |
 | `03-setup-dock`              | appends the apps it names to the Dock, leaving existing items in place     |
@@ -222,7 +227,7 @@ these are the ones worth knowing about:
 | `get_contact`   | pick a contact out of khard with fzf                                  |
 | `zip`           | zip, never storing a `.git` directory                                 |
 
-Three of those wrap a command rather than adding one, because the machine and
+Some of those wrap a command rather than adding one, because the machine and
 the source state come apart silently otherwise:
 
 - `brew install`, `uninstall`, `reinstall`, `remove`, `tap` and `untap` are
@@ -325,10 +330,14 @@ chezmoi-packages search ripgrep
 ```
 
 That queries Homebrew and mise on this machine, and each distro's repositories
-in throwaway Docker containers. Without Docker it reports `docker is not
-available; only brew and mise will be searched` and still suggests a command —
-one with no distro fields, which looks exactly like a tool no distro packages.
-Start Docker before trusting the answer.
+in throwaway Docker containers. With no `docker` on PATH it reports `docker is
+not available; only brew and mise will be searched` and still suggests a command
+— one with no distro fields, which looks exactly like a tool no distro packages.
+
+The check is for the command, not the daemon, so a Docker that is installed but
+not running says nothing at all and returns the same empty distro fields. Start
+Docker and confirm with `docker info`, which fails while the daemon is down,
+before trusting an answer that names no distro package.
 
 The output ends with the command to run:
 
@@ -361,10 +370,11 @@ chezmoi-packages add ripgrep --no-install --apt ripgrep --fedora ripgrep --mise 
 A cask is not a manifest entry. The manifest accounts for `brew` and `uv`
 entries only — the CLI tools the Linux profiles mirror — so `tests/check.py`
 never asks a cask to be claimed, and `chezmoi-packages add` always writes an
-entry, which makes it the wrong verb here:
+entry, which makes it the wrong verb here. The `brew` function blocks
+`install`, so reaching brew itself takes `command`:
 
 ```sh
-brew install --cask ghostty
+command brew install --cask ghostty
 chezmoi-packages dump      # the only sanctioned path to the Brewfile
 python3 tests/check.py
 ```
@@ -431,7 +441,7 @@ it was found — the keys are deleted rather than set true.
 Apps installed by hand are never touched. Homebrew does not know about them, so
 nothing else would update them.
 
-Five casks are exempt by name — adguard, little-snitch, proton-mail-bridge,
+Casks exempt by name — adguard, little-snitch, proton-mail-bridge,
 protonvpn, tor-browser — because a firewall, a VPN and a hardened browser ship
 fixes on their own schedule, and the gap until the next `update` is real
 exposure. `status` prints them with the reason. To change that list, edit
@@ -510,7 +520,15 @@ Always Allow grants the same access permanently.
 
 The account name is this machine's; on a NAS account with a different user,
 change `-a lfiolhais` and `USER` in `dot_local/lib/python/mountnas.py` together,
-because the lookup matches on both.
+because the lookup matches on both. `mount-nas` runs the deployed copy, so the
+edit takes effect only after an apply:
+
+```sh
+chezmoi cd
+$EDITOR dot_local/lib/python/mountnas.py
+exit
+chezmoi apply -v
+```
 
 Confirm it with `mount-nas status`, which prints one line per share:
 
@@ -675,16 +693,17 @@ mbsync -a && notmuch new
 There is no build. Testing a change means `chezmoi diff`, then the harness:
 `tests/render-matrix.sh` first because it takes seconds, then `tests/check.py`
 on this host, `tests/linux.py` for the Linux targets in Docker, and
-`tests/macos.py` for macOS in a Lume VM. None of them performs a destructive
-action or runs a bootstrap script.
+`tests/macos.py` for macOS in a Lume VM. None of them touches this machine:
+`linux.py` works in a container and `macos.py` in a VM, and only those two run
+the bootstrap scripts at all, under `--full`, inside the throwaway guest.
 
 `tests/render-matrix.sh` renders every template for all three profiles and
 parses the result — shell with `bash -n` and `shellcheck`, fish with `fish -n`.
 It needs no Docker, which is what makes it the one to run while editing; its
 header says what that render can and cannot prove.
 
-`tests/check.py` needs Python 3.11 or newer, plus `ruff`, `shellcheck` and
-`fish`.
+`tests/check.py` runs on this host and is the only one that exercises the real
+age key; [tests/README.md](tests/README.md) lists what it needs installed.
 
 Other machines pull `main`, so a broken `main` breaks them. A `pre-push` hook
 runs `check.py` before any push to `main`; `core.hooksPath` is a local git

@@ -55,6 +55,10 @@ function chezmoi-sync --description "Pull this machine's configuration back into
     # chezmoi status prints two status columns, a space, then the target path.
     # A file still marked modified after a re-add is one chezmoi refused to
     # overwrite, which means its source is a template.
+    #
+    # No --path-style=absolute here, unlike every other status call in this
+    # file: the path is joined onto $HOME a few lines down, and an absolute one
+    # would be joined twice.
     set -l pending (chezmoi status)
     if test (count $pending) -gt 0
         echo

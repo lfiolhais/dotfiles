@@ -55,7 +55,7 @@ It:
   `uv "…"` entry must be claimed by a `[packages]` entry through its `brew`
   field, which is what stops a `brew bundle dump` on the Mac from silently
   widening the macOS/Linux gap. It also fails on a manifest entry naming a
-  formula the Brewfile no longer has, on an entry that installs nowhere on Linux
+  formula the Brewfile does not have, on an entry that installs nowhere on Linux
   and gives no reason, on a misspelled field name, and on two entries claiming
   the same `mise` tool, which would render a duplicate key into the generated
   mise config. These rules live in `Manifest.problems`
@@ -128,8 +128,8 @@ python3 tests/linux.py --full   # also run the real bootstrap in-container
 
 Runs from any machine with Docker, macOS included. It crosses every distro in
 `IMAGES` — Ubuntu, Fedora, and the RHEL-family rebuilds Rocky Linux and
-AlmaLinux — with sudo and no-sudo, giving eight targets, and spins up a throwaway
-container per target (`tests/docker/entrypoint.sh`). `--full` is the only flag:
+AlmaLinux — with sudo and no-sudo, and spins up a throwaway
+container per distro-and-sudo combination (`tests/docker/entrypoint.sh`). `--full` is the only flag:
 there is no way to select one target or resume a run.
 
 Besides rendering and linting, the entrypoint asks the package manager whether
@@ -153,8 +153,8 @@ several gigabytes and a long run.
 
 `--full` also needs `GITHUB_TOKEN` in the environment. The no-sudo profile
 installs its toolchain with mise, which resolves most tools from GitHub releases;
-unauthenticated that is 60 API requests an hour for the whole host, and four
-no-sudo targets exhaust it. A token needs no scopes — it only raises the rate
+unauthenticated that is 60 API requests an hour for the whole host, which the
+no-sudo profile across every image in `IMAGES` exhausts. A token needs no scopes — it only raises the rate
 limit — so `gh auth token` is enough. `linux.py` forwards the variable into each
 container when the environment has it. In fish:
 

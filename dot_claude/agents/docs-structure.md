@@ -60,6 +60,17 @@ Sweep for each of these and report every occurrence with file, line and quote:
 - References to earlier revisions of the document, or earlier states of the
   system: "used to be", "was called", "no longer", "for now", "this replaced",
   a rejected alternative, a dated note recording when someone last looked.
+- Hedging where the behaviour is deterministic: "should", "ought to", "will
+  normally", "is meant to". A modal in a sentence about what software does
+  usually means the behaviour was never run.
+- A clause restating the clause before it: "X is not installed, so there is no
+  X". Cover the text after the comma and ask whether the reader would have
+  supplied it unprompted.
+- A contrast against an alternative nobody would attempt: "reported rather than
+  predicted", or "appended rather than prepended" where only one was possible.
+- A tool's internal vocabulary standing in for a plain description -- keg,
+  shim, proxy, target state -- outside the places a reader has to type it or
+  match it against the tool's own output.
 - Preamble that announces a point instead of making it: "the practical
   consequence is", "it is worth noting", "what this means is", "the thing to
   keep straight is".

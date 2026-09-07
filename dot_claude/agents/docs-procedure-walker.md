@@ -53,7 +53,18 @@ Run each of these against every step:
   quietly undo the step the operator just performed?
 - **Success signal.** Does the step say what it prints when it worked, roughly
   how long it takes, and what to do when it fails a second time? A failure path
-  that points back at the same step is a loop.
+  that points back at the same step is a loop. A signal is not owed where the
+  command already reports its own outcome; asking for one there produces a
+  paragraph that tells the reader nothing, and a signal naming a check the
+  reader was never given is worse than none.
+- **The reader's shell.** Does every command work in the environment the
+  document is written for? An environment that wraps or aliases the commands it
+  documents -- a guard refusing `brew install`, an alias putting `fd` behind
+  `find` or `rg` behind `grep` -- changes what a pasted line does, and takes
+  different arguments. Read whatever the project installs over its own
+  commands, then check each step against it. This is the highest-value check
+  here: it turns a procedure that reads correctly into one that fails on the
+  first line.
 - **Cheap causes first.** Does any symptom-to-remedy path send a common,
   harmless failure straight to the most destructive fix?
 - **Placeholders.** Is every placeholder resolvable — a stated way to find the

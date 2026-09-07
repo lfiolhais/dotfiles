@@ -1,4 +1,4 @@
-function update --description "Update every package on this machine, whatever installed it"
+function update --description "Update the packages each installer on this machine can reach"
     # Packages here come from a handful of unrelated installers, so no single
     # `brew upgrade` or `apt upgrade` covers the machine. This walks all of them,
     # in dependency order: system packages first, then the language toolchains,

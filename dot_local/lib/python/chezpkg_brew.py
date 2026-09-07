@@ -42,10 +42,10 @@ class Entry:
     name: str
 
     def __str__(self) -> str:
-        """Convert Entry to a string.
+        """Render the entry as the Brewfile line it was parsed from.
 
         Returns:
-            String representation of Entry.
+            The line, such as ``brew "ripgrep"``.
 
         """
         return f'{self.kind} "{self.name}"'

@@ -59,10 +59,21 @@ procedure: resolvable placeholders, a success signal, no counting of what
 follows, and no credential reaching a command line where the shell history will
 keep it. Check that what is printed can be followed exactly as printed.
 
+**Printed instructions and the reader's shell.** A message telling a person to
+run something has to work where they will run it. An environment that wraps or
+aliases its own commands -- a guard refusing `brew install`, an alias putting
+`fd` behind `find` -- changes what the printed line does. Find what the project
+installs over its commands and check every suggestion against it.
+
 **Text that is rendered before it is read.** A command inside a docstring, a
 heredoc, or a template arrives at the reader after processing. A continuation
 written `\\` in a raw string becomes two backslashes and the pasted command
 breaks, invisibly in the source. Render it and check the output.
+
+**A file that calls itself generated.** Check what writes it. A header reading
+"GENERATED, do not edit" on a file no program writes stops the next reader from
+fixing a real bug in it. A template whose data comes from elsewhere is authored;
+only the data is generated, and the comment has to say which is which.
 
 **Comments inside a generator.** These become documentation in every file the
 generator writes. A note about something removed, sitting in a header constant,

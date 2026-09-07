@@ -25,9 +25,9 @@ source $HOME/.config/fish/greet.fish
 # after a login rather than every terminal tab.
 #
 # --apple-load-keychain takes the passphrase from the login Keychain and asks
-# nothing. It finds one there only after the passphrase has been stored once,
-# which run_once_after_install-08-setup-ssh.sh does; without that step every
-# shell would stop at a passphrase prompt.
+# nothing, which is why its failure is discarded: it finds a passphrase there
+# only once run_once_after_install-08-setup-ssh.sh has stored one. Until then
+# the agent stays empty and whatever next needs the key asks for it.
 if not ssh-add -l >/dev/null 2>&1
     ssh-add -q --apple-load-keychain 2>/dev/null
 end

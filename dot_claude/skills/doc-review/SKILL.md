@@ -148,6 +148,18 @@ where the script appends. And a reviewer may report a *code* bug as a
 documentation bug, because reading comments against their code is exactly how
 code bugs surface.
 
+A reviewer may also cite a rule, a file or a standard that does not exist while
+being right about the substance. Check the citation and the claim separately: a
+fabricated citation is not grounds to drop the finding, and dropping it is how
+a real defect survives a review that named it.
+
+A reviewer may also measure a document against the wrong audience, judging a
+backlog or a reference as though it were onboarding material. Establish what
+each document is for before accepting "a reader could not act on this".
+
+A reviewer's experiment is still a claim. Where a fix depends on one, run it
+again.
+
 Sort findings into three piles and treat them differently:
 
 - **Documentation defects** — fix them.
@@ -163,6 +175,13 @@ Sort findings into three piles and treat them differently:
 Restructure before rewriting sentences. Most of what reads as bad prose is
 material in the wrong file, and fixing the paragraph leaves the defect.
 
+Fix the class, not the instance. A finding quotes one sentence, and the same
+mistake is usually in ten more -- the reviewer only had to find one to report
+it. After each fix, sweep the corpus for that shape, by grepping the phrasing,
+the construction or the vocabulary, and fix what comes back before moving on.
+A pass that changes only what was quoted leaves the list looking handled and
+the corpus as it was.
+
 The usual shape of the fix:
 
 - The human document gets a front door — what this is, prerequisites as
@@ -177,11 +196,16 @@ The usual shape of the fix:
 
 Verify as you go, with whatever the project provides: render the templates, lint
 the scripts, run the linter over the code, check that anchors resolve and that
-the mechanical sweeps come back clean.
+the mechanical sweeps come back clean. Run the commands the documents hand a
+reader, in the shell those documents are written for -- an environment that
+wraps or aliases its own commands changes what a pasted line does, and the
+document was written where the wrapper was not.
 
-Then review the rewrite. A pass that corrects twenty claims introduces new ones,
-and you cannot see those either — dispatch `docs-factchecker` at the result and
-expect it to find several. Fixing those is part of the job, not a sign the pass
+Then review the rewrite. Run the mechanical sweeps over the new prose first:
+text written to fix a rule violation carries its own, and the greps that found
+the first set find the second. A pass that corrects twenty claims introduces new
+ones, and you cannot see those either — dispatch `docs-factchecker` at the
+result and expect it to find several. Fixing those is part of the job, not a sign the pass
 failed.
 
 ## Reporting back

@@ -16,7 +16,7 @@ function __print_help_khard_rm
     echo -e "\tpassed to 'khard list' as search terms to narrow the picker."
 end
 
-function khard-rm --description "Delete several khard contacts at once and drop them from chezmoi"
+function khard-rm --description "Delete several khard contacts at once, dropping them from chezmoi unless -N"
     set -l options (fish_opt --short=h --long=help)
     set options $options (fish_opt --short=a --long=addressbook --required-val)
     set options $options (fish_opt --short=n --long=dry-run)
@@ -141,7 +141,7 @@ function khard-rm --description "Delete several khard contacts at once and drop 
     echo "Next steps:"
     echo "  chezmoi diff"
     echo "  cd "(chezmoi source-path)
-    echo "  git add -A && git commit -m 'khard: remove contacts' && git push"
+    echo "  git status, then commit the removals by hand"
     echo
     echo "On another machine: 'chezmoi apply' after pulling. 'chezmoi update'"
     echo "pulls and applies in one step, and re-runs any bootstrap script whose"
