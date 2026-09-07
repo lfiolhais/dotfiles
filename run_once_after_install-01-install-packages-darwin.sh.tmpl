@@ -15,6 +15,18 @@ if ! command -v brew > /dev/null 2>&1; then
     # The installer does not put brew on this shell's PATH. Apple Silicon
     # prefix; an Intel Mac installs to /usr/local instead.
     eval "$(/opt/homebrew/bin/brew shellenv)"
+else
+    # `brew bundle install` below resolves names against the API index and the
+    # tap remotes, so refresh them first. exports.fish sets
+    # HOMEBREW_NO_AUTO_UPDATE, so brew will not refresh them by itself in any
+    # fish shell this repository configures; doing it here means an apply from
+    # fish and an apply from bash behave the same. Only this branch needs it:
+    # a brew installed above arrives current.
+    #
+    # A failed update does not stop anything. The old index still resolves, and
+    # the bundle below is the step that has to succeed.
+    echo "Updating the Homebrew already on this machine before installing."
+    brew update || echo "brew update failed; continuing on the index as it is." >&2
 fi
 
 # Two passes over one file, because the two halves fail for different reasons and
