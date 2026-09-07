@@ -6,8 +6,8 @@ description: Reach SSH hosts (LAN servers, Raspberry Pis, remote boxes) from ins
 # SSH from inside the sandbox
 
 The sandbox denies raw sockets, so `ssh` fails before doing anything useful.
-There are three independent gates producing different errors. Work out which
-one you are hitting before changing any settings.
+The gates below are independent and each produces a different error. Work out
+which one you are hitting before changing any settings.
 
 ## Symptom → gate
 

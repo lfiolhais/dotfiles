@@ -57,7 +57,7 @@ wrong for another. macOS never prompts for sudo:
 A template gated off for a target renders empty, and chezmoi skips an empty
 `run_` script — so empty output is a pass.
 
-## What has gone wrong before, and is worth checking again
+## Defects this repository keeps producing
 
 - A file deployed everywhere that only works on one OS: a hardcoded
   `/opt/homebrew` or `/Users/lipe` path, an ssh option macOS alone accepts, a

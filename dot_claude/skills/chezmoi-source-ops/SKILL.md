@@ -1,6 +1,6 @@
 ---
 name: chezmoi-source-ops
-description: Safely inspect, render, lint and verify a chezmoi source directory from inside the Claude Code sandbox, without applying anything to the machine. Use when working in a chezmoi dotfiles repo — checking a template renders, verifying a claim about the target state, or linting a bootstrap script — and when chezmoi fails with "operation not permitted".
+description: Safely inspect, render, lint and verify a chezmoi source directory from inside the Claude Code sandbox, without applying anything to the machine. Use when working in a chezmoi dotfiles repo — checking a template renders, verifying a claim about what lands in $HOME, or linting a bootstrap script — and when chezmoi fails with "operation not permitted".
 ---
 
 # Working in a chezmoi source directory
@@ -100,7 +100,7 @@ Deployed libraries and command entry points live outside the test directory and
 the entry points often have no `.py` extension, so they have to be passed by
 path with an explicit `--config`.
 
-## Verifying a claim about the target state
+## Verifying a claim about what an apply writes
 
 Source paths and target paths are different, and documentation that names one
 where the reader needs the other sends them to a file that does not exist. Two

@@ -64,6 +64,27 @@ is", "it should be pointed out", "as mentioned", "in order to", "at this point
 in time". If a sentence can lose its first clause and still say the same thing,
 it should.
 
+### Do not restate the clause before it
+
+A conclusion the reader has already drawn is not worth a clause. "The rustup
+formula is not installed, so this machine has no Rust" says one thing twice --
+the second half is the first half. "rustup is not installed" is the sentence.
+
+Cover the clause after the comma. If the reader would have supplied it
+unprompted, delete it and say the next useful thing instead: what to run, or
+what else is true now that they could not have guessed.
+
+### Do not contrast behaviour with an invented alternative
+
+"The failure is reported rather than predicted" balances a real thing against
+something nobody would attempt, for rhythm. So does "appended rather than
+prepended" where only one of the two was ever on the table.
+
+Contrast earns its words when both sides are real and the reader might expect
+the other one. "The test looks for the binary, not the prefix" earns it: the
+prefix is the obvious thing to test, and it does not work. With no competing
+option, drop the contrast and say what happens.
+
 ## Cut the preamble, never the reason
 
 Concision applies to run-up, not to causation. Every instruction states why it
@@ -92,6 +113,22 @@ State what is needed and why, rather than what breaks in its absence.
 
 Describing a failure is fine when the failure is the subject — a symptom table,
 or a section about what goes wrong. It is the wrong frame for an instruction.
+
+## Say what happens, not what should happen
+
+Software is deterministic, and documentation about it is not a forecast. "The
+Brewfile's own formula should win", "the agent will normally reload", "this
+ought to leave the cache empty" each describe a system the writer did not run.
+Run it, then write what it did: "the one the Brewfile installs is the one that
+answers."
+
+Keep "may", "might" and "if" for what is genuinely unknown at writing time --
+whether a remote is reachable, which of two causes produced a symptom, what a
+future release does. Where one is unavoidable, name what settles it: "whether
+the tap is reachable is unknown here; `brew update --force` answers it."
+
+A modal is also how an unverified claim disguises itself. "Should", in a
+sentence about behaviour, usually means the behaviour was never checked.
 
 ## Every paragraph earns its place
 
@@ -162,6 +199,13 @@ Everything after that may assume the reader has read it. Nothing before it can.
   to the agent.
 - No bolding for emphasis. Bold is for structural list lead-ins only. Never
   bold a whole sentence, and never bold a word for effect.
+- Plain words over a tool's internal vocabulary. Homebrew calls an unlinked
+  installation a keg and its dispatching wrappers shims, rustup calls those
+  proxies, chezmoi calls the rendered result the target state. Explaining
+  behaviour in those terms writes only for a reader who already knows it. Name
+  the thing by what it is -- "rustup's own directory", "the copies of cargo and
+  rustc it installs" -- and keep the term of art where the reader has to type
+  it or match it against the tool's own output.
 - Technical documentation, not conversation.
 
 ## Structure and headings
@@ -234,6 +278,14 @@ though executing it with the system already broken and the next step unread.
 - A step that cannot be repeated needs its reset command. "Keep them idempotent"
   is advice to whoever writes the script; the reader who has just watched one
   fail halfway needs the command that makes it run again.
+- A command has to work in the shell the document is written for. An
+  environment that wraps the commands it documents -- a guard around `brew
+  install`, an alias putting `fd` behind `find` -- changes what a pasted line
+  does. Run it there before writing it down.
+- Nothing here is a checklist to satisfy. A success signal for a command that
+  already reports its own outcome, or one naming a check the reader was never
+  given, costs a paragraph and says nothing. Where the command reports itself,
+  that is the signal.
 
 ## Every warning implies a command
 

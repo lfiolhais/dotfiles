@@ -15,8 +15,8 @@ only what an agent needs on top of it, and deliberately does not restate it.
   Testing and applying are the
   user's steps. `chezmoi diff`, `status`, `cat`, `execute-template`,
   `source-path` and `archive` are read-only and safe.
-- Never edit the deployed copy under `$HOME`. This repository is the source
-  state; the next apply overwrites the target. Edit here.
+- Never edit the deployed copy under `$HOME`. An apply copies from this
+  repository over whatever is in `$HOME`. Edit here.
 - A change for Linux must not alter the macOS render. Linux logic lives in
   `{{ if eq .chezmoi.os "linux" }}` blocks that render empty on darwin, and
   chezmoi skips an empty `run_` script. `bash tests/render-matrix.sh` renders
@@ -69,8 +69,8 @@ harness.
 
 ## The Python libraries
 
-Four families, each a facade over modules that import strictly downwards, which
-is what keeps them free of cycles. Each entry point imports its facade and
+Each family is a facade over modules that import strictly downwards, which is
+what keeps them free of cycles. Each entry point imports its facade and
 nothing else, so a split inside a family never touches the command.
 
 `gitwt`, behind `git-wt-clone` and `git-wt-add`:
@@ -172,13 +172,13 @@ script with `bash -n` and shellcheck, lints the deployed shell that is not a
 config to `ssh -G` and the rendered gitconfig to `git config --list`, refuses a
 compiled binary or a program-written file anywhere in the source, checks the
 Brewfile against the manifest, lints this repo's Python with ruff, imports
-`caskupd`/`gitwt`/`linux_distros`/`mountnas` and runs the four stdlib entry
-points' `--help` under each `python3` on the host, runs the `mount-nas` unit
+`caskupd`/`gitwt`/`linux_distros`/`mountnas` and runs each stdlib entry point's
+`--help` under every `python3` on the host, runs the `mount-nas` unit
 tests, exercises `chezmoi-packages` through `uv run --script`, and prints a
 dry-run diff.
 
-Four of those lists are hand-maintained in `tests/check.py` and a new file has to
-be added to the right one: `SHELL_FILES` for deployed shell outside a `run_`
+The lists in `tests/check.py` are hand-maintained, and a new file has to be
+added to the right one: `SHELL_FILES` for deployed shell outside a `run_`
 script, `DEPLOYED_ENTRY_POINTS` for a new command in `dot_local/bin/`,
 `BINARY_MAGIC` for another executable format, and `GENERATED_NAMES` for another
 file a program writes. Everything else is globbed -- the library modules, and
@@ -195,8 +195,8 @@ takes `.chezmoi.os` from the machine it runs on, so it rewrites that to a
 and nothing about that machine's packages. `tests/linux.py` is the authority
 there.
 
-`tests/linux.py` renders and lints every distro crossed with sudo/no-sudo —
-eight targets, from the four images in `linux_distros.IMAGES`. `tests/macos.py`
+`tests/linux.py` renders and lints every image in `linux_distros.IMAGES`
+crossed with sudo and no-sudo. `tests/macos.py`
 does the same in Lume VMs. `tests/nasprobe.py` is the one test that talks to
 something real.
 
