@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # In-guest macOS validation invoked by tests/macos.py over `lume ssh`.
-# Env: FULL=true|false (run the real bootstrap), SRC=path of the read-only repo
-# mount. No real age key is present, so encrypted files are excluded from every
-# chezmoi operation.
+# FULL=true|false and SRC=<read-only repo mount> are set by tests/macos.py.
+# LUME_PASSWORD overrides the guest account password that FULL uses to grant
+# sudo (default `lume`); it is read here in the guest, so pass it inside the
+# `lume ssh` command rather than exporting it on the host. No real age key is
+# present, so encrypted files are excluded from every chezmoi operation.
 set -eu
 
 FULL="${FULL:-false}"
@@ -63,5 +65,30 @@ for f in "$SRC"/run_*.sh "$SRC"/run_*.sh.tmpl; do
 done
 
 if [ "$FULL" = "true" ]; then
+    # The darwin bootstrap needs administrator sudo: Homebrew's installer creates
+    # and chowns /opt/homebrew, and 02-setup-darwin opens with `sudo -v`. The Lume
+    # image's `lume` user is an admin, but %admin sudo wants the account password
+    # and `lume ssh` has no terminal to type it at, so authenticate once and drop
+    # a NOPASSWD rule. Throwaway VM; `lume` is the trycua images' published
+    # password and LUME_PASSWORD overrides it.
+    if ! sudo -n true 2> /dev/null; then
+        if ! printf '%s\n' "${LUME_PASSWORD:-lume}" | sudo -S -p '' -v 2> /dev/null; then
+            echo "sudo rejected the guest account password; set LUME_PASSWORD to the image's own" >&2
+            exit 1
+        fi
+        # Validate the rule in a temp file before installing it: a syntax error in
+        # anything under /etc/sudoers.d makes sudo refuse every call, and the run
+        # would then have no way to sudo the bad file back out. The name carries no
+        # `.` because sudo's includedir skips those.
+        rule_file="$(mktemp)"
+        printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$(id -un)" > "$rule_file"
+        sudo -n visudo -cf "$rule_file" > /dev/null
+        sudo -n install -m 0440 -o root -g wheel "$rule_file" /etc/sudoers.d/chezmoi-test
+        rm -f "$rule_file"
+    fi
+
+    # A headless apply runs the Homebrew bundle and the `defaults write` scripts
+    # but cannot get past 04-setup-fish, where `chsh` changes the login shell and
+    # asks for a password on a connection that has no terminal.
     chezmoi apply --source "$SRC" --exclude encrypted --verbose
 fi
