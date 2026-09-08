@@ -4,10 +4,12 @@
 The macOS analogue of tests/linux.py. Docker can't run macOS, so this uses Lume
 (https://cua.ai/docs/lume) to boot a throwaway macOS VM on Apple Silicon. For
 each image it renders the source and lints the darwin bootstrap scripts inside
-the VM -- without touching the host and without the real age key (encrypted
-files are excluded). With ``--full`` it also runs the real bootstrap in the VM
-(heavy: Homebrew bundle, ``defaults write``, dockutil). Lume is the only
-dependency and ships its own ``lume ssh``, so no password plumbing is needed::
+the VM, with the real age key absent so encrypted files are excluded. The run VM
+is deleted afterwards; Lume's layer cache and the ``lume config cache enable``
+that fills it stay on the host (below). With ``--full`` it also runs the real
+bootstrap in the VM (heavy: Homebrew bundle, ``defaults write``, dockutil). Lume
+is the only dependency and ships its own ``lume ssh``, so no password plumbing is
+needed::
 
     /bin/bash -c "$(curl -fsSL https://cua.ai/lume/install.sh)"
 
@@ -15,15 +17,22 @@ dependency and ships its own ``lume ssh``, so no password plumbing is needed::
     python3 tests/macos.py --only tahoe
     python3 tests/macos.py --keep
     python3 tests/macos.py --full
+    python3 tests/macos.py --build-base
 
 The harness enables Lume's image layer cache (``lume config cache enable``; Lume
 ships with it off), so ``lume pull`` writes the image layers to ``~/.lume/cache``
-and the next run reuses them: only the first run downloads the image.
+and the next run reuses them: only the first run downloads the image. The cache
+and the setting persist; ``lume prune`` clears the cache and ``lume config cache
+disable`` turns the setting back off.
 
-``--keep`` goes further: it reuses the VM between runs instead of rebuilding its
-disk and cold-booting, which is faster still to iterate with and means the guest
-carries state from the last run -- with ``--full`` that is no longer a
-clean-machine test.
+A run clones a pristine ``chezmoi-test-base-<image>`` VM instead of pulling, when
+one exists: a local copy that needs no network and skips re-materialising the
+disk. ``--build-base`` pulls each image into that VM, and refreshes it to a newer
+image the same way; without a base, a run falls back to ``lume pull``.
+
+``--keep`` reuses the VM between runs instead of recreating and cold-booting it,
+which is faster still to iterate with and means the guest carries state from the
+last run -- with ``--full`` that is no longer a clean-machine test.
 """
 
 from __future__ import annotations
@@ -78,6 +87,19 @@ def _lume(*argv: str) -> int:
 
     """
     return subprocess.run(["lume", *argv], check=False).returncode
+
+
+def _base_vm(name: str) -> str:
+    """The pristine, never-booted VM that a run clones instead of pulling.
+
+    Args:
+        name: An image name (a key of ``IMAGES``).
+
+    Returns:
+        The Lume VM name.
+
+    """
+    return f"chezmoi-test-base-{name}"
 
 
 def _ensure_layer_cache() -> None:
@@ -176,16 +198,63 @@ def _remote_command(*, full: bool) -> str:
     )
 
 
+def _materialise(target: Target, vm: str) -> bool:
+    """Create the run VM, cloning the base when one exists so no network is needed.
+
+    ``lume clone`` copies the base VM's disk locally (copy-on-write), so a run
+    reaches the registry only until ``--build-base`` has been run once.
+
+    Args:
+        target: The macOS image to validate.
+        vm: The run VM name to create.
+
+    Returns:
+        True if the VM was created.
+
+    """
+    base = _base_vm(target.name)
+    if _vm_exists(base):
+        print(f"cloning {base} -> {vm}", flush=True)
+        return _lume("clone", base, vm) == 0
+    print(f"no {base}; pulling {target.image} (needs network -- see --build-base)", flush=True)
+    return _lume("pull", target.image, vm) == 0
+
+
+def _build_bases(only: list[str] | None) -> int:
+    """Pull each selected image into its base VM, replacing one already there.
+
+    Args:
+        only: Image names to build, or None for every image in ``IMAGES``.
+
+    Returns:
+        Process exit code: 0 when every pull succeeded.
+
+    """
+    failed = []
+    for name in only or IMAGES:
+        base = _base_vm(name)
+        print(f"\n=== {base} ({IMAGES[name]}) ===", flush=True)
+        subprocess.run(["lume", "delete", base, "--force"], capture_output=True, check=False)
+        if _lume("pull", IMAGES[name], base) != 0:
+            failed.append(name)
+    print()
+    if failed:
+        print(f"FAILED: {', '.join(failed)}")
+        return 1
+    print("Base VMs ready; runs clone them without network.")
+    return 0
+
+
 def run_target(target: Target, *, full: bool, keep: bool) -> bool:
     """Validate one macOS image in a throwaway Lume VM, deleting the VM afterwards.
 
     Args:
         target: The macOS image to validate.
         full: Whether to run the real bootstrap in-guest after render + lint.
-        keep: Whether to keep the VM (and reuse an existing one) instead of rebuilding
-            its disk and deleting it afterwards. The pull itself is layer-cached, but a
-            cached pull still re-materialises the VM disk and cold-boots it, so this
-            stays the faster path -- at the cost of the throwaway guarantee.
+        keep: Whether to keep the VM (and reuse an existing one) instead of
+            recreating it and deleting it afterwards. Recreating clones the base
+            VM when there is one, which is quick, so ``--keep`` mainly saves the
+            cold boot -- at the cost of the throwaway guarantee.
 
     Returns:
         True if the in-guest validation exited zero.
@@ -198,7 +267,7 @@ def run_target(target: Target, *, full: bool, keep: bool) -> bool:
     else:
         # Clear any VM left behind by an interrupted earlier run, then materialise a fresh one.
         subprocess.run(["lume", "delete", vm, "--force"], capture_output=True, check=False)
-        if _lume("pull", target.image, vm) != 0:
+        if not _materialise(target, vm):
             return False
     try:
         if _lume("run", "--detach", "--display", "none", "--shared-dir", f"{REPO}:ro", vm) != 0:
@@ -240,14 +309,22 @@ def main() -> int:
         action="append",
         choices=sorted(IMAGES),
         metavar="IMAGE",
-        help="validate only this image (repeatable); each image is a large pull",
+        help="validate only this image (repeatable); also narrows --build-base",
     )
     parser.add_argument(
         "--keep",
         action="store_true",
         help=(
-            "reuse and keep the VM instead of pulling a fresh copy and deleting it: "
-            "much faster, but the guest carries state from the previous run"
+            "reuse and keep the VM instead of recreating it and deleting it: "
+            "faster, but the guest carries state from the previous run"
+        ),
+    )
+    parser.add_argument(
+        "--build-base",
+        action="store_true",
+        help=(
+            "pull each image into its reusable chezmoi-test-base-<image> VM, then exit; "
+            "later runs clone that offline instead of pulling"
         ),
     )
     args = parser.parse_args()
@@ -257,6 +334,9 @@ def main() -> int:
         return 1
 
     _ensure_layer_cache()
+
+    if args.build_base:
+        return _build_bases(args.only)
 
     targets = [Target(name=name, image=IMAGES[name]) for name in args.only or IMAGES]
     failed = [t.name for t in targets if not run_target(t, full=args.full, keep=args.keep)]

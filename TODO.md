@@ -466,3 +466,30 @@ flags — `-q:v` rather than `-cq:v -b:v 0` — so it is not a substitution, and
 
 Picking the encoder from `uname` would make the function work on both, but the
 quality settings have to be chosen per encoder rather than carried across.
+
+## The macOS harness
+
+### `--full` in a headless VM cannot get past `chsh`
+
+`run_once_after_install-04-setup-fish.sh.tmpl:22`
+
+```sh
+if [ "${login_shell}" != "${fish_path}" ]; then
+    echo "Making ${fish_path} the login shell. chsh asks for the account password."
+    chsh -s "${fish_path}"
+fi
+```
+
+`tests/macos.py --full` runs `chezmoi apply` over `lume ssh`, which has no
+controlling terminal. Bare `chsh` authenticates through PAM against the account
+password and, with nothing to read it from, exits non-zero; `set -eu` in `04`
+then stops the apply, so `--full` reports `FAILED` even when every step up to
+that point passed. The NOPASSWD sudo rule the entrypoint installs does not help,
+because `chsh` does not go through sudo.
+
+`run_once_after_install-08-setup-ssh.sh.tmpl` already handles the same situation
+for `ssh-add` by guarding on `[ -t 0 ]` and printing the command when stdin is
+not a terminal. The same guard on `04`'s `chsh` call leaves a real interactive
+`chezmoi apply` unchanged and lets `--full` run to completion in the VM.
+`07-setup-nas`'s `launchctl bootstrap gui/$(id -u)` is the next step that assumes
+a GUI login session and may need the same treatment.

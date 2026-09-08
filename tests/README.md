@@ -177,9 +177,10 @@ imports rather than spelling out, so adding a distro is one edit.
 
 ```sh
 python3 tests/macos.py               # render + lint the darwin scripts in a macOS VM
-python3 tests/macos.py --only tahoe  # one image only (each is a large pull)
-python3 tests/macos.py --keep        # reuse/keep the VM instead of re-pulling it
+python3 tests/macos.py --only tahoe  # one image only
+python3 tests/macos.py --keep        # reuse the VM between runs instead of recreating it
 python3 tests/macos.py --full        # also run the real bootstrap in-guest
+python3 tests/macos.py --build-base  # pull each base VM once; runs then clone it offline
 ```
 
 The macOS analogue of `linux.py`. Docker cannot run macOS, so this uses
@@ -190,7 +191,16 @@ entrypoint fetches chezmoi, shellcheck and age as static arm64 binaries into
 `~/.local/bin`, needing no package manager and no sudo, generates a fresh age
 key, renders with `--exclude encrypted`, and lints the darwin bootstrap scripts.
 `--full` additionally runs the real `chezmoi apply`, which is heavy: Homebrew
-bundle, `defaults write`, dockutil.
+bundle, `defaults write`, dockutil. That bootstrap needs administrator sudo —
+Homebrew's installer chowns `/opt/homebrew`, `02-setup-darwin` opens with `sudo
+-v` — and the image's `lume` user is an admin whose sudo wants the account
+password, which an unattended `lume ssh` cannot answer. Under `--full` the
+entrypoint authenticates once with that password (`lume`, the trycua images'
+published default) and installs a `/etc/sudoers.d` NOPASSWD rule in the throwaway
+VM. A headless `--full` cannot get past `04-setup-fish`, where `chsh` changes the
+login shell and asks for a password on a connection with no terminal; earlier
+steps may stop it sooner. `--full` in the VM exercises the Homebrew bundle and
+the `defaults write` scripts, not the whole bootstrap.
 
 Lume is the only host dependency. It ships its own `lume ssh` with the images'
 default `lume`/`lume` credentials, so there is no ssh password plumbing:
@@ -199,14 +209,20 @@ default `lume`/`lume` credentials, so there is no ssh password plumbing:
 /bin/bash -c "$(curl -fsSL https://cua.ai/lume/install.sh)"
 ```
 
-The VM is pulled and deleted after each run, including a pre-run delete that
-clears a VM left behind by an interrupted one, so the host is never touched.
+Each run recreates the VM and deletes it afterwards, with a pre-run delete that
+clears one left behind by an interrupted run. It recreates by cloning a
+`chezmoi-test-base-<image>` VM when one exists — a local copy-on-write, no
+network — so once `--build-base` has pulled that base VM, every later run works
+offline, and `lume prune` can then reclaim the layer cache. Run `--build-base`
+again to refresh the base to a newer image. Without a base, a run falls back to
+`lume pull`.
+
 `macos.py` enables Lume's image layer cache (`lume config cache enable`; Lume
-ships with it off), so `lume pull` writes the image layers to `~/.lume/cache` and
-the next run reuses them: only the first run downloads the image. `--keep` goes
-further and reuses an existing `chezmoi-test-<image>` VM left stopped, skipping
-the disk rebuild and cold boot too, at the cost of the throwaway guarantee. Apple
-Silicon only; the layer cache and each VM disk are large sparse files — budget
+ships with it off) so a fallback `lume pull` re-streams the image only once; the
+cache and the setting persist, and `lume prune` / `lume config cache disable`
+undo them. `--keep` leaves the run VM stopped and reuses it next time, saving the
+clone and cold boot at the cost of the throwaway guarantee. Apple Silicon only;
+the base VM disk, each clone, and the layer cache are large sparse files — budget
 well over 50 GB free.
 
 `IMAGES` at the top of `macos.py` holds Tahoe alone, and `--only` accepts only
