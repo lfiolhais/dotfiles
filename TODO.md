@@ -200,6 +200,48 @@ under Login Items. The alternative is to run `mount-nas flush` by hand before
 closing the lid, which is the same class of thing as remembering to eject a
 disk.
 
+### The share stops mounting whenever a negative DNS answer is cached
+
+`dot_local/lib/python/mountnas.py`
+
+Both Pi-holes answer `nas.botasal.xyz` authoritatively with `192.168.1.78` and a
+TTL of 0. `botasal.xyz` is delegated publicly to Porkbun, and that zone has no
+`nas` in it, so any query made while the Pi-holes are not the resolvers is
+answered NXDOMAIN and macOS caches it.
+
+The cached answer outlives the network change that brings the laptop home.
+`Share.reachable()` calls `getaddrinfo`, which reads that cache rather than the
+LAN resolvers, so it raises `socket.gaierror`; `sync()` records `AWAY` and
+mounts nothing, silently, which is what the command is built to do when the NAS
+is genuinely absent. `dig` answers correctly the whole time, because it queries
+192.168.1.78 directly and never reads the cache, so every check short of
+`getaddrinfo` says DNS is healthy.
+
+How long macOS holds the entry is set by the negative-caching TTL in Porkbun's
+SOA and has not been measured. What is established is that it survived the
+return to the LAN, and that flushing the cache resolved the name at once:
+
+```sh
+sudo dscacheutil -flushcache
+sudo killall -HUP mDNSResponder
+```
+
+The local record is not hand-maintained: an Ansible playbook renders
+`/etc/dnsmasq.d/99-ansible-services.conf` on both resolvers from a service
+registry, and the `nas` entry there carries `proxy: false`, which points the
+name at delta7's own address. Editing Pi-hole directly is overwritten by the
+next play, so any change to this record is made in that registry.
+
+Closing it means the name resolving from both views, which is an A record for
+`nas.botasal.xyz` pointing at `192.168.1.78` in the public zone at Porkbun. Away
+from home the name then resolves to an address nothing answers on, the
+connection to port 445 fails, and `sync()` records `AWAY` for the reason it is
+meant to, with no negative answer ever cached. The cost is that the NAS's
+address on the home network is published in public DNS.
+
+The alternative is to keep the record local and flush the cache on the days it
+happens, now that `mount-nas status` names the cause.
+
 ## Contacts
 
 ### A contact deleted on one machine stays on every other
@@ -361,6 +403,38 @@ the same way with a clean cache, the tap really is gone and the entries stay
 out. Nothing in this repository names anylinuxfs, so leaving it out costs no
 documentation — only the ability to mount a Linux filesystem on this Mac.
 
+### `makemkv` is disabled in Homebrew
+
+`private_dot_config/Brewfile`
+
+Homebrew disabled the `makemkv` cask on 2026-09-01 — it no longer passes the
+macOS Gatekeeper check — so `brew bundle` exits non-zero on it and
+`run_once_after_install-01-install-packages-darwin.sh.tmpl` fails on every
+apply. Package sync does not finish, and a `--full` VM test stops at `01`.
+
+`cask "makemkv"` sits in the Brewfile and in no manifest entry, so removing it
+is one line in `private_dot_config/Brewfile`. That unblocks the bundle and
+leaves the machine without MakeMKV.
+
+To keep MakeMKV, three routes, each hand-maintained because the disable is
+permanent:
+
+- A `run_onchange_` script that fetches the current DMG from
+  `https://www.makemkv.com/download/` (`MakeMKV_v<version>_macos.dmg`), mounts
+  it, copies `MakeMKV.app` to `/Applications`, and detaches it. The version is
+  in the URL, so the script carries it and is bumped by hand. First launch
+  still needs approval under System Settings → Privacy & Security — the
+  Gatekeeper failure that got the cask disabled is the one a user meets here.
+- `brew install --cask` against the cask file from the commit before the
+  disable, e.g. `brew install --cask
+  https://raw.githubusercontent.com/Homebrew/homebrew-cask/<sha>/Casks/m/makemkv.rb`.
+  Re-pin the sha whenever the vendor moves the download and the old URL 404s.
+- Install it by hand when a disc needs ripping and leave the repo out of it,
+  the same call already made for anylinuxfs.
+
+The beta key MakeMKV needs while it is in beta rotates about monthly and is
+posted on their forum; none of these routes tracks it.
+
 ## Bootstrap
 
 ### `03-setup-dock` gives two answers about what a re-run does
@@ -414,6 +488,28 @@ in `tests/check.py`. Neither is agent-specific, and `README.md` has neither.
 Moving them into `README.md` changes what that file is for -- it documents using
 this machine, not extending it. The alternative is a short "Adding to this
 repository" section there, with `CLAUDE.md` citing it.
+
+### The repo-local reviewers restate the global ones
+
+`.claude/agents/`, `.claude/skills/dotfiles-review/`, `dot_claude/agents/`,
+`dot_claude/skills/deploy-review/`
+
+`drift-checker`, `deploy-auditor` and `deploy-review` now exist globally,
+carrying the method with no chezmoi in them. `.claude/` still holds
+`dotfiles-drift-checker`, `dotfiles-deploy-auditor` and `dotfiles-review`, which
+carry the same method plus this repository's specifics: the Brewfile against the
+manifest, the three profiles, `tests/render-matrix.sh`.
+
+An agent definition is a prompt, so a repo-local one cannot cite a global one
+and have the text arrive -- which is why the method is written out twice, and
+why an edit to either leaves the other behind.
+
+The way out is to delete the three repo-local files and have whoever runs the
+review dispatch the global agents with this repository's pairs and profiles in
+the prompt. That is how they were dispatched in the session that wrote them, and
+it worked. The cost is that the pairs and profiles then live in a prompt rather
+than in a file, unless `.claude/skills/dotfiles-review/SKILL.md` keeps them and
+names which global agent to hand them to.
 
 ### The Pi-hole procedures have no reader who is a person
 

@@ -36,6 +36,15 @@ PORT = 445
 # Long enough for a NAS on the far side of a VPN, short enough that a login with
 # no network behind it is not held up.
 TIMEOUT = 2.0
+# What `status` waits for after a timeout, to tell a slow link apart from an
+# absent one. A pass keeps to TIMEOUT because it runs at login and on every
+# network change; a person reading `status` is already waiting for an answer.
+PATIENT_TIMEOUT = 10.0
+# A connection that never completes raises `socket.timeout` when the timeout
+# above is what ended it, and `TimeoutError` when the operating system gave up
+# first. The two are one class from Python 3.10; under the 3.9 a fresh Mac has
+# they are distinct, and both mean the NAS did not answer.
+TIMEOUTS = (socket.timeout, TimeoutError)
 # Seconds for the commands themselves. A mount negotiates and authenticates, so
 # it is given longer than the ones that only read or tear down state.
 MOUNT_TIMEOUT = 60
@@ -83,6 +92,15 @@ class Outcome:
 
 
 @dataclass(frozen=True)
+class Reach:
+    """Whether the server answers on the SMB port, and what stopped it if not."""
+
+    ok: bool
+    detail: str = ""
+    timed_out: bool = False
+
+
+@dataclass(frozen=True)
 class Share:
     """One SMB share on one server."""
 
@@ -110,27 +128,71 @@ class Share:
         """
         return f"//{self.user}@{self.host}/{self.name}"
 
-    def reachable(self, timeout: float = TIMEOUT) -> bool:
-        """Report whether the server answers on the SMB port.
+    def probe(self, timeout: float = TIMEOUT) -> Reach:
+        """Ask whether the server answers on the SMB port, keeping the reason.
 
         The socket is opened directly, consulting no proxy settings: what is
         being asked is whether *this machine* can reach the NAS, which is the
         only thing that decides whether a mount can succeed.
 
+        A name that does not resolve, a port that refuses, a link with no route
+        and a server that never answers all mean the share cannot be mounted, so
+        a pass treats them alike. They have four different remedies, so the one
+        that happened is carried out here for ``status`` to print.
+
         Args:
             timeout: Seconds to wait for the connection.
 
         Returns:
-            True if the port accepted a connection. A name that does not
-            resolve raises ``socket.gaierror``, itself an ``OSError``, so being
-            away from the network is answered the same way as a refused port.
+            The verdict, carrying what the socket reported when it failed.
 
         """
         try:
             with socket.create_connection((self.host, PORT), timeout):
-                return True
+                return Reach(ok=True)
+        except socket.gaierror as exc:
+            return Reach(ok=False, detail=f"{self.host} does not resolve: {exc.strerror or exc}")
+        except OSError as exc:
+            if isinstance(exc, TIMEOUTS):
+                return Reach(
+                    ok=False,
+                    detail=f"{self.host} did not answer on port {PORT} within {timeout}s",
+                    timed_out=True,
+                )
+            return Reach(
+                ok=False,
+                detail=f"cannot reach {self.host} on port {PORT}: {exc.strerror or exc}",
+            )
+
+    def reachable(self, timeout: float = TIMEOUT) -> bool:
+        """Report whether the server answers on the SMB port.
+
+        Args:
+            timeout: Seconds to wait for the connection.
+
+        Returns:
+            True if the port accepted a connection.
+
+        """
+        return self.probe(timeout).ok
+
+    def addresses(self) -> tuple[str, ...]:
+        """The addresses the server's name currently resolves to.
+
+        This is asked only to be printed. A name that resolves to a machine that
+        is not the NAS fails exactly like a NAS that is switched off, and the
+        address is what tells the two apart.
+
+        Returns:
+            One entry per distinct address, in the order the resolver gave them,
+            and empty when the name does not resolve.
+
+        """
+        try:
+            infos = socket.getaddrinfo(self.host, PORT, type=socket.SOCK_STREAM)
         except OSError:
-            return False
+            return ()
+        return tuple(dict.fromkeys(info[4][0] for info in infos))
 
     def mountpoint(self, table: str) -> str | None:
         """Find where this share is currently mounted.
@@ -346,12 +408,16 @@ __all__ = [
     "AWAY",
     "MOUNTED",
     "NO_PASSWORD",
+    "PATIENT_TIMEOUT",
     "PRESENT",
     "SHARES",
+    "TIMEOUT",
+    "TIMEOUTS",
     "UNMOUNTED",
     "NasError",
     "Outcome",
     "PackagesError",
+    "Reach",
     "Share",
     "flush",
     "mount",

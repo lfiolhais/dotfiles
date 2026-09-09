@@ -588,18 +588,49 @@ reading.
 ### When the share is not appearing
 
 `mount-nas status` separates the causes, since being away from home and being
-misconfigured look identical from the Finder:
+misconfigured look identical from the Finder. Its first line is the verdict, and
+the lines indented under it are why:
 
 | status line | cause | fix |
 | --- | --- | --- |
-| `not reachable` | away from home, or the NAS is off | nothing, or check the NAS |
-| `reachable, …` then `no password in the Keychain for …` | never seeded, or filed under another name | seed it, above |
+| `does not resolve` | a cached NXDOMAIN, or a resolver that does not serve the name | flush the DNS cache, below |
+| `did not answer … within` | away from home, or the NAS is off | nothing, or check the NAS |
+| `it does answer within` | the link is slower than the seconds a pass allows | the agent cannot mount over this link; mount by hand with `mount-nas mount` |
+| `cannot reach … Connection refused` | the machine answers, its SMB service does not | turn file sharing back on at the NAS |
+| `cannot reach …` with any other reason | no route to that address from here | check the network, and the address on the line below |
+| `no password in the Keychain for …` | never seeded, or filed under another name | seed it, above |
 | `reachable, password in Keychain, not mounted` | the agent is not loaded | `launchctl bootstrap`, below |
 | `not reachable, mounted at …` | the NAS vanished while mounted | `mount-nas unmount` |
 
-A hostname that has stopped pointing at a file server produces the same silence
-as being away. `tests/nasprobe.py` tells them apart by asking the server what it
-is:
+Whenever the name still resolves, `status` also prints the addresses it resolves
+to. A name pointing at some other machine fails exactly like a NAS that is
+switched off, and the address is what tells the two apart.
+
+The `does not resolve` line has one cause that looks like perfectly healthy DNS.
+`nas.botasal.xyz` is a record the Pi-holes serve and the public `botasal.xyz`
+zone does not carry, so any query made while the Pi-holes are not the resolvers
+-- away from home, or before they answer at login -- is answered NXDOMAIN, and
+macOS caches that. The cached answer outlives the return home, so `mount-nas`
+cannot resolve the name on a network where the record is being served.
+
+`dig nas.botasal.xyz` keeps working throughout, because it queries the Pi-hole
+directly and never reads that cache. DNS therefore looks healthy while
+`getaddrinfo`, which is what `mount-nas` and everything else on the machine
+call, fails. Trust `dscacheutil -q host -a name nas.botasal.xyz` over `dig`
+here: it goes through the same cache the rest of the system does.
+
+Clearing it takes both commands, and `sudo` asks for the account password:
+
+```sh
+sudo dscacheutil -flushcache
+sudo killall -HUP mDNSResponder
+```
+
+`mount-nas status` reports `reachable` immediately afterwards, with no wait for
+anything to expire.
+
+A name that resolves and a port that answers is still not proof of a file
+server. `tests/nasprobe.py` asks the server what it is:
 
 ```sh
 python3 tests/nasprobe.py
@@ -608,6 +639,55 @@ python3 tests/nasprobe.py
 It prints the SMB dialect the server negotiates, and fails with a reason when
 the name does not resolve, the port is closed, or something that is not an SMB
 server answers.
+
+`mount-nas mount` can fail with `execution error: User canceled. (-128)` while
+`status` reports the NAS reachable with the password in the Keychain. The mount
+raises a dialog whenever NetAuthAgent cannot finish authenticating on its own,
+and a mount run from a script has nobody to answer that dialog, so it is
+cancelled and the cancellation is what comes back. The same error arrives
+whether the Keychain item could not be read or the NAS refused the password it
+held, so the error alone does not say which.
+
+`smbutil view` settles it, authenticating from the terminal with a typed
+password so that neither the Keychain item nor AppleScript is in the way:
+
+```sh
+smbutil view //lfiolhais@nas.botasal.xyz
+```
+
+A list of shares means the credentials are good and the fault is in how the
+Keychain item is filed. `security find-internet-password -s nas.botasal.xyz`
+prints it, and `srvr`, `acct`, and a `ptcl` of `smb ` are what NetAuthAgent
+matches on. `server rejected the authentication: Authentication error` means the
+NAS refused the account, and nothing on this machine will change that.
+
+A Linux NAS serves SMB with Samba, which keeps its own password database
+separate from the Unix account. SMB authentication is challenge-response and
+needs an NT hash, which cannot be derived from the Unix password hash, so the
+two stores are independent and drift apart in either direction: `passwd` never
+touches the Samba one, and `smbpasswd` reaches the Unix one only where the sync
+below is working.
+
+On the NAS, `pdbedit -L -v lfiolhais` says whether the Samba account exists and
+whether its flags carry a `D` for disabled, `smbpasswd -a lfiolhais` sets its
+password, and `smbpasswd -e lfiolhais` enables a disabled one. All three need
+root and stop for a `sudo` password. `smbpasswd` prompts for the new password
+twice, never asks for the old one, and prints nothing at all when it succeeds;
+the `Password last set` line in `pdbedit -L -v lfiolhais` carries the new date
+and is what confirms it.
+
+`testparm -s --parameter-name="unix password sync"` reports whether `smbpasswd`
+is configured to change the Unix login password to match. A `Yes` is a
+configuration rather than a result: the change is handed to PAM where
+`pam password change = Yes`, and to the `passwd program` chat otherwise, and it
+stays silent when either fails, leaving the two passwords different while the
+setting says they agree. `chage -l lfiolhais` settles which happened, since its
+`Last password change` moves whenever the sync really runs, even where the
+password it sets is the one already there.
+
+The Keychain item still holds the old password after any of this, so re-run the
+`security add-internet-password` command above; its `-U` updates the item in
+place rather than refusing because one exists.
 
 autofs would mount lazily and handle the network coming and going for free, but
 `automountd` runs as root and cannot reach a login Keychain, so the password

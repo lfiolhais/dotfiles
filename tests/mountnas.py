@@ -211,6 +211,48 @@ def test_connection_is_reachable() -> None:
         assert SHARE.reachable() is True
 
 
+def test_probe_names_what_failed() -> None:
+    """Each way a connection fails carries its own reason out.
+
+    A pass collapses all of them to False, so this is where the reasons are
+    held to being different: ``status`` prints whatever the probe returns, and
+    a name that stopped resolving needs a different fix from a port that
+    refuses.
+    """
+    for failure, expected in (
+        (socket.gaierror("nodename nor servname"), "does not resolve"),
+        (ConnectionRefusedError("refused"), "cannot reach"),
+        (OSError("host is down"), "cannot reach"),
+    ):
+        with unreachable(failure):
+            reach = SHARE.probe()
+        assert reach.ok is False
+        assert expected in reach.detail
+        assert reach.timed_out is False
+
+
+def test_probe_marks_a_timeout() -> None:
+    """A NAS that never answers is marked as such, so status can wait longer.
+
+    Every class the module counts as a timeout is raised, which under Python
+    3.9 is two distinct ones and from 3.10 the same one twice.
+    """
+    for kind in mountnas.TIMEOUTS:
+        with unreachable(kind("timed out")):
+            reach = SHARE.probe()
+        assert reach.ok is False
+        assert reach.timed_out is True
+        assert "did not answer" in reach.detail
+
+
+def test_probe_carries_no_reason_when_it_works() -> None:
+    """A connection that opens has nothing to explain."""
+    with mock.patch.object(mountnas.socket, "create_connection", mock.MagicMock()):
+        reach = SHARE.probe()
+    assert reach.ok is True
+    assert not reach.detail
+
+
 # --- The states a pass can find, and what each one runs -----------------
 
 

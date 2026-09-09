@@ -49,8 +49,10 @@ from mountnas import (
     AWAY,
     MOUNTED,
     NO_PASSWORD,
+    PATIENT_TIMEOUT,
     PRESENT,
     SHARES,
+    TIMEOUT,
     UNMOUNTED,
     NasError,
     Outcome,
@@ -115,6 +117,15 @@ def cmd_sync(*, dry_run: bool) -> int:
 def cmd_status() -> int:
     """Report what each share is doing and why.
 
+    A pass has one question -- can the share be mounted -- so every way the NAS
+    can fail to answer means the same thing to it. This is the command a person
+    runs with the share missing, and there the ways differ: a name that stopped
+    resolving is a DNS fix, a port that refuses is the NAS itself, and a link
+    too slow for the two seconds a pass allows is neither. So the reason the
+    socket gave is printed under the verdict, along with the addresses the name
+    resolves to, since a name pointing at some other machine fails exactly like
+    a NAS that is switched off.
+
     Returns:
         Process exit code: always 0. Every state this reports is a fact about
         the network or the Keychain rather than a failure of the command.
@@ -124,8 +135,19 @@ def cmd_status() -> int:
     for share in SHARES:
         path = share.mountpoint(snapshot)
         where = f"mounted at {path}" if path else "not mounted"
-        if not share.reachable():
+        reach = share.probe()
+        if not reach.ok:
             print(f"{share.name}: {share.host} not reachable, {where}")
+            print(f"  {reach.detail}")
+            addresses = share.addresses()
+            if addresses:
+                print(f"  {share.host} resolves to {', '.join(addresses)}")
+            if reach.timed_out and share.probe(PATIENT_TIMEOUT).ok:
+                print(
+                    f"  it does answer within {PATIENT_TIMEOUT}s. A pass waits "
+                    f"{TIMEOUT}s so that a login is never held up, so this link "
+                    f"is too slow for the agent to mount over.",
+                )
         elif share.has_password():
             print(f"{share.name}: {share.host} reachable, password in Keychain, {where}")
         else:
