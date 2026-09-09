@@ -197,10 +197,11 @@ Homebrew's installer chowns `/opt/homebrew`, `02-setup-darwin` opens with `sudo
 password, which an unattended `lume ssh` cannot answer. Under `--full` the
 entrypoint authenticates once with that password (`lume`, the trycua images'
 published default) and installs a `/etc/sudoers.d` NOPASSWD rule in the throwaway
-VM. A headless `--full` cannot get past `04-setup-fish`, where `chsh` changes the
-login shell and asks for a password on a connection with no terminal; earlier
-steps may stop it sooner. `--full` in the VM exercises the Homebrew bundle and
-the `defaults write` scripts, not the whole bootstrap.
+VM. A headless `--full` does not run the bootstrap to the end: `01-install-packages`
+stops on any cask Homebrew has disabled (`makemkv`, currently — see `TODO.md`),
+and past that `04-setup-fish`'s `chsh` needs a terminal to prompt at. The
+entrypoint prints a `--full summary` — brew formula and cask counts, and the
+`chezmoi apply` exit code — so a failed run still shows how far it got.
 
 Lume is the only host dependency. It ships its own `lume ssh` with the images'
 default `lume`/`lume` credentials, so there is no ssh password plumbing:

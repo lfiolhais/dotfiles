@@ -63,6 +63,8 @@ INSTALL_HINT = '/bin/bash -c "$(curl -fsSL https://cua.ai/lume/install.sh)"'
 # A cold first boot of a freshly pulled image is slow, so be generous.
 SSH_TIMEOUT = 900
 SSH_POLL_SECONDS = 5
+# How often the boot wait prints a "still booting" line, so it is not silent.
+SSH_HEARTBEAT_SECONDS = 15
 SSH_PROBE_TIMEOUT = "15"
 # The in-guest run downloads tools and may apply the whole bootstrap: no timeout.
 SSH_NO_TIMEOUT = "0"
@@ -152,7 +154,8 @@ def _wait_for_ssh(vm: str) -> str | None:
     """Poll ``lume ssh`` until the guest runs a command, meaning it has finished booting.
 
     A guest that is still booting and one that can never be reached both just fail, so
-    the last probe's output is kept: it is the only thing that tells the two apart.
+    the last probe's output is kept: it is the only thing that tells the two apart. The
+    poll is otherwise silent for up to ``SSH_TIMEOUT`` seconds, so it prints a heartbeat.
 
     Args:
         vm: The Lume VM name.
@@ -161,18 +164,25 @@ def _wait_for_ssh(vm: str) -> str | None:
         None once a command succeeds, otherwise the last failed probe's output.
 
     """
-    deadline = time.monotonic() + SSH_TIMEOUT
+    start = time.monotonic()
     last = ""
-    while time.monotonic() < deadline:
+    announced = 0.0
+    print(f"waiting for {vm} to answer ssh (cold boot; up to {SSH_TIMEOUT}s)", flush=True)
+    while time.monotonic() - start < SSH_TIMEOUT:
         probe = subprocess.run(
             ["lume", "ssh", "--timeout", SSH_PROBE_TIMEOUT, vm, "true"],
             capture_output=True,
             text=True,
             check=False,
         )
+        elapsed = time.monotonic() - start
         if probe.returncode == 0:
+            print(f"  ssh up after {elapsed:.0f}s", flush=True)
             return None
         last = (probe.stdout + probe.stderr).strip()
+        if elapsed - announced >= SSH_HEARTBEAT_SECONDS:
+            announced = elapsed
+            print(f"  still booting ({elapsed:.0f}s)", flush=True)
         time.sleep(SSH_POLL_SECONDS)
     return last or "lume ssh produced no output"
 
@@ -281,6 +291,8 @@ def run_target(target: Target, *, full: bool, keep: bool) -> bool:
             )
             _lume("get", vm)
             return False
+        note = "render + lint, then the real bootstrap (minutes)" if full else "render + lint"
+        print(f"running the in-guest checks: {note}", flush=True)
         return _lume("ssh", "--timeout", SSH_NO_TIMEOUT, vm, _remote_command(full=full)) == 0
     finally:
         subprocess.run(["lume", "stop", vm], capture_output=True, check=False)

@@ -37,6 +37,9 @@ fi
 # Throwaway chezmoi config: a fresh age key (real secrets stay excluded) plus the
 # darwin default of sudo=false. This bypasses .chezmoi.toml.tmpl's prompt logic.
 mkdir -p "$HOME/.config/chezmoi"
+# age-keygen -o refuses to overwrite, and a reused --keep guest still has the key
+# from the last run, so clear it first and regenerate from a known state.
+rm -f "$HOME/.config/chezmoi/key.txt"
 # age-keygen reports the public key on stderr as normal output, not an error.
 age-keygen -o "$HOME/.config/chezmoi/key.txt" 2> /dev/null
 recipient="$(age-keygen -y "$HOME/.config/chezmoi/key.txt")"
@@ -49,20 +52,30 @@ encryption = "age"
     sudo = false
 EOF
 
+printf '=== %s %s (%s) ===\n' "$(sw_vers -productName)" "$(sw_vers -productVersion)" "$(uname -m)"
+chezmoi --version | head -1
+
 # Render every non-encrypted target: proves templates render on this macOS version.
+echo "rendering every non-encrypted target (chezmoi archive):"
 chezmoi archive --source "$SRC" --exclude encrypted --output /tmp/state.tar
+printf '  %s files rendered\n' "$(tar -tf /tmp/state.tar | wc -l | tr -d ' ')"
 
 # Lint the bootstrap scripts that apply to macOS (empty renders are gated off).
+echo "linting darwin bootstrap scripts (bash -n, shellcheck -S error):"
+linted=0
 for f in "$SRC"/run_*.sh "$SRC"/run_*.sh.tmpl; do
     [ -e "$f" ] || continue
     case "$f" in
         *.tmpl) chezmoi execute-template --source "$SRC" < "$f" > /tmp/script.sh ;;
         *) cp "$f" /tmp/script.sh ;;
     esac
-    [ -s /tmp/script.sh ] || continue
+    [ -s /tmp/script.sh ] || { printf '  skip (empty on darwin)  %s\n' "$(basename "$f")"; continue; }
     bash -n /tmp/script.sh
     shellcheck -S error /tmp/script.sh
+    printf '  ok  %s\n' "$(basename "$f")"
+    linted=$((linted + 1))
 done
+printf '  %d scripts linted\n' "$linted"
 
 if [ "$FULL" = "true" ]; then
     # The darwin bootstrap needs administrator sudo: Homebrew's installer creates
@@ -87,8 +100,37 @@ if [ "$FULL" = "true" ]; then
         rm -f "$rule_file"
     fi
 
-    # A headless apply runs the Homebrew bundle and the `defaults write` scripts
-    # but cannot get past 04-setup-fish, where `chsh` changes the login shell and
-    # asks for a password on a connection that has no terminal.
-    chezmoi apply --source "$SRC" --exclude encrypted --verbose
+    # A headless apply runs the Homebrew bundle and the `defaults write` scripts.
+    # It does not run to completion: 01-install-packages stops on any cask
+    # Homebrew has disabled (makemkv, at the time of writing), and 04-setup-fish's
+    # `chsh` needs a terminal to prompt at. The summary below shows how far it got.
+    echo "the bootstrap runs these non-empty darwin scripts (chezmoi picks the order):"
+    for f in "$SRC"/run_*.sh "$SRC"/run_*.sh.tmpl; do
+        [ -e "$f" ] || continue
+        case "$f" in
+            *.tmpl) chezmoi execute-template --source "$SRC" < "$f" > /tmp/probe.sh 2> /dev/null || continue ;;
+            *) cp "$f" /tmp/probe.sh ;;
+        esac
+        if [ -s /tmp/probe.sh ]; then printf '  %s\n' "$(basename "$f")"; fi
+    done
+
+    echo "running the real bootstrap (chezmoi apply --verbose):"
+    apply_rc=0
+    chezmoi apply --source "$SRC" --exclude encrypted --verbose || apply_rc=$?
+
+    echo
+    echo "=== --full summary ==="
+    if command -v brew > /dev/null 2>&1; then
+        printf '  brew: %s formulae, %s casks\n' \
+            "$(brew list --formula 2> /dev/null | wc -l | tr -d ' ')" \
+            "$(brew list --cask 2> /dev/null | wc -l | tr -d ' ')"
+    else
+        echo "  brew: not installed"
+    fi
+    if [ "$apply_rc" -eq 0 ]; then
+        echo "  chezmoi apply: ok"
+    else
+        echo "  chezmoi apply: exit $apply_rc -- the last 'chezmoi:' line above names the script that stopped it"
+    fi
+    exit "$apply_rc"
 fi
