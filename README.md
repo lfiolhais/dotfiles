@@ -780,6 +780,52 @@ credential or config change:
 mbsync -a && notmuch new
 ```
 
+## Sign-off on RISC-V commits
+
+RISC-V's DCO rejects a commit that carries no `Signed-off-by` trailer.
+`format.signOff` in `~/.gitconfig` puts one on `git format-patch` output, which
+covers a patch sent to a mailing list; a commit that goes out as a pull request
+is not format-patch output and carries nothing.
+
+A `prepare-commit-msg` hook adds the trailer. git runs that hook for every
+commit whatever wrote the message, so `-m`, `--amend` and an editor commit are
+covered alike, an amend on a message that already has the trailer leaves one,
+and a sign-off joins an existing trailer block rather than starting a second
+one. Merge messages are left as git wrote them.
+
+The hook is turned on per remote rather than globally, because `core.hooksPath`
+replaces `.git/hooks` wherever it applies and would otherwise disable every
+other repository's hooks. Three files do it:
+
+| file | holds |
+| --- | --- |
+| `~/.gitconfig` | the `includeIf hasconfig:remote.*.url` patterns that pick the clones |
+| `~/.config/git/dco.inc` | the `core.hooksPath` those patterns turn on |
+| `~/.config/git/hooks-dco/prepare-commit-msg` | the hook itself |
+
+Whether a clone matched:
+
+```sh
+git config --show-origin --get core.hooksPath
+```
+
+It names `dco.inc` where the conditional matched and prints nothing where it did
+not. A clone that sets `core.hooksPath` in its own `.git/config` — this
+repository does, for `tests/githooks` — keeps that setting and gets no sign-off.
+
+Another project that wants the trailer takes a pattern pair at the end of
+`private_dot_gitconfig.tmpl`, one for the https remote and one for ssh, because
+the conditional matches the URL as written:
+
+```ini
+[includeIf "hasconfig:remote.*.url:https://github.com/example/**"]
+	path = ~/.config/git/dco.inc
+[includeIf "hasconfig:remote.*.url:git@github.com:example/**"]
+	path = ~/.config/git/dco.inc
+```
+
+`hasconfig:remote.*.url` needs git 2.36.
+
 ## Testing
 
 There is no build. Testing a change means `chezmoi diff`, then the harness:

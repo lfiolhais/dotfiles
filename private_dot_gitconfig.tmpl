@@ -97,3 +97,18 @@
 	autoStash = true
 [format]
 	signOff = yes
+
+# The DCO applies to some projects and not others, and the core.hooksPath in
+# dco.inc replaces .git/hooks for whatever it covers -- so it is turned on per
+# remote rather than globally. Add a pattern here for each project that wants
+# it. `git config --show-origin --get core.hooksPath` inside a clone says
+# whether the conditional matched: it names dco.inc where it did, and prints
+# nothing where it did not.
+[includeIf "hasconfig:remote.*.url:https://github.com/riscv/**"]
+	path = ~/.config/git/dco.inc
+[includeIf "hasconfig:remote.*.url:git@github.com:riscv/**"]
+	path = ~/.config/git/dco.inc
+[includeIf "hasconfig:remote.*.url:https://github.com/riscv-*/**"]
+	path = ~/.config/git/dco.inc
+[includeIf "hasconfig:remote.*.url:git@github.com:riscv-*/**"]
+	path = ~/.config/git/dco.inc

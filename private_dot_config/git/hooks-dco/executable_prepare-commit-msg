@@ -1,0 +1,19 @@
+#!/bin/sh
+# Adds the DCO sign-off to every commit made in a repository whose remote
+# ~/.gitconfig matched. git runs this hook whatever wrote the message, which is
+# what `git commit -s` and commit.template each miss: -s has to be remembered,
+# and a template is ignored when -m is given.
+
+# git passes the message file and how the message was produced: "message" for
+# -m, "commit" for --amend or -c, "merge", "squash", "template", or nothing at
+# all for an editor commit. Only a merge message is git's own to write.
+[ "$2" = "merge" ] && exit 0
+
+trailer="Signed-off-by: $(git config user.name) <$(git config user.email)>"
+
+# --amend re-runs this on a message that already has the trailer.
+grep -qF "$trailer" "$1" && exit 0
+
+# interpret-trailers puts it after the body, beside any trailer already there,
+# and above the comment block git strips -- which is where the DCO check looks.
+git interpret-trailers --in-place --trailer "$trailer" "$1"

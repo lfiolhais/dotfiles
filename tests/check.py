@@ -82,6 +82,7 @@ SHELL_FILES = (
     REPO / "private_dot_config" / "aerc" / "executable_check-mail.sh",
     REPO / "private_dot_config" / "aerc" / "private_filters" / "executable_html",
     REPO / "private_dot_config" / "aerc" / "private_filters" / "executable_test.sh",
+    REPO / "private_dot_config" / "git" / "hooks-dco" / "executable_prepare-commit-msg",
     REPO / "dot_local" / "share" / "mail" / "dot_notmuch" / "hooks" / "executable_post-new",
 )
 # Every fish file this repository deploys. fish is the login shell, so a syntax
