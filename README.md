@@ -749,10 +749,21 @@ opens an fzf picker, multi-select with TAB and confirm with ENTER:
 khard-rm [-a|--addressbook NAME] [-n|--dry-run] [-N|--no-forget] [search terms...]
 ```
 
+The picker lists each contact by name and by every email address on the card,
+because two people share a name often enough that the name alone picks the wrong
+one.
+
 It resolves every uid through `khard filename` first and skips anything that
 does not match exactly one card, because khard's `remove` takes free-text search
 terms and has no `--uid` flag. `--dry-run` lists the selection and stops;
 `--no-forget` deletes the contacts but leaves the source state alone.
+
+A selection can include a card the source state has no entry for — one another
+machine already dropped and whose commit has reached this source directory, or
+one written here with `DOTFILES_KHARD_UNTRACKED` set. `chezmoi forget` takes
+every path or none, so `khard-rm` asks `chezmoi managed` which cards have an
+entry and forgets only those; the rest are deleted from this machine and named
+in the output.
 
 Deletions reach other machines when the source directory is committed and
 pushed. Those machines pick them up with `chezmoi update`, which pulls and

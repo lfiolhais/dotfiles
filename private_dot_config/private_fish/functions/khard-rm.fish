@@ -12,8 +12,23 @@ function __print_help_khard_rm
     echo -e "\tfrom the chezmoi source. Recovering one afterwards means git history in"
     echo -e "\t"(chezmoi source-path 2>/dev/null; or echo "the chezmoi source directory")"."
     echo
+    echo -e "\tThe picker lists each contact by name and email address, because two"
+    echo -e "\tpeople can share a name and the card is chosen by what is on screen."
+    echo
     echo -e "\tSelect with TAB in fzf, confirm with ENTER. Any trailing arguments are"
     echo -e "\tpassed to 'khard list' as search terms to narrow the picker."
+end
+
+function __khard_rm_emails --argument-names field --description "The addresses in khard's emails field, comma separated"
+    # 'khard list -F emails' prints the field as a Python dict repr --
+    # {'work': ['a@b.c'], 'home': ['d@e.f']} -- so the addresses come out of it
+    # by matching what sits in quotes and contains an @.
+    set -l addrs (string match --all --regex --groups-only "'([^']+@[^']+)'" -- $field)
+    if test (count $addrs) -eq 0
+        echo "(no email)"
+    else
+        string join ", " $addrs
+    end
 end
 
 function khard-rm --description "Delete several khard contacts at once, dropping them from chezmoi unless -N"
@@ -43,16 +58,25 @@ function khard-rm --description "Delete several khard contacts at once, dropping
         set abook $_flag_addressbook
     end
 
-    # --parsable gives "uid<TAB>name<TAB>addressbook", one contact per line.
-    set -l rows (khard list -a $abook --parsable $argv 2>/dev/null)
+    # --parsable prints one contact per line, tab separated, in the order -F
+    # names the fields.
+    set -l rows (khard list -a $abook --parsable -F uid,formatted_name,emails $argv 2>/dev/null)
     if test (count $rows) -eq 0
         echo "khard-rm: no contacts found in address book '$abook'" >&2
         return 1
     end
 
-    # --with-nth hides the uid column from the display without dropping it from
-    # the line fzf hands back.
-    set -l picked (printf '%s\n' $rows | fzf --multi --delimiter='\t' --with-nth=2.. \
+    # Each line is "uid<TAB>label", where the label carries the name and the
+    # addresses padded into a column. --with-nth=2.. keeps the uid out of the
+    # display and out of what fzf searches, while leaving it on the line fzf
+    # hands back.
+    set -l lines
+    for row in $rows
+        set -l parts (string split \t -- $row)
+        set -a lines (printf '%s\t%-34s %s' $parts[1] $parts[2] (__khard_rm_emails "$parts[3]"))
+    end
+
+    set -l picked (printf '%s\n' $lines | fzf --multi --delimiter='\t' --with-nth=2.. \
         --prompt="delete > " \
         --header="TAB to mark, ENTER to confirm, ESC to abort")
 
@@ -62,8 +86,8 @@ function khard-rm --description "Delete several khard contacts at once, dropping
     end
 
     echo "The following "(count $picked)" contact(s) will be deleted from '$abook':"
-    for row in $picked
-        set -l parts (string split \t -- $row)
+    for line in $picked
+        set -l parts (string split \t -- $line)
         echo "  $parts[2]"
     end
 
@@ -78,13 +102,16 @@ function khard-rm --description "Delete several khard contacts at once, dropping
         return 1
     end
 
+    # files and labels are parallel: labels[i] names files[i], so a card can
+    # still be reported by name after its vcf is gone.
     set -l files
+    set -l labels
     set -l failed 0
 
-    for row in $picked
-        set -l parts (string split \t -- $row)
+    for line in $picked
+        set -l parts (string split \t -- $line)
         set -l uid $parts[1]
-        set -l name $parts[2]
+        set -l label (string trim -- $parts[2])
 
         # Resolve the uid to its vcf before deleting anything. This doubles as a
         # safety check: khard's remove takes free-text search terms, so if a
@@ -93,18 +120,19 @@ function khard-rm --description "Delete several khard contacts at once, dropping
         set -l file (khard filename -a $abook "uid:$uid" 2>/dev/null)
         if test (count $file) -ne 1
             set_color yellow
-            echo "khard-rm: skipping '$name': uid:$uid matched "(count $file)" contacts" >&2
+            echo "khard-rm: skipping '$label': uid:$uid matched "(count $file)" contacts" >&2
             set_color normal
             set failed 1
             continue
         end
 
         if khard remove -a $abook --force "uid:$uid" >/dev/null
-            echo "removed: $name"
-            set files $files $file[1]
+            echo "removed: $label"
+            set -a files $file[1]
+            set -a labels $label
         else
             set_color red
-            echo "khard-rm: failed to remove '$name'" >&2
+            echo "khard-rm: failed to remove '$label'" >&2
             set_color normal
             set failed 1
         end
@@ -125,12 +153,59 @@ function khard-rm --description "Delete several khard contacts at once, dropping
         return 1
     end
 
+    # 'chezmoi forget' takes every path or none: hand it one path it does not
+    # manage and it drops nothing, so a single card that has no source entry
+    # would leave every other card deleted here still in the source, and the
+    # next 'chezmoi apply' would bring all of them back. A card has no source
+    # entry when another machine deleted it and that commit has reached this
+    # source directory, and when it was written here with
+    # DOTFILES_KHARD_UNTRACKED set. So ask chezmoi which of them it manages and
+    # forget only those.
+    set -l dirs
+    for file in $files
+        set -l dir (path dirname $file)
+        contains -- $dir $dirs; or set -a dirs $dir
+    end
+
+    set -l managed (chezmoi managed --path-style=absolute $dirs)
+    or begin
+        set_color red
+        echo "khard-rm: 'chezmoi managed' failed, source state left untouched" >&2
+        set_color normal
+        return 1
+    end
+
+    set -l tracked
+    set -l loose
+    for i in (seq (count $files))
+        if contains -- $files[$i] $managed
+            set -a tracked $files[$i]
+        else
+            set -a loose $labels[$i]
+        end
+    end
+
+    if test (count $loose) -gt 0
+        set_color yellow
+        echo (count $loose)" contact(s) had no entry in the chezmoi source, so there is"
+        echo "nothing to forget for them:"
+        set_color normal
+        for label in $loose
+            echo "  $label"
+        end
+    end
+
+    if test (count $tracked) -eq 0
+        echo "khard-rm: the chezmoi source already had no entry for any of them"
+        return $failed
+    end
+
     # 're-add' only updates files that still exist, so it cannot express a
     # deletion. 'forget' is what drops the entry from the source state.
     set_color green
-    echo "Dropping "(count $files)" contact(s) from the chezmoi source state"
+    echo "Dropping "(count $tracked)" contact(s) from the chezmoi source state"
     set_color normal
-    if not chezmoi forget --force $files
+    if not chezmoi forget --force $tracked
         set_color red
         echo "khard-rm: chezmoi forget failed" >&2
         set_color normal
