@@ -2,10 +2,11 @@
 r"""Keep the NAS share mounted while it is reachable, and quiet while it is not.
 
 Run without arguments this is what the LaunchAgent runs on every network change:
-it mounts the share when the NAS answers, clears the mount when it stops
-answering, and does nothing at all in the two cases where nothing can be done --
-away from the network, or with no password in the Keychain. Those two are
-silent by design, because the alternative to silence is a dialog.
+it writes outstanding data back and mounts the share while the NAS answers,
+clears the mount when it stops answering, and does nothing at all in the two
+cases where nothing can be done -- away from the network, or with no password in
+the Keychain. Those two are silent by design, because the alternative to silence
+is a dialog.
 
 One thing has to be done by hand, once per machine, and until it is done the
 agent mounts nothing -- the password goes in the login Keychain::
@@ -47,6 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib" / "python"
 
 from mountnas import (
     AWAY,
+    CLEARED,
     MOUNTED,
     NO_PASSWORD,
     PATIENT_TIMEOUT,
@@ -69,7 +71,8 @@ REPORT = {
     AWAY: "not reachable, nothing mounted",
     PRESENT: "already mounted",
     MOUNTED: "mounted",
-    UNMOUNTED: "unmounted, the NAS stopped answering",
+    UNMOUNTED: "unmounted",
+    CLEARED: "unmounted, the NAS stopped answering",
     NO_PASSWORD: "reachable, but no password in the Keychain",
 }
 
@@ -192,9 +195,11 @@ def cmd_mount(*, dry_run: bool) -> int:
 def cmd_flush(*, dry_run: bool) -> int:
     """Write outstanding data back to every mounted volume.
 
-    Worth running by hand before the network goes away -- shutting a laptop and
-    carrying it elsewhere is what turns an outstanding write into a lost one,
-    because the NAS is gone by the time anything notices.
+    A pass flushes on its own whenever it finds the share mounted and the NAS
+    answering, so this covers the writes made since the last one. That is the
+    gap worth closing by hand before shutting a laptop and carrying it
+    elsewhere, which is what turns an outstanding write into a lost one: the
+    NAS is gone by the time anything notices.
 
     Args:
         dry_run: Report the command without running it.
@@ -243,7 +248,7 @@ def cmd_unmount(*, force: bool, dry_run: bool) -> int:
     failed = False
     for share, path, reachable in mounted:
         gone = not reachable
-        outcome = unmount(share, path, force=force or gone, dry_run=dry_run)
+        outcome = unmount(share, path, force=force, gone=gone, dry_run=dry_run)
         show(outcome, dry_run=dry_run)
         if not outcome.ok and not (force or gone):
             print(

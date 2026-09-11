@@ -30,7 +30,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "dot_local" / "l
 from itertools import starmap
 
 import mountnas
-from mountnas import AWAY, MOUNTED, NO_PASSWORD, PRESENT, UNMOUNTED, PackagesError, Share
+from mountnas import (
+    AWAY,
+    CLEARED,
+    MOUNTED,
+    NO_PASSWORD,
+    PRESENT,
+    UNMOUNTED,
+    PackagesError,
+    Share,
+)
 
 SHARE = Share("nas.botasal.xyz", "lfiolhais", "Book2")
 
@@ -270,13 +279,13 @@ def test_away_runs_nothing() -> None:
 
 
 def test_stale_mount_is_cleared() -> None:
-    """Unreachable but still mounted: force the unmount.
+    """Unreachable but still mounted: force the unmount, and call it cleared.
 
     Leaving it is what produces the interrupted-connection alerts.
     """
     recorder = Recorder(AT_VOLUME)
     outcome = pass_over(recorder, answer=False)
-    assert outcome.action == UNMOUNTED
+    assert outcome.action == CLEARED
     assert outcome.ok
     assert recorder.calls[-1] == (mountnas.UMOUNT, "-f", "/Volumes/Book2")
 
@@ -285,7 +294,7 @@ def test_stale_mount_falls_back_to_diskutil() -> None:
     """When umount refuses, diskutil is asked instead."""
     recorder = Recorder(AT_VOLUME, fails=mountnas.UMOUNT)
     outcome = pass_over(recorder, answer=False)
-    assert outcome.action == UNMOUNTED
+    assert outcome.action == CLEARED
     assert outcome.ok
     assert recorder.calls[-1] == (mountnas.DISKUTIL, "unmount", "force", "/Volumes/Book2")
 
@@ -306,6 +315,31 @@ def test_requested_unmount_does_not_force() -> None:
     assert outcome.action == UNMOUNTED
     assert outcome.ok
     assert recorder.calls == [(mountnas.UMOUNT, "/Volumes/Book2")]
+
+
+def test_eject_and_clearing_are_named_apart() -> None:
+    """The same command reports an eject and a lost server differently.
+
+    Both end with the share unmounted, and only one of them is a network
+    failure. Sharing an outcome between them is what had a deliberate
+    ``mount-nas unmount`` against a healthy NAS say the NAS had stopped
+    answering.
+    """
+    recorder = Recorder(AT_VOLUME)
+    with mock.patch.object(mountnas, "run", recorder):
+        ejected = mountnas.unmount(SHARE, "/Volumes/Book2", force=True)
+        cleared = mountnas.unmount(SHARE, "/Volumes/Book2", gone=True)
+    assert ejected.action == UNMOUNTED
+    assert cleared.action == CLEARED
+
+
+def test_a_lost_server_forces_without_being_asked() -> None:
+    """``gone`` forces on its own: nothing can be written back to a server that left."""
+    recorder = Recorder(AT_VOLUME)
+    with mock.patch.object(mountnas, "run", recorder):
+        outcome = mountnas.unmount(SHARE, "/Volumes/Book2", gone=True)
+    assert outcome.ok
+    assert recorder.calls == [(mountnas.UMOUNT, "-f", "/Volumes/Book2")]
 
 
 def test_requested_unmount_falls_back_without_forcing() -> None:
@@ -345,12 +379,53 @@ def test_dry_run_flush_runs_nothing() -> None:
     assert recorder.calls == []
 
 
-def test_already_mounted_runs_nothing() -> None:
-    """Reachable and mounted: there is nothing to do."""
+def test_already_mounted_only_flushes() -> None:
+    """Reachable and mounted: nothing to mount, so the pass writes back instead."""
     recorder = Recorder(AT_VOLUME)
     outcome = pass_over(recorder, answer=True)
     assert outcome.action == PRESENT
     assert outcome.ok
+    assert recorder.ran == [mountnas.MOUNT, mountnas.SYNC]
+
+
+# --- Writing back while the NAS is still there -------------------------------
+
+
+def test_a_pass_flushes_before_it_decides_anything() -> None:
+    """A mounted share with its server answering is flushed first.
+
+    This is what bounds how much of the share is unwritten when the network
+    goes away: a laptop shut and carried elsewhere gives no warning, so the
+    interval between passes is the whole of the guarantee.
+    """
+    recorder = Recorder(AT_VOLUME)
+    pass_over(recorder, answer=True)
+    assert recorder.calls == [(mountnas.MOUNT,), (mountnas.SYNC,)]
+
+
+def test_a_lost_server_is_not_flushed() -> None:
+    """A mount whose server has gone is torn down without a flush.
+
+    Nothing can be written back to a NAS that stopped answering, so the flush
+    would only delay clearing the mount that is raising the alerts.
+    """
+    recorder = Recorder(AT_VOLUME)
+    pass_over(recorder, answer=False)
+    assert mountnas.SYNC not in recorder.ran
+
+
+def test_nothing_mounted_is_not_flushed() -> None:
+    """With no share mounted there is nothing of ours to write back."""
+    recorder = Recorder(BARE)
+    pass_over(recorder, answer=True)
+    assert mountnas.SYNC not in recorder.ran
+
+
+def test_dry_run_pass_does_not_flush() -> None:
+    """A dry run issues no sync, the same as it issues no mount."""
+    recorder = Recorder(AT_VOLUME)
+    outcome = pass_over(recorder, answer=True, dry_run=True)
+    assert outcome.action == PRESENT
     assert recorder.ran == [mountnas.MOUNT]
 
 
@@ -405,6 +480,7 @@ def test_dry_run_unmount_is_only_described() -> None:
     """The unmount case names umount without running it."""
     recorder = Recorder(AT_VOLUME)
     outcome = pass_over(recorder, answer=False, dry_run=True)
+    assert outcome.action == CLEARED
     assert outcome.argv == (mountnas.UMOUNT, "-f", "/Volumes/Book2")
     assert recorder.ran == [mountnas.MOUNT]
 

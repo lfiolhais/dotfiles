@@ -466,7 +466,7 @@ sheet, no connection-failed alert, and no "the server connection was
 interrupted" dialog after leaving the house.
 
 ```sh
-mount-nas             # mount when reachable, unmount when not (what launchd runs)
+mount-nas             # flush, mount when reachable, unmount when not (launchd)
 mount-nas status      # reachability, Keychain, and where the share is
 mount-nas mount       # mount now, saying why if it cannot (--dry-run works)
 mount-nas flush       # write outstanding data back to every mounted volume
@@ -479,7 +479,19 @@ still has the share open, and that refusal is what stands between a mounted
 share and silently discarded data — `--force` is how to override it, and it says
 so when it refuses. A share whose server has already stopped answering is forced
 whatever was asked, because there is nothing left to write back to and the stale
-mount raises alerts until it is cleared.
+mount raises alerts until it is cleared. The two read differently, so an eject
+that reports `unmounted, the NAS stopped answering` is saying the NAS went away
+under the mount; a plain eject reports `unmounted`.
+
+A pass writes outstanding data back before it decides anything, whenever it
+finds the share mounted and the NAS answering. macOS gives launchd no sleep
+trigger, so nothing runs at the moment a lid closes; what a pass on every
+network change and every 300 seconds gives instead is a bound on how much of the
+share is unwritten by the time the network goes away. A NAS that has already
+stopped answering is not flushed, because there is nowhere left to write to.
+
+`mount-nas flush` covers the writes made since the last pass, and is the thing
+to run by hand after writing to the share and before shutting the laptop.
 
 Staying quiet takes a guard for each thing that raises a dialog:
 

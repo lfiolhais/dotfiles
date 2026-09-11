@@ -13,6 +13,10 @@ things raise a dialog, and each needs its own guard:
 - a mount whose server has vanished produces interrupted-connection alerts
   until it is cleared, so an unreachable NAS that is still mounted is unmounted.
 
+A pass also writes outstanding data back while the server is still there, which
+is the one thing it does that is not about staying quiet. ``sync()`` says when
+and why.
+
 ``mount volume`` is the AppleScript route rather than ``mount_smbfs`` because it
 reads the login Keychain and mounts under ``/Volumes`` the way Finder does, so
 the share behaves normally in the sidebar.
@@ -60,10 +64,16 @@ SYNC = "/bin/sync"
 # What a pass over a share decided. `AWAY` and `NO_PASSWORD` are the two silent
 # outcomes: both mean the share cannot be mounted right now for a reason that is
 # not a fault, so neither prints anything outside `status`.
+#
+# `UNMOUNTED` and `CLEARED` both end with the share gone, and they are separate
+# because only one of them is news: a share is unmounted because someone asked,
+# and cleared because the server stopped answering under a live mount. A single
+# outcome for the two would have a deliberate eject report a network failure.
 AWAY = "away"
 PRESENT = "present"
 MOUNTED = "mounted"
 UNMOUNTED = "unmounted"
+CLEARED = "cleared"
 NO_PASSWORD = "no-password"
 
 
@@ -332,15 +342,29 @@ def flush(*, dry_run: bool = False) -> tuple[str, ...]:
     return argv
 
 
-def unmount(share: Share, path: str, *, force: bool = False, dry_run: bool = False) -> Outcome:
-    """Unmount a share.
+def unmount(
+    share: Share,
+    path: str,
+    *,
+    force: bool = False,
+    gone: bool = False,
+    dry_run: bool = False,
+) -> Outcome:
+    """Unmount a share, recording whether it was ejected or cleared.
 
     A plain unmount refuses while a file is open or a write is outstanding, and
     that refusal is the point: it is the only thing standing between a mounted
-    share and silently discarded data. ``force`` drops that guarantee, so it is
-    for the one case where the guarantee is already gone -- a server that has
-    stopped answering, where nothing could be written back whatever happened and
-    leaving the mount in place produces interrupted-connection alerts instead.
+    share and silently discarded data. Dropping that guarantee is safe in the
+    one case where it is already gone -- a server that has stopped answering,
+    where nothing could be written back whatever happened and leaving the mount
+    in place produces interrupted-connection alerts instead.
+
+    ``gone`` is that case, and it forces on its own: a caller passes it once it
+    has established the server no longer answers. ``force`` is the same
+    override asked for against a server that is still there, which discards
+    whatever has not been written back. Only ``gone`` reaches the outcome,
+    because that is what makes the difference worth printing: a share the
+    network took away rather than one someone ejected.
 
     ``diskutil`` is the fallback in both modes because it also tells Finder the
     volume went away, which ``umount`` alone does not.
@@ -349,33 +373,47 @@ def unmount(share: Share, path: str, *, force: bool = False, dry_run: bool = Fal
         share: The share being unmounted.
         path: Where it is mounted.
         force: Tear the mount down without waiting for outstanding writes.
+        gone: The server has stopped answering. Forces, and is reported as a
+            cleared mount rather than an eject.
         dry_run: Report the command without running it.
 
     Returns:
         The outcome, carrying the reason when both attempts failed.
 
     """
-    argv = (UMOUNT, "-f", path) if force else (UMOUNT, path)
+    action = CLEARED if gone else UNMOUNTED
+    hard = force or gone
+    argv = (UMOUNT, "-f", path) if hard else (UMOUNT, path)
     if dry_run:
-        return Outcome(share, UNMOUNTED, argv)
+        return Outcome(share, action, argv)
     try:
         run(*argv, timeout=COMMAND_TIMEOUT)
     except PackagesError:
-        fallback = (DISKUTIL, "unmount", "force", path) if force else (DISKUTIL, "unmount", path)
+        fallback = (DISKUTIL, "unmount", "force", path) if hard else (DISKUTIL, "unmount", path)
         try:
             run(*fallback, timeout=COMMAND_TIMEOUT)
         except PackagesError as exc:
-            return Outcome(share, UNMOUNTED, fallback, str(exc))
-        return Outcome(share, UNMOUNTED, fallback)
-    return Outcome(share, UNMOUNTED, argv)
+            return Outcome(share, action, fallback, str(exc))
+        return Outcome(share, action, fallback)
+    return Outcome(share, action, argv)
 
 
 def sync(shares: tuple[Share, ...] = SHARES, *, dry_run: bool = False) -> list[Outcome]:
     """Bring every share into line with what the network currently allows.
 
-    The mount table is read once, so every share is decided against the same
-    snapshot. A mount table that cannot be read raises ``NasError`` out of
-    ``table()``, since nothing below can be decided without it.
+    The mount table is read once and each server is asked once, so every share
+    is decided against the same snapshot. A mount table that cannot be read
+    raises ``NasError`` out of ``table()``, since nothing below can be decided
+    without it.
+
+    A pass that finds a share mounted with its server still answering flushes
+    first. Nothing can write to a NAS that has already gone, and a laptop shut
+    and carried elsewhere gives no warning, so the interval between passes is
+    what bounds how much of a mounted share is left unwritten -- the LaunchAgent
+    runs this on every network change and every 300 seconds. The flush is
+    machine-wide and covers every volume rather than the share alone, which is
+    why it is done once for the pass rather than once per share, and a flush
+    that fails raises ``NasError`` and ends the pass before anything is mounted.
 
     Args:
         shares: The shares to consider.
@@ -386,14 +424,18 @@ def sync(shares: tuple[Share, ...] = SHARES, *, dry_run: bool = False) -> list[O
 
     """
     snapshot = table()
+    state = [(share, share.mountpoint(snapshot), share.reachable()) for share in shares]
+
+    if any(path is not None and reachable for _, path, reachable in state):
+        flush(dry_run=dry_run)
+
     outcomes = []
-    for share in shares:
-        path = share.mountpoint(snapshot)
-        if not share.reachable():
+    for share, path, reachable in state:
+        if not reachable:
             outcomes.append(
                 Outcome(share, AWAY)
                 if path is None
-                else unmount(share, path, force=True, dry_run=dry_run),
+                else unmount(share, path, gone=True, dry_run=dry_run),
             )
         elif path is not None:
             outcomes.append(Outcome(share, PRESENT))
@@ -406,6 +448,7 @@ def sync(shares: tuple[Share, ...] = SHARES, *, dry_run: bool = False) -> list[O
 
 __all__ = [
     "AWAY",
+    "CLEARED",
     "MOUNTED",
     "NO_PASSWORD",
     "PATIENT_TIMEOUT",

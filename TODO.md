@@ -153,53 +153,6 @@ clone says whether the conditional matched.
 
 ## The NAS
 
-### `mount-nas unmount` reports a network failure that did not happen
-
-`dot_local/bin/executable_mount-nas`
-
-`REPORT[UNMOUNTED]` is `"unmounted, the NAS stopped answering"`, and `show()`
-prints it for every share `cmd_unmount` takes down. `cmd_unmount` unmounts every
-mounted share whatever its reachability, so a plain `mount-nas unmount` against a
-NAS that is answering normally ends with the machine reporting that the NAS
-stopped answering.
-
-The label is right for the one caller that established it: `sync()` unmounts
-because the server went away. `cmd_unmount` reuses the same string for a
-deliberate eject.
-
-Closing it means `Outcome` carrying why it unmounted, and `show()` picking the
-line from that -- "unmounted" for an eject, "unmounted, the NAS stopped
-answering" for a share `sync()` cleared. Whether that is worth a field on
-`Outcome` is the decision.
-
-### Nothing writes outstanding data back before the network goes away
-
-`dot_local/bin/executable_mount-nas`, `dot_local/lib/python/mountnas.py`
-
-`mount-nas unmount` flushes and unmounts plainly while the NAS answers, and
-forces only a share whose server has already gone; `mount-nas flush` runs the
-flush on demand.
-
-What is left is the case nothing can detect: a laptop shut and carried to
-another network. By the time anything notices, the NAS is unreachable and an
-outstanding write has nowhere to go.
-
-macOS gives launchd no sleep trigger, so a flush on sleep needs a process that
-is already running to be told. `sleepwatcher` is the usual one — a Homebrew
-formula that runs `~/.sleep` before sleep and `~/.wakeup` after:
-
-```sh
-chezmoi-packages add sleepwatcher --note "runs mount-nas flush before sleep"
-```
-
-then a `dot_sleep` holding `exec "$HOME/.local/bin/mount-nas" flush`, and
-`brew services start sleepwatcher` in the 07 script.
-
-The cost is one more formula, one more background daemon and one more entry
-under Login Items. The alternative is to run `mount-nas flush` by hand before
-closing the lid, which is the same class of thing as remembering to eject a
-disk.
-
 ### The share stops mounting whenever a negative DNS answer is cached
 
 `dot_local/lib/python/mountnas.py`

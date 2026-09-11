@@ -106,9 +106,12 @@ nothing else, so a split inside a family never touches the command.
 `mountnas.py`, behind `mount-nas`, is a family of one: `Share` (its URL, its
 device column, whether the NAS answers, where it is mounted, whether the
 Keychain has its password), `Outcome`, `flush()`, and `sync()` over them.
-`unmount()` takes `force`, and only a caller that has established the server is
-gone may pass it -- `sync()` does, `cmd_unmount` does so only for a share that
-does not answer or when asked. It is both facade
+`unmount()` takes `force` and `gone`. `gone` is for a caller that has
+established the server no longer answers -- `sync()` always, `cmd_unmount` for a
+share that does not answer -- and it forces on its own as well as recording the
+outcome as `CLEARED` rather than `UNMOUNTED`, which is what keeps a deliberate
+eject from reporting that the NAS stopped answering. `force` is that same
+override asked for against a server that is still there. It is both facade
 and implementation because the surface is a single dataclass; the entry point
 still imports from `mountnas` alone, so splitting it later changes nothing there.
 
