@@ -511,21 +511,6 @@ it worked. The cost is that the pairs and profiles then live in a prompt rather
 than in a file, unless `.claude/skills/dotfiles-review/SKILL.md` keeps them and
 names which global agent to hand them to.
 
-### The Pi-hole procedures have no reader who is a person
-
-`dot_claude/skills/pihole-dns-ops/SKILL.md`
-
-That file carries the recovery steps for a household DNS and DHCP server: the
-config key that explains every service name breaking at once, the wildcard
-record trap, and the warning that restarting FTL drops DNS and DHCP for every
-device. Nothing in `README.md` mentions Pi-hole, so those steps exist only in a
-file addressed to an agent, and a person debugging the network at night has
-nowhere to look.
-
-The skill is deployed to every machine, so the material travels; only its
-audience is wrong. Whether a Pi-hole runbook belongs in this repository at all,
-given that the repository is otherwise about this laptop, is the decision.
-
 ## Linux-only helpers on a macOS-first machine
 
 ### `restart-wifi` lists the devices instead of restarting the interface
