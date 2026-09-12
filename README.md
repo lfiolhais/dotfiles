@@ -848,6 +848,36 @@ the conditional matches the URL as written:
 
 `hasconfig:remote.*.url` needs git 2.36.
 
+## Adding to this repository
+
+`chezmoi add ~/path` applies the naming prefixes to a file that already exists
+on the machine. A file written here first gets them by hand: `dot_` for a name
+starting with a dot, `private_` for one only its owner may read, `executable_`
+for one that deploys as `0755`, `encrypted_` for an age blob, `exact_` for a
+directory that is to hold exactly what the source holds, and `.tmpl` for a file
+chezmoi renders rather than copies.
+
+A file naming a path, an option or a flag that only one OS has is a template
+gated on `.chezmoi.os`, so the other one renders without it. `UseKeychain` in
+the ssh config, `/opt/homebrew`, and a home directory that is not under
+`/Users` are the three that keep coming back.
+
+A new fish function is one file per function under
+`private_dot_config/private_fish/functions/`, named after the function, because
+fish autoloads by filename.
+
+A new command goes in `dot_local/bin/` with the `executable_` prefix, and the
+Python it is built on in `dot_local/lib/python/`, which the command reaches
+through a single import — each group of modules there has one that re-exports
+the rest, and that is the only name a command uses. Adding the command to
+`DEPLOYED_ENTRY_POINTS` in `tests/check.py` is what runs its `--help` under
+every `python3` on the host and puts it under ruff.
+
+Nothing a program writes is tracked — a compiled filter, a cache, an editor's
+state. Track what it is built from and build it in a `run_onchange_` script.
+`tests/check.py` fails on a compiled binary or a program-written name anywhere
+in the source.
+
 ## Testing
 
 There is no build. Testing a change means `chezmoi diff`, then the harness:

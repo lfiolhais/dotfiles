@@ -222,21 +222,6 @@ membership check before each add.
 
 ## Documentation
 
-### Authoring conventions live where a person does not read them
-
-`CLAUDE.md`, `README.md`
-
-`CLAUDE.md` opens by saying `README.md` is the documentation and that it covers
-only what an agent needs on top. Its closing section breaks that: a new fish
-function is one file per function named after the function, because fish
-autoloads by filename; a new deployed command goes in `dot_local/bin/` with
-`executable_`, imports a single facade, and is added to `DEPLOYED_ENTRY_POINTS`
-in `tests/check.py`. Neither is agent-specific, and `README.md` has neither.
-
-Moving them into `README.md` changes what that file is for -- it documents using
-this machine, not extending it. The alternative is a short "Adding to this
-repository" section there, with `CLAUDE.md` citing it.
-
 ### The repo-local reviewers restate the global ones
 
 `.claude/agents/`, `.claude/skills/dotfiles-review/`, `dot_claude/agents/`,

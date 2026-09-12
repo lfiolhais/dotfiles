@@ -221,21 +221,9 @@ place, because that is not a behaviour change.
 
 ## Conventions when adding to this repo
 
-- A new file gets its chezmoi prefixes applied by hand (`dot_`, `private_`,
-  `executable_`, `encrypted_`, `exact_`, `.tmpl`), or by `chezmoi add`, which
-  applies them.
-- A new fish function is one file per function under
-  `private_dot_config/private_fish/functions/`, named after the function, since
-  fish autoloads by filename.
-- A new deployed command goes in `dot_local/bin/` with `executable_`, imports a
-  single facade from `dot_local/lib/python/`, and is added to
-  `DEPLOYED_ENTRY_POINTS` in `tests/check.py`.
-- A command a program writes -- a compiled filter, a cache, an editor's state --
-  is not tracked. Track what it is built from and build it in a `run_onchange_`
-  script; `tests/check.py` fails on a binary or a program-written name anywhere
-  in the source.
-- A file that names a path, an option or a prefix that only one OS has is a
-  template, gated on `.chezmoi.os`. `UseKeychain`, `/opt/homebrew`, and a home
-  directory that is not `/Users/…` are the three that keep coming back.
-- Documentation for a person goes in `README.md`. This file is not documentation
-  and is never cited to a user.
+`README.md` has them, under "Adding to this repository": the naming prefixes,
+when a file has to be a template, where a fish function and a deployed command
+go, and what is never tracked because a program writes it.
+
+Documentation for a person goes in `README.md`. This file is not documentation
+and is never cited to a user.
