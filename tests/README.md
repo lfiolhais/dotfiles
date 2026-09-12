@@ -51,6 +51,15 @@ It:
 - checks the Brewfile, skipping it when `brew` is absent. `mas` entries are left
   out of that check: verifying one runs `mas list`, which talks to the App Store
   and hangs until the harness's timeout when there is no network;
+- asks Homebrew whether it still installs every formula and cask the Brewfile
+  names. Homebrew disables what it can no longer install — an app that stopped
+  passing Gatekeeper, an upstream that went away — and `brew bundle install`
+  exits non-zero on it, which stops `01-install-packages` and with it the whole
+  apply. This Mac is the last place that shows, because the package is installed
+  here already and `brew bundle check` passes; the machine that finds out is the
+  next fresh one. A disabled entry fails the harness, a deprecated one warns.
+  Fixing it means dropping the entry from the Brewfile and uninstalling the
+  package here, since `chezmoi-packages dump` writes back whatever is installed;
 - checks the Brewfile against `.chezmoidata/packages.toml`. Every `brew "…"` and
   `uv "…"` entry must be claimed by a `[packages]` entry through its `brew`
   field, which is what stops a `brew bundle dump` on the Mac from silently
@@ -191,17 +200,105 @@ entrypoint fetches chezmoi, shellcheck and age as static arm64 binaries into
 `~/.local/bin`, needing no package manager and no sudo, generates a fresh age
 key, renders with `--exclude encrypted`, and lints the darwin bootstrap scripts.
 `--full` additionally runs the real `chezmoi apply`, which is heavy: Homebrew
-bundle, `defaults write`, dockutil. That bootstrap needs administrator sudo —
-Homebrew's installer chowns `/opt/homebrew`, `02-setup-darwin` opens with `sudo
--v` — and the image's `lume` user is an admin whose sudo wants the account
-password, which an unattended `lume ssh` cannot answer. Under `--full` the
-entrypoint authenticates once with that password (`lume`, the trycua images'
-published default) and installs a `/etc/sudoers.d` NOPASSWD rule in the throwaway
-VM. A headless `--full` does not run the bootstrap to the end: `01-install-packages`
-stops on any cask Homebrew has disabled (`makemkv`, currently — see `TODO.md`),
-and past that `04-setup-fish`'s `chsh` needs a terminal to prompt at. The
-entrypoint prints a `--full summary` — brew formula and cask counts, and the
-`chezmoi apply` exit code — so a failed run still shows how far it got.
+bundle, `defaults write`, dockutil, the launchd agent. Two things a person at a
+keyboard would answer stand between that bootstrap and an unattended run, and
+the entrypoint answers both inside the throwaway guest before the apply starts:
+
+- administrator sudo. Homebrew's installer chowns `/opt/homebrew` and
+  `02-setup-darwin` opens with `sudo -v`, and the image's `lume` user is an admin
+  whose sudo wants the account password that `lume ssh` has no terminal to type
+  at. The entrypoint authenticates once with it (`lume`, the trycua images'
+  published default; `LUME_PASSWORD` overrides it) and installs a
+  `/etc/sudoers.d` NOPASSWD rule.
+- the login shell. `04-setup-fish` makes fish the login shell with `chsh`, which
+  asks for the account password on that same absent terminal, and there is no way
+  to answer it: `chsh` links Open Directory rather than PAM, so there is no PAM
+  service to relax, and it takes no password on any flag or on stdin. What `04`
+  compares is what Open Directory records, so the entrypoint records the answer
+  first — `dscl . -create /Users/<user> UserShell /opt/homebrew/bin/fish` — and
+  `04` then has nothing to prompt for. This is the one step of the bootstrap a
+  `--full` run does not exercise: the check below says the login shell is fish,
+  which it is, but the guest is what made it so.
+
+The guest has no App Store account, so the App Store entries are skipped through
+`HOMEBREW_BUNDLE_MAS_SKIP` — by id, since the names have spaces and that variable
+is split on whitespace. What `01`'s App Store pass does on a machine that is
+signed out is in `TODO.md`, unanswered: a VM cannot answer it, and this Mac is
+signed in.
+
+It then reports what the guest brings, so that a later failure has its cause
+already on screen: the Xcode command-line tools, without which `setup-xcode-cli`
+waits on a GUI installer; Rosetta 2, which that same script exits 1 without; and
+whether the account is logged in to a GUI session, which `03-setup-dock` needs to
+reach the Dock and `07-setup-nas` to bootstrap into `gui/<uid>`.
+
+After the apply it asks the machine what the bootstrap produced, because a script
+exiting 0 is not evidence that its work happened — `03-setup-dock` ends in an
+`echo` that hides a `dockutil` failure, and 01's App Store half reports without
+stopping:
+
+| what is asked | what it proves |
+| --- | --- |
+| `brew bundle check` over the Brewfile without its `mas` lines | 01 installed every formula and cask |
+| the login shell in Open Directory is the installed fish | the machine ends up with fish as its login shell, which the guest pre-set |
+| a login fish prints nothing | every file it sources parses and every command it calls is installed |
+| `bat --list-themes` names the theme bat's config selects | 05 built the cache from the deployed themes |
+| `launchctl print gui/<uid>/xyz.botasal.mount-nas` | 07 loaded the agent |
+| `colorize` and `wrap` are executable | 09 found a compiler and built the filters |
+| `dockutil --list` names Ghostty | 03 reached the Dock |
+| `chezmoi status` prints nothing | every target matches the source |
+
+The run ends with a `--full summary`: the brew formula and cask counts, the
+`chezmoi apply` exit code, and how many of those checks failed. A failed apply
+exits with its own code and a clean apply with a failed check exits 1, so either
+way `macos.py` ends `FAILED: tahoe`. A run that passes has every check `ok`,
+`chezmoi apply: ok`, `checks: 0 failed`, and ends `All macOS targets passed.`
+
+Two things a passing run does not cover, both named above: `04-setup-fish`'s
+`chsh`, whose answer the entrypoint records beforehand, and the App Store half of
+`01`, whose entries are skipped.
+
+`lume ssh` hands over the remote command's output only when that command exits,
+which for `--full` would be an hour with nothing on screen. So the guest tees
+everything into a second shared directory, `~/Library/Logs/chezmoi-macos-tests`,
+mounted read-write while the repo stays read-only, and the run prints that file
+as the guest writes it. The same file is there to `tail -f` from another
+terminal, and it outlives a dropped connection. When nothing has appeared for two
+minutes the run says so, with the elapsed time and what the guest's processor is
+on — a second `lume ssh` asks. Several steps are legitimately quiet:
+`02-setup-darwin` rebuilds the LaunchServices database with `lsregister -kill
+-r`, which prints nothing for minutes while it re-registers every application
+just installed, and a large cask downloads before it writes anything. Naming the
+busiest process is what tells those apart from a run waiting on something.
+
+`<vm>.lume.log` beside it holds what lume itself said, which is what to read when
+the guest log stays empty.
+
+The heartbeat also says how much the guest's disk image has grown since the last
+one, read from the host rather than asked of the guest. `brew` buffers its output
+into chunks when it is not writing to a terminal, so a run installing gigabytes
+prints nothing for minutes at a time; growth is what tells that apart from a run
+that has stopped.
+
+The guest boots into a logged-in GUI session, so an installer that opens a window
+and waits for a click stops the bootstrap dead with nothing on stdout. `lume
+attach <vm>` opens a viewer on that desktop, and a dialog sitting there is the
+answer. A cask that cannot be installed without one is skipped the way the App
+Store entries are, through `HOMEBREW_BUNDLE_CASK_SKIP`.
+
+The in-guest run is given two hours, after which the harness asks the guest what
+it is running, prints that, ends the ssh and fails the target. `lume ssh` has no
+timeout of its own here — a bootstrap cannot be told how long it is allowed to
+take — so without that a guest waiting on something that never arrives holds the
+terminal for as long as it is left open. Two hours is roughly three times a
+bootstrap on a host with memory to spare; a Mac whose memory is already spoken
+for slows the guest down enough to matter, and `vm_stat` on the host is where
+that shows.
+
+A cask Homebrew has disabled stops all of this at `01`, since `brew bundle`
+exits non-zero on it and the script treats that as fatal. `check.py` asks
+Homebrew about every Brewfile entry, so that failure is a few seconds on this Mac
+rather than an hour into a VM run.
 
 Lume is the only host dependency. It ships its own `lume ssh` with the images'
 default `lume`/`lume` credentials, so there is no ssh password plumbing:
@@ -210,8 +307,13 @@ default `lume`/`lume` credentials, so there is no ssh password plumbing:
 /bin/bash -c "$(curl -fsSL https://cua.ai/lume/install.sh)"
 ```
 
-Each run recreates the VM and deletes it afterwards, with a pre-run delete that
-clears one left behind by an interrupted run. It recreates by cloning a
+Each run recreates the VM and deletes it afterwards, with a pre-run clear-out for
+one an interrupted run left behind. That stops the VM before deleting it, and
+removes the directory as well: `lume delete --force` unregisters a VM that is
+still running but leaves its directory in place, and the next `lume clone` then
+refuses the name with `Directory already exists`. The directory is only removed
+once `lume ls` has stopped listing the VM, so nothing that lume still owns is
+touched. It recreates by cloning a
 `chezmoi-test-base-<image>` VM when one exists — a local copy-on-write, no
 network — so once `--build-base` has pulled that base VM, every later run works
 offline, and `lume prune` can then reclaim the layer cache. Run `--build-base`
@@ -222,14 +324,23 @@ again to refresh the base to a newer image. Without a base, a run falls back to
 ships with it off) so a fallback `lume pull` re-streams the image only once; the
 cache and the setting persist, and `lume prune` / `lume config cache disable`
 undo them. `--keep` leaves the run VM stopped and reuses it next time, saving the
-clone and cold boot at the cost of the throwaway guarantee. Apple Silicon only;
+clone, the cold boot and — the expensive part — re-downloading every package,
+at the cost of the throwaway guarantee. That is the flag to iterate with once a
+run has reached the bootstrap: the packages stay installed, so a re-run is back
+where it stopped in a couple of minutes. `01` is a `run_once_` script that
+chezmoi records only on success, so a re-run runs it again. What `--keep` cannot
+report is a clean machine, so the run that counts is a final one without it.
+
+The guest raises `HOMEBREW_CURL_RETRIES` to 5. A guest behind Lume's NAT drops a
+long download more often than the host does, and one cask that cannot be fetched
+fails `brew bundle`, `01`, and with it everything after. Apple Silicon only;
 the base VM disk, each clone, and the layer cache are large sparse files — budget
 well over 50 GB free.
 
 `IMAGES` at the top of `macos.py` holds Tahoe alone, and `--only` accepts only
 what is in it. Tahoe is the only family packaged as Lume's native
 `vnd.trycua.lume.disk.v1` layers; `macos-sequoia-*` tags ship their disks as
-generic `application/vnd.oci.image.layer.v1.tar`, which Lume 0.5.1 does not
+generic `application/vnd.oci.image.layer.v1.tar`, which Lume does not
 reassemble — it logs `Skipping unsupported cached layer media type` for every
 layer, finds `0 lz4 disk parts`, and then fails with the misleading
 `Virtual machine not found: <name>`. Adding a Sequoia tag reproduces that.

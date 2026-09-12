@@ -3,11 +3,11 @@
 
 It renders the source, lints the bootstrap scripts and the rest of the deployed
 shell, parses every fish file, hands the ssh config and the gitconfig to the
-programs that read them, refuses a compiled binary in the source, checks the
-Brewfile against the Linux manifest, lints and imports this repo's Python under
-every interpreter on the host, runs the mount-nas unit tests, and prints a
-dry-run diff -- without touching ``$HOME`` and without running the ``run_*``
-bootstrap scripts.
+programs that read them, refuses a compiled binary in the source, asks Homebrew
+whether it still installs every Brewfile entry, checks the Brewfile against the
+Linux manifest, lints and imports this repo's Python under every interpreter on
+the host, runs the mount-nas unit tests, and prints a dry-run diff -- without
+touching ``$HOME`` and without running the ``run_*`` bootstrap scripts.
 
 Needs Python 3.11: ``enum.StrEnum`` below, and ``tomllib`` inside the manifest
 reader it imports. That is a higher floor than the 3.9 it holds the deployed
@@ -22,6 +22,7 @@ Usage::
 from __future__ import annotations
 
 import itertools
+import json
 import shutil
 import subprocess
 import sys
@@ -346,6 +347,106 @@ def check_brewfile() -> Result:
         return Result(Status.OK, "Brewfile skipped (brew not installed)")
 
     return Result(Status.WARN, "Brewfile has unmet entries", check.output)
+
+
+def _brew_states(kind: str, names: list[str]) -> tuple[list[str], list[str], Command]:
+    """Ask Homebrew which of these packages it has disabled or deprecated.
+
+    Args:
+        kind: ``--formula`` or ``--cask``.
+        names: The names to ask about.
+
+    Returns:
+        The disabled packages, the deprecated ones -- each as a line naming the
+        date and the reason -- and the command that answered, so that an empty
+        answer can be told from a failed one.
+
+    """
+    info = run("brew", "info", "--json=v2", kind, *names)
+    if not info.ok:
+        return [], [], info
+
+    # `run` returns stdout and stderr together and brew writes its warnings to
+    # stderr, so the document starts at the first brace rather than at the top.
+    start = info.output.find("{")
+    if start < 0:
+        return [], [], Command(1, info.output)
+    payload = json.loads(info.output[start:])
+
+    disabled: list[str] = []
+    deprecated: list[str] = []
+    for package in payload["formulae"] + payload["casks"]:
+        # A cask is identified by its token; a formula has no token and its
+        # `name` is the string. A cask's `name` is the list of display names.
+        name = package.get("token") or package["name"]
+        if package.get("disabled"):
+            reported, date, why = disabled, "disable_date", "disable_reason"
+        elif package.get("deprecated"):
+            reported, date, why = deprecated, "deprecation_date", "deprecation_reason"
+        else:
+            continue
+        reported.append(f"{name}: {package.get(date)} -- {package.get(why)}")
+
+    return disabled, deprecated, info
+
+
+def check_brew_disabled() -> Result:
+    """Check that Homebrew still installs every formula and cask the Brewfile names.
+
+    Homebrew disables a package it can no longer install -- an app that stopped
+    passing Gatekeeper, an upstream that went away -- and ``brew bundle install``
+    exits non-zero on it. The darwin bootstrap installs everything in one bundle
+    and stops there, so a package disabled upstream today is a fresh machine that
+    cannot be set up tomorrow. The Mac that dumped the Brewfile is the last place
+    it shows: the package is installed here already, so ``brew bundle check``
+    passes and only a clean machine finds out.
+
+    Returns:
+        A failing result naming every disabled package, a warning for one that is
+        only deprecated or for a Homebrew that could not answer, otherwise a
+        passing or skipped result.
+
+    """
+    brewfile = Brewfile.read(BREWFILE)
+    formulae = [entry.name for entry in brewfile.entries if entry.kind == "brew"]
+    casks = [entry.name for entry in brewfile.entries if entry.kind == "cask"]
+
+    disabled: list[str] = []
+    deprecated: list[str] = []
+    for kind, names in (("--formula", formulae), ("--cask", casks)):
+        if not names:
+            continue
+        gone, going, info = _brew_states(kind, names)
+        if info.missing:
+            return Result(Status.OK, "Brewfile disables skipped (brew not installed)")
+        if not info.ok:
+            return Result(Status.WARN, "Homebrew could not be asked about disables", info.output)
+        disabled.extend(gone)
+        deprecated.extend(going)
+
+    if disabled:
+        detail = [
+            *disabled,
+            "",
+            "A disabled package cannot be installed by anyone, so every apply on a",
+            "machine without it stops at 01. Drop it from the Brewfile, and from",
+            "this Mac too -- `brew bundle dump` writes back whatever is installed.",
+            *(["", "Deprecated, still installable:", *deprecated] if deprecated else []),
+        ]
+        return Result(Status.FAIL, "the Brewfile names a disabled package", "\n".join(detail))
+
+    if deprecated:
+        return Result(
+            Status.WARN,
+            "the Brewfile names a deprecated package",
+            "\n".join([*deprecated, "", "Still installable; Homebrew disables it at some point."]),
+        )
+
+    return Result(
+        Status.OK,
+        f"Homebrew still installs every Brewfile entry "
+        f"({len(formulae)} formulae, {len(casks)} casks)",
+    )
 
 
 def check_package_parity() -> Result:
@@ -692,6 +793,7 @@ def main() -> int:
             check_gitconfig(workdir),
             check_source_is_text(),
             check_brewfile(),
+            check_brew_disabled(),
             check_package_parity(),
             check_python(),
             check_python_imports(),

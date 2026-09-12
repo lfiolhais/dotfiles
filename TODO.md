@@ -3,63 +3,6 @@
 Each item changes behaviour, so it is a decision rather than a correction.
 Nothing here has been applied. Nothing here has been tested on a live machine.
 
-## Testing
-
-### The macOS VM harness passes without ever running the bootstrap
-
-`tests/macos.py`, `tests/lume/entrypoint.sh`
-
-A plain `python3 tests/macos.py` boots the VM, renders every non-encrypted
-target with `chezmoi archive`, and lints the darwin `run_` scripts with
-`bash -n` and shellcheck. That is the whole run: the entrypoint reaches
-`chezmoi apply` only under `FULL=true`, which is what `--full` sets and nothing
-else does.
-
-So it reports every target passing while saying nothing about whether an apply
-works. Rendering proves a template produces text; linting proves that text
-parses. Neither one runs anything, so a script that calls a command the machine
-does not have passes both.
-
-`--full` is the pass that covers it, and it has never been run. It is not a
-disk or memory problem: `tests/README.md` has the crash and the symptom under
-`macos.py`, where the harness needs a GUI login session. It has to be started
-from a terminal on the machine's own desktop, not from an automation context,
-and that has not been tried. `tests/README.md` also has the prerequisites and
-the disk budget.
-
-```sh
-/bin/bash -c "$(curl -fsSL https://cua.ai/lume/install.sh)"   # if lume is absent
-python3 tests/macos.py --full
-python3 tests/macos.py --full --keep    # keeps the VM between runs, to iterate
-```
-
-Expect it to stop somewhere. These stand between `--full` and a clean run, and
-none is a defect in the scripts:
-
-- the guest generates an age key of its own, which decrypts nothing of this
-  repository's, and the entrypoint passes `--exclude encrypted` unconditionally
-  — so the ssh keys, the contacts and the mail credentials are left out of the
-  apply whatever the key situation. `08-setup-ssh` then finds no key and prints
-  instead of prompting, so this one costs nothing;
-- `04-setup-fish` runs `sudo tee /etc/shells` and `chsh -s` under `set -e`.
-  Whether those go through unattended depends on the guest image's sudoers and
-  on whether `chsh` will authenticate with no terminal behind it. If either
-  refuses, the apply stops at 04 and nothing after it is exercised;
-- `02-setup-darwin` and `03-setup-dock` talk to a logged-in GUI session — one
-  rewrites preferences and kills the apps that hold them, the other drives
-  `dockutil` — and the VM boots with `--display none`;
-- `07-setup-nas` runs `launchctl bootstrap gui/$(id -u)` unguarded under
-  `set -eu`, and a headless guest has no Aqua session for that uid to bootstrap
-  into.
-
-The decision is what `--full` should mean given that: have the entrypoint set
-something the interactive and GUI-bound scripts check and skip;
-boot the VM with a display and drive it as a real machine; or accept that
-`--full` covers `01` through `03` and stops, and say so in `tests/README.md`.
-Even stopping at `01` would run the package install, which is the part
-rendering and linting say nothing about, so the cheapest option is still worth
-having.
-
 ## The NAS
 
 ### The share stops mounting whenever a negative DNS answer is cached
@@ -163,6 +106,29 @@ or accept that aerc on Linux is unfiltered and say so in `README.md`. Adding
 `gcc` pulls a toolchain onto every Linux machine for two small filters, which is
 the trade-off.
 
+### Nothing exercises the App Store half of `01`
+
+`run_once_after_install-01-install-packages-darwin.sh.tmpl`
+
+The script installs the Brewfile in two passes and treats the App Store one as
+non-fatal: `mas install` is expected to fail on a machine whose App Store has
+never been signed in, and the script prints what to do about it. That branch has
+never run anywhere. A VM has no App Store account and `tests/macos.py` skips the
+`mas` entries for that reason, and this Mac is signed in, so the failure path the
+script is written around is the one path never taken.
+
+What `mas` does there is the open question. It has no subcommand that reports
+whether an account is signed in -- `signout` exists and nothing else -- which is
+why the script guesses. If it exits non-zero the script is right as written. If
+it waits instead, an unattended apply never ends, and `chezmoi` records nothing,
+so the next one starts at `01` again.
+
+Answering it takes a Mac signed out of the App Store, and a `mas install` of one
+entry from the Brewfile, timed. If it waits, bounding the pass is the fix:
+`coreutils` is installed by the pass before it, so `gtimeout` is there, and
+`tests/lume/entrypoint.sh` has the equivalent in plain bash for a machine where
+it is not.
+
 ### `brew` is guarded and `mas` is not
 
 `private_dot_config/private_fish/functions/brew.fish`
@@ -265,34 +231,39 @@ the same way with a clean cache, the tap really is gone and the entries stay
 out. Nothing in this repository names anylinuxfs, so leaving it out costs no
 documentation — only the ability to mount a Linux filesystem on this Mac.
 
-### `makemkv` is disabled in Homebrew
+### MakeMKV is installed by hand or not at all
 
 `private_dot_config/Brewfile`
 
 Homebrew disabled the `makemkv` cask on 2026-09-01 — it no longer passes the
-macOS Gatekeeper check — so `brew bundle` exits non-zero on it and
-`run_once_after_install-01-install-packages-darwin.sh.tmpl` fails on every
-apply. Package sync does not finish, and a `--full` VM test stops at `01`.
+macOS Gatekeeper check — and a disabled cask installs nowhere, so `brew bundle`
+exits non-zero on it and `run_once_after_install-01-install-packages-darwin.sh.tmpl`
+fails with it. The entry is out of the Brewfile, which is what lets the bundle
+finish; the app it installed is still on this Mac and is now declared nowhere.
 
-`cask "makemkv"` sits in the Brewfile and in no manifest entry, so removing it
-is one line in `private_dot_config/Brewfile`. That unblocks the bundle and
-leaves the machine without MakeMKV.
+`brew bundle dump` writes back whatever is installed, so `chezmoi-packages dump`
+puts `cask "makemkv"` back and `check.py` fails on it again. Uninstalling the
+cask here is what stops that, and it takes MakeMKV.app with it:
 
-To keep MakeMKV, three routes, each hand-maintained because the disable is
-permanent:
+```sh
+brew uninstall --cask makemkv
+```
+
+To have the repository install MakeMKV again, three routes, each hand-maintained
+because the disable is permanent:
 
 - A `run_onchange_` script that fetches the current DMG from
   `https://www.makemkv.com/download/` (`MakeMKV_v<version>_macos.dmg`), mounts
-  it, copies `MakeMKV.app` to `/Applications`, and detaches it. The version is
-  in the URL, so the script carries it and is bumped by hand. First launch
-  still needs approval under System Settings → Privacy & Security — the
-  Gatekeeper failure that got the cask disabled is the one a user meets here.
-- `brew install --cask` against the cask file from the commit before the
-  disable, e.g. `brew install --cask
+  it, copies `MakeMKV.app` to `/Applications`, and detaches it. The version is in
+  the URL, so the script carries it and is bumped by hand. First launch needs
+  approval under System Settings → Privacy & Security — the Gatekeeper failure
+  that got the cask disabled is the one a user meets here.
+- `brew install --cask` against the cask file from the commit before the disable,
+  e.g. `brew install --cask
   https://raw.githubusercontent.com/Homebrew/homebrew-cask/<sha>/Casks/m/makemkv.rb`.
   Re-pin the sha whenever the vendor moves the download and the old URL 404s.
-- Install it by hand when a disc needs ripping and leave the repo out of it,
-  the same call already made for anylinuxfs.
+- Install it by hand when a disc needs ripping and leave the repository out of
+  it, the same call already made for anylinuxfs.
 
 The beta key MakeMKV needs while it is in beta rotates about monthly and is
 posted on their forum; none of these routes tracks it.
@@ -409,30 +380,3 @@ flags — `-q:v` rather than `-cq:v -b:v 0` — so it is not a substitution, and
 
 Picking the encoder from `uname` would make the function work on both, but the
 quality settings have to be chosen per encoder rather than carried across.
-
-## The macOS harness
-
-### `--full` in a headless VM cannot get past `chsh`
-
-`run_once_after_install-04-setup-fish.sh.tmpl:22`
-
-```sh
-if [ "${login_shell}" != "${fish_path}" ]; then
-    echo "Making ${fish_path} the login shell. chsh asks for the account password."
-    chsh -s "${fish_path}"
-fi
-```
-
-`tests/macos.py --full` runs `chezmoi apply` over `lume ssh`, which has no
-controlling terminal. Bare `chsh` authenticates through PAM against the account
-password and, with nothing to read it from, exits non-zero; `set -eu` in `04`
-then stops the apply, so `--full` reports `FAILED` even when every step up to
-that point passed. The NOPASSWD sudo rule the entrypoint installs does not help,
-because `chsh` does not go through sudo.
-
-`run_once_after_install-08-setup-ssh.sh.tmpl` already handles the same situation
-for `ssh-add` by guarding on `[ -t 0 ]` and printing the command when stdin is
-not a terminal. The same guard on `04`'s `chsh` call leaves a real interactive
-`chezmoi apply` unchanged and lets `--full` run to completion in the VM.
-`07-setup-nas`'s `launchctl bootstrap gui/$(id -u)` is the next step that assumes
-a GUI login session and may need the same treatment.

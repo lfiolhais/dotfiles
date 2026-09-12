@@ -173,8 +173,9 @@ machine; what matters when editing them:
 script with `bash -n` and shellcheck, lints the deployed shell that is not a
 `run_` script, parses every fish file with `fish -n`, hands the rendered ssh
 config to `ssh -G` and the rendered gitconfig to `git config --list`, refuses a
-compiled binary or a program-written file anywhere in the source, checks the
-Brewfile against the manifest, lints this repo's Python with ruff, imports
+compiled binary or a program-written file anywhere in the source, asks Homebrew
+whether it still installs every Brewfile entry, checks the Brewfile against the
+manifest, lints this repo's Python with ruff, imports
 `caskupd`/`gitwt`/`linux_distros`/`mountnas` and runs each stdlib entry point's
 `--help` under every `python3` on the host, runs the `mount-nas` unit
 tests, exercises `chezmoi-packages` through `uv run --script`, and prints a

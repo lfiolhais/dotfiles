@@ -100,10 +100,62 @@ if [ "$FULL" = "true" ]; then
         rm -f "$rule_file"
     fi
 
-    # A headless apply runs the Homebrew bundle and the `defaults write` scripts.
-    # It does not run to completion: 01-install-packages stops on any cask
-    # Homebrew has disabled (makemkv, at the time of writing), and 04-setup-fish's
-    # `chsh` needs a terminal to prompt at. The summary below shows how far it got.
+    # 04-setup-fish makes fish the login shell with `chsh`, which asks for the
+    # account password on a terminal `lume ssh` does not provide. There is no way
+    # to answer it: `chsh` authenticates against Open Directory, which is the
+    # framework /usr/bin/chsh links, so there is no PAM service to relax and no
+    # flag that takes a password. What 04 compares is what Open Directory
+    # records, so recording the answer here is what keeps it from asking -- the
+    # same root privilege granted above, used on the same database `chsh` writes.
+    #
+    # This is the one step of the bootstrap a --full run does not exercise.
+    # fish is not installed yet; 04 resolves the same path once Homebrew has put
+    # it there, and the Apple Silicon prefix is what every darwin script assumes.
+    sudo -n dscl . -create "/Users/$(id -un)" UserShell /opt/homebrew/bin/fish
+    printf 'login shell recorded as %s, so 04 has nothing to prompt for\n' \
+        /opt/homebrew/bin/fish
+
+    # The guest has never signed in to the App Store, so the App Store half of
+    # 01-install-packages can install nothing here. `mas install` does not say so
+    # and return: it waits on a sign-in that cannot happen on a machine with no
+    # one at the keyboard. brew bundle skips an entry whose name or id is in this
+    # variable, and the ids are what go in it -- the names have spaces and the
+    # variable is split on whitespace.
+    HOMEBREW_BUNDLE_MAS_SKIP="$(awk -F'id: ' '/^mas /{print $2}' \
+        "$SRC/private_dot_config/Brewfile" | tr -d ' ' | tr '\n' ' ')"
+    export HOMEBREW_BUNDLE_MAS_SKIP
+    printf 'skipping %s App Store apps: no account in this guest\n' \
+        "$(printf '%s' "$HOMEBREW_BUNDLE_MAS_SKIP" | wc -w | tr -d ' ')"
+
+    # A guest behind Lume's NAT drops a long download more often than the host
+    # does, and one cask that cannot be fetched fails `brew bundle`, which fails
+    # 01 and stops the apply before anything after it runs. brew hands this to
+    # curl's --retry, where its own default is 3.
+    export HOMEBREW_CURL_RETRIES=5
+
+    # What the bootstrap needs from the guest, asked before it runs so that a
+    # failure later has its cause already on screen. setup-xcode-cli exits 1
+    # without Rosetta and waits on a GUI installer without the command-line
+    # tools; 03-setup-dock drives the Dock and 07-setup-nas bootstraps a launchd
+    # job into `gui/<uid>`, and both of those need the account logged in to the
+    # window server.
+    echo "guest preconditions:"
+    if pkgutil --pkg-info=com.apple.pkg.CLTools_Executables > /dev/null 2>&1; then
+        echo "  ok    the Xcode command-line tools are installed"
+    else
+        echo "  MISSING  the Xcode command-line tools: setup-xcode-cli waits on a GUI installer" >&2
+    fi
+    if /usr/bin/pgrep oahd > /dev/null 2>&1; then
+        echo "  ok    Rosetta 2 is installed"
+    else
+        echo "  absent   Rosetta 2: setup-xcode-cli installs it, and exits 1 if that fails"
+    fi
+    if launchctl print "gui/$(id -u)" > /dev/null 2>&1; then
+        echo "  ok    the account is logged in to a GUI session (gui/$(id -u))"
+    else
+        echo "  MISSING  a GUI session: 07-setup-nas cannot bootstrap into gui/$(id -u)" >&2
+    fi
+
     echo "the bootstrap runs these non-empty darwin scripts (chezmoi picks the order):"
     for f in "$SRC"/run_*.sh "$SRC"/run_*.sh.tmpl; do
         [ -e "$f" ] || continue
@@ -117,6 +169,119 @@ if [ "$FULL" = "true" ]; then
     echo "running the real bootstrap (chezmoi apply --verbose):"
     apply_rc=0
     chezmoi apply --source "$SRC" --exclude encrypted --verbose || apply_rc=$?
+
+    # Homebrew is on PATH for a shell the bootstrap started, not for this one.
+    if [ -x /opt/homebrew/bin/brew ]; then
+        eval "$(/opt/homebrew/bin/brew shellenv)"
+    fi
+
+    # What the bootstrap was supposed to leave behind, asked of the machine
+    # rather than of the exit code: 03-setup-dock ends in an echo and 01's App
+    # Store half reports without stopping, so a script exiting 0 is not evidence
+    # that its work happened.
+    failures=0
+
+    # A check that never returns holds the whole run open the way a bootstrap step
+    # can: `dockutil --list` addresses the Dock, and a login fish sources every
+    # file this repository deploys. macOS ships no `timeout`, so each one is given
+    # a ceiling here, and reaching it is reported rather than waited out.
+    CHECK_LIMIT=300
+
+    with_limit() {
+        # Run a command with a ceiling in seconds. Returns 124 when it is reached.
+        local limit="$1"
+        shift
+        "$@" &
+        local pid=$!
+        local waited=0
+        while kill -0 "$pid" 2> /dev/null; do
+            if [ "$waited" -ge "$limit" ]; then
+                kill -9 "$pid" 2> /dev/null || true
+                wait "$pid" 2> /dev/null || true
+                return 124
+            fi
+            sleep 1
+            waited=$((waited + 1))
+        done
+        wait "$pid"
+    }
+
+    check() {
+        # Report one expectation. $1 names it, the rest is the command that answers.
+        local what="$1"
+        shift
+        local rc=0
+        with_limit "$CHECK_LIMIT" "$@" > /tmp/check.out 2>&1 || rc=$?
+        if [ "$rc" -eq 0 ]; then
+            printf '  ok    %s\n' "$what"
+            return
+        fi
+        failures=$((failures + 1))
+        if [ "$rc" -eq 124 ]; then
+            printf '  FAIL  %s (no answer in %ss)\n' "$what" "$CHECK_LIMIT"
+        else
+            printf '  FAIL  %s\n' "$what"
+        fi
+        tail -5 /tmp/check.out | sed 's/^/          /'
+    }
+
+    brewfile_installed() {
+        grep -v '^mas ' "$HOME/.config/Brewfile" | brew bundle check --file=- --no-upgrade
+    }
+
+    login_shell_is_fish() {
+        local recorded
+        recorded="$(dscl . -read "/Users/$(id -un)" UserShell | awk '{print $2}')"
+        [ "$recorded" = "$(command -v fish)" ]
+    }
+
+    login_fish_is_quiet() {
+        # A login fish prints nothing when every file it sources parses and every
+        # command it calls is there; anything it does print is what a new terminal
+        # would open with.
+        local noise
+        noise="$(fish --login --command true 2>&1)"
+        [ -z "$noise" ]
+    }
+
+    agent_is_loaded() {
+        launchctl print "gui/$(id -u)/xyz.botasal.mount-nas"
+    }
+
+    filters_are_built() {
+        [ -x "$HOME/.config/aerc/filters/colorize" ] && [ -x "$HOME/.config/aerc/filters/wrap" ]
+    }
+
+    dock_carries_ghostty() {
+        dockutil --list | grep -q Ghostty
+    }
+
+    bat_cache_has_the_repo_theme() {
+        # 05 runs `bat cache --build`, which compiles the themes this repository
+        # deploys into ~/.cache/bat. `bat --list-themes` names a deployed theme
+        # whether or not that has happened, so the built file is what is asked
+        # for, and the listing then says the build took the repository's themes
+        # in rather than only bat's own.
+        [ -f "$HOME/.cache/bat/themes.bin" ] || return 1
+        bat --list-themes | grep -q "Catppuccin Mocha"
+    }
+
+    nothing_is_left_to_apply() {
+        local pending
+        pending="$(chezmoi status --source "$SRC" --exclude encrypted)"
+        [ -z "$pending" ] || { printf '%s\n' "$pending"; return 1; }
+    }
+
+    echo
+    echo "=== what the bootstrap produced ==="
+    check "every Brewfile formula and cask is installed (01)" brewfile_installed
+    check "fish is the login shell (04)" login_shell_is_fish
+    check "a login fish starts with nothing to say (04)" login_fish_is_quiet
+    check "bat's cache carries the deployed theme (05)" bat_cache_has_the_repo_theme
+    check "the mount-nas agent is loaded (07)" agent_is_loaded
+    check "aerc's colorize and wrap filters are built (09)" filters_are_built
+    check "the Dock carries the apps 03 adds" dock_carries_ghostty
+    check "nothing is left to apply (chezmoi status)" nothing_is_left_to_apply
 
     echo
     echo "=== --full summary ==="
@@ -132,5 +297,10 @@ if [ "$FULL" = "true" ]; then
     else
         echo "  chezmoi apply: exit $apply_rc -- the last 'chezmoi:' line above names the script that stopped it"
     fi
-    exit "$apply_rc"
+    printf '  checks: %d failed\n' "$failures"
+
+    if [ "$apply_rc" -ne 0 ]; then
+        exit "$apply_rc"
+    fi
+    [ "$failures" -eq 0 ] || exit 1
 fi
