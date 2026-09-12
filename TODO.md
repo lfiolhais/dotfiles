@@ -279,19 +279,3 @@ Ways out: delete it, replace the last line with
 `sudo nmcli networking off; and sudo nmcli networking on`, or take the driver as
 an argument. Which one depends on whether the Linux machine it was written for
 still exists.
-
-### `convert-vp9-to-x264` encodes with an NVIDIA-only encoder
-
-`private_dot_config/private_fish/functions/convert-vp9-to-x264.fish`
-
-```fish
-ffmpeg -i "$file" -c:v h264_nvenc …
-```
-
-`h264_nvenc` needs an NVIDIA GPU, so on this Mac every conversion fails at the
-encoder. `h264_videotoolbox` is the macOS equivalent and takes different quality
-flags — `-q:v` rather than `-cq:v -b:v 0` — so it is not a substitution, and
-`libx264` is the one that works everywhere at the cost of speed.
-
-Picking the encoder from `uname` would make the function work on both, but the
-quality settings have to be chosen per encoder rather than carried across.

@@ -1,0 +1,54 @@
+function convert-vp9-to-x264 --description "Re-encode VP9 .mkv files to H.264, skipping anything else"
+    # A hardware H.264 encoder belongs to the graphics hardware, so the machine
+    # decides which one exists: h264_videotoolbox is Apple's and h264_nvenc is
+    # NVIDIA's, and asking for the other one fails at the encoder for every
+    # file. Their quality controls are separate scales rather than one number
+    # spelled two ways, so each carries its own and a change to one says
+    # nothing about the other.
+{{- if eq .chezmoi.os "darwin" }}
+    #
+    # -q:v runs from 1 to 100 with higher the better quality. 55 is the setting
+    # to raise or lower; VideoToolbox picks the bitrate that meets it.
+    set -l encoder h264_videotoolbox -q:v 55 -profile:v high
+{{- else }}
+    #
+    # -cq:v runs from 0 to 51 with lower the better quality, and -b:v 0 is what
+    # puts nvenc in that constant-quality mode rather than a bitrate one. p7 is
+    # its slowest preset.
+    set -l encoder h264_nvenc -preset:v p7 -tune:v hq -rc:v vbr -cq:v 32 \
+        -b:v 0 -profile:v high
+{{- end }}
+
+    for file in $argv
+        if not string match -q '*.mkv' -- $file
+            echo "Skipping $file: not a .mkv"
+            continue
+        end
+
+        # ffprobe comes with ffmpeg, which this function needs anyway, and it
+        # names the codec of the first video track rather than describing the
+        # file in prose that has to be searched.
+        set -l codec (ffprobe -v error -select_streams v:0 \
+            -show_entries stream=codec_name -of default=nw=1:nk=1 -- "$file")
+
+        if test -z "$codec"
+            echo "Skipping $file: ffprobe finds no video track in it."
+            continue
+        end
+
+        if test "$codec" != vp9
+            echo "Skipping $file: its first video track is $codec, not VP9."
+            continue
+        end
+
+        set -l out_file (string replace -r '\.mkv$' .mp4 -- $file)
+
+        if not ffmpeg -i "$file" -c:v $encoder "$out_file"
+            echo "$file: $encoder[1] would not encode it. libx264 does the same" >&2
+            echo "job in software, slower and on any machine:" >&2
+            echo >&2
+            echo "    ffmpeg -i \"$file\" -c:v libx264 -preset slow -crf 23 \\" >&2
+            echo "        -profile:v high \"$out_file\"" >&2
+        end
+    end
+end
