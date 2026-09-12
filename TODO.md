@@ -49,29 +49,6 @@ happens, now that `mount-nas status` names the cause.
 
 ## Packages
 
-### Nothing exercises the App Store half of `01`
-
-`run_once_after_install-01-install-packages-darwin.sh.tmpl`
-
-The script installs the Brewfile in two passes and treats the App Store one as
-non-fatal: `mas install` is expected to fail on a machine whose App Store has
-never been signed in, and the script prints what to do about it. That branch has
-never run anywhere. A VM has no App Store account and `tests/macos.py` skips the
-`mas` entries for that reason, and this Mac is signed in, so the failure path the
-script is written around is the one path never taken.
-
-What `mas` does there is the open question. It has no subcommand that reports
-whether an account is signed in -- `signout` exists and nothing else -- which is
-why the script guesses. If it exits non-zero the script is right as written. If
-it waits instead, an unattended apply never ends, and `chezmoi` records nothing,
-so the next one starts at `01` again.
-
-Answering it takes a Mac signed out of the App Store, and a `mas install` of one
-entry from the Brewfile, timed. If it waits, bounding the pass is the fix:
-`coreutils` is installed by the pass before it, so `gtimeout` is there, and
-`tests/lume/entrypoint.sh` has the equivalent in plain bash for a machine where
-it is not.
-
 ### anylinuxfs is uninstalled, and the tap may be sound
 
 `private_dot_config/Brewfile`, `.chezmoidata/packages.toml`

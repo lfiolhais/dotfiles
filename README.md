@@ -100,11 +100,16 @@ stay unbuilt there and aerc renders plain text and calendar parts unhighlighted.
 The script says so and exits 0 rather than failing the apply.
 
 The whole Brewfile is installed, which takes a while — `grep -c '^brew ' ~/.config/Brewfile`
-and the same for `^cask ` and `^mas ` say how much there is. The App Store part
-needs the App Store already signed in; `mas` cannot sign in, so those entries
-fail one by one and `01-install-packages-darwin` says so at the end without
-stopping the apply. Everything else is installed first and a failure there does
-stop it, because the rest of the bootstrap needs those packages.
+and the same for `^cask ` and `^mas ` say how much there is. Everything but the
+App Store is installed first, and a failure there does stop the apply, because
+the rest of the bootstrap needs those packages.
+
+The App Store part needs the App Store already signed in. `mas` cannot sign in,
+and on a machine that never has it waits for a sign-in rather than failing, so
+`01-install-packages-darwin` gives that pass an hour and stops it at that. Both
+the failure and the ceiling print the command that finishes the job once the
+App Store is signed in, and neither stops the apply — nothing later depends on
+those apps.
 
 On macOS and Linux with sudo the login shell changes for the account being set
 up, and `chsh -s /bin/zsh` puts it back. Without sudo the login shell is left

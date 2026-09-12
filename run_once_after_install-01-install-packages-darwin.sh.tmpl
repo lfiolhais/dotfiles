@@ -54,13 +54,46 @@ fi
 
 # The App Store second. Each `mas` entry needs the App Store signed in with the
 # terms accepted, and `mas` cannot say whether it is: it has `signout` and
-# nothing that reports the current state. So this tries the install and prints
-# what to do when it fails. Nothing else in the bootstrap depends on these apps,
-# so a failure does not stop the apply.
-mas_status=0
-grep '^mas ' "${brewfile}" | brew bundle install --file=- || mas_status=$?
+# nothing that reports the current state. On a machine that has never signed in
+# it does not fail and return either -- it waits for a sign-in, which is what
+# tests/lume/entrypoint.sh met in a guest with no account, and why that harness
+# skips these entries. An apply with nobody at the keyboard would wait forever,
+# and chezmoi would record nothing, so the pass is given a ceiling.
+#
+# The ceiling is for that wait, not for a slow link: these apps are several
+# gigabytes and a fresh machine downloads all of them here. gtimeout comes from
+# coreutils, which the pass above installed; a machine without it runs the pass
+# unbounded rather than not at all.
+#
+# Nothing else in the bootstrap depends on these apps, so neither a failure nor
+# the ceiling stops the apply.
+mas_limit=3600
 
-if [ "${mas_status}" -ne 0 ]; then
+run_mas_pass() {
+    if command -v gtimeout > /dev/null 2>&1; then
+        # 124 when the ceiling is reached, 137 when the pass ignored the TERM
+        # that came first and had to be killed.
+        gtimeout --kill-after=30s "${mas_limit}" brew bundle install --file=-
+    else
+        brew bundle install --file=-
+    fi
+}
+
+mas_status=0
+grep '^mas ' "${brewfile}" | run_mas_pass || mas_status=$?
+
+if [ "${mas_status}" -eq 124 ] || [ "${mas_status}" -eq 137 ]; then
+    echo
+    echo "The App Store pass was still running after ${mas_limit}s and was stopped."
+    echo "That is what an App Store this machine has never signed in to looks"
+    echo "like: mas waits for a sign-in rather than failing."
+    echo
+    echo "Open App Store.app, sign in, accept anything it asks for, then run:"
+    echo "    grep '^mas ' ${brewfile} | brew bundle install --file=-"
+    echo
+    echo "On a machine that is signed in, the apps were still downloading and"
+    echo "that same command finishes them."
+elif [ "${mas_status}" -ne 0 ]; then
     echo
     echo "The App Store apps in the Brewfile were not installed (exit ${mas_status})."
     echo "The usual cause is an App Store that has never been signed in on this"
