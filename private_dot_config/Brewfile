@@ -232,6 +232,8 @@ cask "adguard"
 cask "nikitabobko/tap/aerospace"
 # AirPods companion app
 cask "airbuddy"
+# Multi-track audio editor and recorder
+cask "audacity"
 # Display management tool
 cask "betterdisplay"
 # Calendar software focusing on flexibility and reliability
@@ -248,6 +250,7 @@ cask "cork"
 cask "docker-desktop"
 # Online diagram software
 cask "drawio"
+cask "font-awesome-terminal-fonts"
 cask "font-fira-code-nerd-font"
 cask "font-fontawesome"
 cask "font-tex-gyre-cursor"
@@ -270,8 +273,6 @@ cask "leader-key"
 cask "linearmouse"
 # Host-based application firewall
 cask "little-snitch"
-# Video format converter (transcoder)
-cask "makemkv"
 # Utility to uninstall apps and remove leftover files from old/uninstalled apps
 cask "pearcleaner"
 # Bridges Proton Mail to email clients supporting IMAP and SMTP protocols
@@ -294,6 +295,8 @@ cask "tunnelblick"
 cask "utm"
 # Multimedia player
 cask "vlc"
+# Screen and application forwarding system
+cask "xpra"
 # Open-source version of the X.Org X Window System
 cask "xquartz"
 # Video communication and virtual meeting platform
@@ -301,14 +304,14 @@ cask "zoom"
 mas "AdGuard for Safari", id: 1440147259
 mas "DeArrow", id: 6451469297
 mas "GarageBand", id: 682658836
-mas "IceCubesApp", id: 6444915884
+mas "Ice Cubes", id: 6444915884
 mas "iMovie", id: 408981434
 mas "Infuse", id: 1136220934
 mas "Keynote", id: 361285480
 mas "Keynote", id: 409183694
 mas "Noir", id: 1592917505
-mas "Numbers", id: 409203825
 mas "Numbers", id: 361304891
+mas "Numbers", id: 409203825
 mas "Pages", id: 361309726
 mas "Pages", id: 409201541
 mas "Qwant for Safari", id: 1645050159
@@ -320,5 +323,6 @@ mas "Tapestry", id: 6448078074
 mas "uBlacklist for Safari", id: 1547912640
 mas "Unwatched", id: 6477287463
 mas "WhatsApp", id: 310633997
+mas "Xcode", id: 497799835
 uv "jedi-language-server"
 uv "ty"
