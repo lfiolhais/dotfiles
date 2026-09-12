@@ -49,28 +49,6 @@ happens, now that `mount-nas status` names the cause.
 
 ## Packages
 
-### Linux has no compiler, so aerc's filters are built from source
-
-`run_onchange_after_install-09-build-aerc-filters.sh.tmpl`,
-`.chezmoidata/packages.toml`
-
-The `colorize` and `wrap` filters are compiled from the C sources this
-repository deploys, because a built one is specific to an architecture and an
-operating system. macOS has `cc` from the Xcode command-line tools, which
-`setup-xcode-cli` guarantees. No Linux target installs a compiler — the manifest
-has no `gcc` entry — so on Linux the script prints what is missing and exits 0,
-and aerc renders plain text and calendar parts unhighlighted.
-
-Either add the compiler:
-
-```sh
-chezmoi-packages search gcc      # then the add it prints, with --no-install
-```
-
-or accept that aerc on Linux is unfiltered and say so in `README.md`. Adding
-`gcc` pulls a toolchain onto every Linux machine for two small filters, which is
-the trade-off.
-
 ### Nothing exercises the App Store half of `01`
 
 `run_once_after_install-01-install-packages-darwin.sh.tmpl`

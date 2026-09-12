@@ -202,6 +202,12 @@ apt = "gawk"
 fedora = "gawk"
 el = "gawk"
 
+[packages.gcc]
+apt = "gcc"
+fedora = "gcc"
+el = "gcc"
+note = "no `brew` field -- macOS gets cc from the Xcode command-line tools. On Linux this is what builds aerc's colorize and wrap filters; the no-sudo profile has no compiler and leaves them unbuilt."
+
 [packages.gdb]
 brew = "gdb"
 note = "gdb already exists by default on Linux."

@@ -93,6 +93,12 @@ reversible operation. In order:
 | `08-setup-ssh`               | puts each deployed key's passphrase in the login Keychain; asks for it     |
 | `09-build-aerc-filters`      | compiles aerc's `colorize` and `wrap` filters from their C sources         |
 
+The compiler is there for it on every profile but one: macOS has `cc` from the
+Xcode command-line tools, and on Linux the manifest installs `gcc`. The no-sudo
+profile installs packages with mise, which carries no compiler, so the filters
+stay unbuilt there and aerc renders plain text and calendar parts unhighlighted.
+The script says so and exits 0 rather than failing the apply.
+
 The whole Brewfile is installed, which takes a while — `grep -c '^brew ' ~/.config/Brewfile`
 and the same for `^cask ` and `^mas ` say how much there is. The App Store part
 needs the App Store already signed in; `mas` cannot sign in, so those entries

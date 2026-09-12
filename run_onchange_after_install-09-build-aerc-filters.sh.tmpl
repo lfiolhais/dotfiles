@@ -16,9 +16,14 @@ if ! command -v cc > /dev/null 2>&1; then
     echo "aerc still runs; plain text and calendar parts render unhighlighted." >&2
 {{ if eq .chezmoi.os "darwin" -}}
     echo "The Xcode command-line tools provide cc: xcode-select --install" >&2
-{{ else -}}
-    echo "Install a compiler (apt install gcc, or dnf install gcc), then:" >&2
+{{ else if .sudo -}}
+    echo "The 01 script installs gcc from the manifest, so this machine is one" >&2
+    echo "where that install did not happen. Install it, then build the filters:" >&2
+    echo "    sudo apt install gcc        # or: sudo dnf install gcc" >&2
     echo "    chezmoi state delete-bucket --bucket=scriptState && chezmoi apply" >&2
+{{ else -}}
+    echo "This profile installs packages with mise, which carries no compiler," >&2
+    echo "so the filters stay unbuilt until a cc is on PATH by some other means." >&2
 {{ end -}}
     exit 0
 fi
