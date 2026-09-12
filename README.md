@@ -98,7 +98,7 @@ reversible operation. In order:
 | `04-setup-fish`              | adds fish to `/etc/shells` and makes it the login shell with `chsh`        |
 | `05-setup-bat`               | builds bat's theme cache                                                   |
 | `06-setup-mail`              | prints the manual mail steps; changes nothing                              |
-| `07-setup-nas`               | loads the NAS LaunchAgent and prints its one manual step                   |
+| `07-setup-nas`               | writes `/etc/resolver/botasal.xyz`, loads the NAS LaunchAgent, prints its one manual step |
 | `08-setup-ssh`               | puts each deployed key's passphrase in the login Keychain; asks for it     |
 | `09-build-aerc-filters`      | compiles aerc's `colorize` and `wrap` filters from their C sources         |
 
@@ -134,8 +134,10 @@ renders on that profile.
 
 `04-setup-fish` and `08-setup-ssh` both stop and wait: the first for the account
 password, which `sudo` and `chsh` each ask for, and the second for each key's
-passphrase. An apply with no terminal skips the passphrases and prints the
-command to run later.
+passphrase. `07-setup-nas` asks for it too, on a machine whose
+`/etc/resolver/botasal.xyz` is missing or out of date, and says so first. An
+apply with no terminal skips the passphrases and prints the command to run
+later.
 
 Scripts that do not apply to the current OS render empty, and chezmoi skips
 empty scripts, so the darwin-only entries above simply do not exist on Linux.
@@ -670,6 +672,33 @@ and reloads the agent whenever it changes, which is why that script is
 `~/.local/state/mount-nas.log` stays empty and a line in it is always worth
 reading.
 
+### Why the zone has its own resolver file
+
+`/etc/resolver/botasal.xyz` names delta7 and stardestroyer, so every lookup of a
+name in that zone goes to them from this Mac and nowhere else:
+
+```
+nameserver 192.168.1.78
+nameserver 192.168.1.73
+```
+
+`07-setup-nas` writes it, and `scutil --dns` lists it among the resolvers macOS
+is using.
+
+Without it the zone is reachable two ways and they disagree. The Pi-holes serve
+`nas.botasal.xyz`; the public `botasal.xyz`, delegated to Porkbun, carries none
+of its names, so a query made anywhere else is answered NXDOMAIN. macOS caches
+that for as long as the public zone's SOA allows — `dig botasal.xyz SOA`
+prints that in its last field — and the laptop arrives home holding an answer
+saying the NAS does not exist. With the file in place there is no public path to
+answer: at home the Pi-holes do, and away from home the query times out, which
+leaves nothing behind to serve on arrival.
+
+Every name in the zone is on the home network, so the file covers all of them
+rather than the NAS alone: away from home each one fails, and fails without
+leaving a cached denial that outlasts the trip. The failure takes longer than a
+public NXDOMAIN, since it waits out the resolver timeout.
+
 ### When the share is not appearing
 
 `mount-nas status` separates the causes, since being away from home and being
@@ -678,7 +707,7 @@ the lines indented under it are why:
 
 | status line | cause | fix |
 | --- | --- | --- |
-| `does not resolve` | a cached NXDOMAIN, or a resolver that does not serve the name | flush the DNS cache, below |
+| `does not resolve` | `/etc/resolver/botasal.xyz` missing, or an answer cached before it was written | check that file, then flush the cache, below |
 | `did not answer … within` | away from home, or the NAS is off | nothing, or check the NAS |
 | `it does answer within` | the link is slower than the seconds a pass allows | the agent cannot mount over this link; mount by hand with `mount-nas mount` |
 | `cannot reach … Connection refused` | the machine answers, its SMB service does not | turn file sharing back on at the NAS |
@@ -691,18 +720,10 @@ Whenever the name still resolves, `status` also prints the addresses it resolves
 to. A name pointing at some other machine fails exactly like a NAS that is
 switched off, and the address is what tells the two apart.
 
-The `does not resolve` line has one cause that looks like perfectly healthy DNS.
-`nas.botasal.xyz` is a record the Pi-holes serve and the public `botasal.xyz`
-zone does not carry, so any query made while the Pi-holes are not the resolvers
--- away from home, or before they answer at login -- is answered NXDOMAIN, and
-macOS caches that. The cached answer outlives the return home, so `mount-nas`
-cannot resolve the name on a network where the record is being served.
-
-`dig nas.botasal.xyz` keeps working throughout, because it queries the Pi-hole
-directly and never reads that cache. DNS therefore looks healthy while
-`getaddrinfo`, which is what `mount-nas` and everything else on the machine
-call, fails. Trust `dscacheutil -q host -a name nas.botasal.xyz` over `dig`
-here: it goes through the same cache the rest of the system does.
+`dig nas.botasal.xyz` reads no cache, so it keeps answering while `getaddrinfo`
+— what `mount-nas` and everything else on the machine call — does not. Trust
+`dscacheutil -q host -a name nas.botasal.xyz` over `dig` here: it goes through
+the same cache the rest of the system does.
 
 Clearing it takes both commands, and `sudo` asks for the account password:
 

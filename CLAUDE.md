@@ -199,9 +199,11 @@ Neither agent knows anything about chezmoi, and
 for, the lists this repository keeps in more than one place, and what is never
 yours to run. That goes in the prompt each agent is given.
 
-A defect that changes behaviour goes in `TODO.md` for the user to approve. A
-comment, a document or a claim that disagrees with the system is corrected in
-place, because that is not a behaviour change.
+A defect that changes behaviour is reported to the user to approve, not applied.
+Where there are several, they go in a `TODO.md` at the repository root, which
+`.chezmoiignore` already keeps out of the target. A comment, a document or a
+claim that disagrees with the system is corrected in place, because that is not
+a behaviour change.
 
 ## Conventions when adding to this repo
 

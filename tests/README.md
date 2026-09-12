@@ -98,7 +98,16 @@ It:
   interpreter and `tomlkit`. This proves the dependency block resolves and that
   `chezpkg` imports under the interpreter uv picks. A host without `uv` is a
   warning;
-- prints a `chezmoi apply --dry-run` diff to review.
+- prints a `chezmoi apply --dry-run` diff to review, and under it the encrypted
+  files whose target differs, by name.
+
+The diff carries `--exclude=encrypted`, because a verbose one renders an
+encrypted file decrypted and this runs from the `pre-push` hook: the ssh keys,
+the mail passwords and every contact would otherwise be printed on every push
+where their targets differ, which on a machine with nothing deployed yet is all
+of them. `chezmoi status --include=encrypted` is what lists them instead, so a
+pending change to one is still visible without its content. Reviewing such a
+change means `chezmoi diff <path>` on its own, deliberately.
 
 It ends with `All checks passed. Review the dry-run diff above, then push.` and
 exit code 0, or `FAILED — fix the issues above before pushing to main.` and exit
@@ -222,9 +231,9 @@ the entrypoint answers both inside the throwaway guest before the apply starts:
 
 The guest has no App Store account, so the App Store entries are skipped through
 `HOMEBREW_BUNDLE_MAS_SKIP` — by id, since the names have spaces and that variable
-is split on whitespace. What `01`'s App Store pass does on a machine that is
-signed out is in `TODO.md`, unanswered: a VM cannot answer it, and this Mac is
-signed in.
+is split on whitespace. Skipping them is why a `--full` run says nothing about
+`01`'s App Store pass; that pass waits for a sign-in on a machine that has never
+had one, which is what the ceiling in `01` bounds.
 
 It then reports what the guest brings, so that a later failure has its cause
 already on screen: the Xcode command-line tools, without which `setup-xcode-cli`

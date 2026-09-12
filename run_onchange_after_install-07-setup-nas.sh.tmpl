@@ -10,6 +10,48 @@ label="xyz.botasal.mount-nas"
 plist="${HOME}/Library/LaunchAgents/${label}.plist"
 domain="gui/$(id -u)"
 
+# botasal.xyz is served on the home network and delegated publicly to a zone
+# that carries none of its names. A query made anywhere else is answered
+# NXDOMAIN, and macOS caches that for as long as the public zone's SOA says --
+# `dig botasal.xyz SOA` prints the value -- so the laptop comes home holding an
+# answer that says the NAS does not exist. Naming the resolvers here takes the
+# zone off the public path: at home they answer, and away from home the query
+# times out, which leaves nothing behind to serve on arrival.
+#
+# The whole zone rather than the one name: every name in it is on the home
+# network, so each one wants the same treatment -- failing away from home,
+# without leaving a cached denial that outlasts the trip.
+resolver="/etc/resolver/botasal.xyz"
+resolvers="nameserver 192.168.1.78
+nameserver 192.168.1.73"
+
+write_resolver() {
+    sudo mkdir -p /etc/resolver
+    printf '%s\n' "${resolvers}" | sudo tee "${resolver}" > /dev/null
+    # Installing the file is also the moment the poisoned answer is dropped:
+    # without this, whatever is already cached is served until it expires.
+    sudo dscacheutil -flushcache
+    sudo killall -HUP mDNSResponder
+    echo "Wrote ${resolver}: delta7 and stardestroyer answer for botasal.xyz."
+}
+
+if [ "$(cat "${resolver}" 2>/dev/null || true)" = "${resolvers}" ]; then
+    echo "${resolver} already names both resolvers."
+elif sudo -n true 2>/dev/null; then
+    write_resolver
+elif [ -t 0 ]; then
+    echo "Writing ${resolver} needs root. sudo asks for the account password."
+    write_resolver
+else
+    echo "${resolver} needs writing and this apply has no terminal to ask for" >&2
+    echo "a password on. Until it names both resolvers, a cached NXDOMAIN from" >&2
+    echo "away can stop the NAS mounting at home. Run:" >&2
+    echo "    sudo mkdir -p /etc/resolver" >&2
+    echo "    printf 'nameserver 192.168.1.78\nnameserver 192.168.1.73\n' \\" >&2
+    echo "      | sudo tee ${resolver}" >&2
+    echo "    sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder" >&2
+fi
+
 # launchd writes the log itself but creates no directory for it.
 mkdir -p "${HOME}/.local/state"
 
