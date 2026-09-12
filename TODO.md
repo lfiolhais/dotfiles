@@ -219,27 +219,3 @@ Settling it takes one run of `dockutil --add` against an app already in the
 Dock, on a machine where duplicating the Dock is acceptable. Whichever comment
 turns out wrong is deleted, and if the apps do duplicate then the script needs a
 membership check before each add.
-
-## Documentation
-
-### The repo-local reviewers restate the global ones
-
-`.claude/agents/`, `.claude/skills/dotfiles-review/`, `dot_claude/agents/`,
-`dot_claude/skills/deploy-review/`
-
-`drift-checker`, `deploy-auditor` and `deploy-review` now exist globally,
-carrying the method with no chezmoi in them. `.claude/` still holds
-`dotfiles-drift-checker`, `dotfiles-deploy-auditor` and `dotfiles-review`, which
-carry the same method plus this repository's specifics: the Brewfile against the
-manifest, the three profiles, `tests/render-matrix.sh`.
-
-An agent definition is a prompt, so a repo-local one cannot cite a global one
-and have the text arrive -- which is why the method is written out twice, and
-why an edit to either leaves the other behind.
-
-The way out is to delete the three repo-local files and have whoever runs the
-review dispatch the global agents with this repository's pairs and profiles in
-the prompt. That is how they were dispatched in the session that wrote them, and
-it worked. The cost is that the pairs and profiles then live in a prompt rather
-than in a file, unless `.claude/skills/dotfiles-review/SKILL.md` keeps them and
-names which global agent to hand them to.

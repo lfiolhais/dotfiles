@@ -209,11 +209,14 @@ read-only, runs no script and touches no `$HOME`.
 
 ## Reviewing this repo
 
-`.claude/skills/dotfiles-review/` is the order to work in, and
-`.claude/agents/` holds the two reviewers it calls for:
-`dotfiles-drift-checker` (haiku, cheap, compares the lists this repo keeps in
-more than one place) and `dotfiles-deploy-auditor` (sonnet, the expensive pass
-that asks what fails on a machine where this has just been applied).
+`.claude/skills/dotfiles-review/` is what this repository adds to the review:
+its three profiles, the lists it keeps in more than one place, and what is never
+yours to run. The method and the order are in the `deploy-review` skill, and the
+two reviewers it calls for are the `drift-checker` and `deploy-auditor` agents.
+Those three are deployed from `dot_claude/`, so on a machine this repository has
+configured they are the ones already installed; neither agent knows anything
+about chezmoi, which is why the skill supplies the pairs and the profiles in the
+prompt each one is given.
 
 A defect that changes behaviour goes in `TODO.md` for the user to approve. A
 comment, a document or a claim that disagrees with the system is corrected in

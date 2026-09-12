@@ -1,86 +1,91 @@
 ---
 name: dotfiles-review
-description: Review this chezmoi dotfiles repository — what to run, in what order, which reviewer finds which class of defect, and what is never yours to run. Use when asked to check, audit or review the repo, after changing a template or a bootstrap script, and before the user tests on a real machine.
+description: Review this chezmoi dotfiles repository — the three profiles it renders for, the lists it keeps in more than one place, and what is never yours to run. Use when asked to check, audit or review the repo, after changing a template or a bootstrap script, and before the user tests on a real machine.
 ---
 
 # Reviewing these dotfiles
 
-A defect here is not a failing test. It is a machine that comes up wrong: a
-shell that greets a new terminal with an error, a bootstrap script recorded as
-done while half its work failed, a file deployed to Linux that only runs on
-macOS. The repository's own harness catches syntax and package drift; the rest
-is found by asking, for each target, what a person sees on a machine where this
-has just been applied.
+The method is the `deploy-review` skill: what a defect is here, the order to
+work in, which reviewer finds which class of defect, and where a finding goes.
+The sandbox mechanics — the throwaway chezmoi config, what is read-only, how the
+naming prefixes work — are in `chezmoi-source-ops`. Read both. This file holds
+only what neither can know: what this repository calls things, which of its
+lists mirror each other, and which of its own failures keep recurring.
 
-`chezmoi-source-ops` covers the sandbox mechanics — the throwaway config, what
-is read-only, how the naming prefixes work. Read it first. This is what to do
-with those mechanics in this repository.
+The two agents `deploy-review` calls for are `drift-checker` and
+`deploy-auditor`. Neither is written for chezmoi, so each needs this
+repository's particulars in the prompt it is given; the two sections below are
+what to hand them.
 
 ## Never applied, never run
 
-`chezmoi apply`, `init` and `update` change the machine: the login shell,
-system defaults, package installs, launch agents, mounted shares. So does any
-`run_` script and anything under `tests/`. Testing and applying are the user's
-steps, on their machine.
+`chezmoi apply`, `init` and `update` change the machine: the login shell, system
+defaults, package installs, launch agents, mounted shares. So does any `run_`
+script and anything under `tests/`. `chezmoi diff`, `status`, `cat`,
+`execute-template`, `source-path` and `archive` are read-only.
 
-The user runs `python3 tests/check.py`, `python3 tests/linux.py` and
-`python3 tests/macos.py`. Ask for the output rather than producing it.
+`bash tests/render-matrix.sh` is the fast first step `deploy-review` asks for.
+It renders every template for all three profiles and lints the output, in
+seconds, touching no `$HOME`. Its header says what that render does and does not
+prove.
 
-## The order
+`python3 tests/check.py`, `tests/linux.py` and `tests/macos.py` are the user's
+to run. Ask for the output rather than producing it.
 
-1. `bash tests/render-matrix.sh` — renders every template for all three
-   profiles and lints the output. Seconds, no Docker, and everything it reports
-   is a fact. Its header says what the render does and does not prove.
-2. The `dotfiles-drift-checker` agent — cheap and mechanical: the two package
-   files against each other, documented paths against real ones, prefixes,
-   counts written into prose.
-3. The `dotfiles-deploy-auditor` agent — the expensive pass, and the one that
-   finds what the harness cannot: a command used before it is installed, an
-   option the other OS rejects, a script that exits 0 after failing.
-4. `doc-review`, when documentation is in scope. `README.md` is written for a
-   person; `CLAUDE.md` is written for an agent and is never cited to a person.
-
-Only steps 2 and 3 need an agent. A single file changed is usually answered by
-step 1 alone.
-
-## The three profiles
+## The three profiles, for `deploy-auditor`
 
 `.chezmoi.toml.tmpl` produces three, and a change that is right for one can be
 wrong for another. macOS never prompts for sudo:
 
-| target | `.chezmoi.os` | `.sudo` |
-| --- | --- | --- |
-| the Mac | `darwin` | n/a |
-| Linux, sudo | `linux` | `true` |
-| Linux, no sudo | `linux` | `false` |
+| target | `.chezmoi.os` | `.sudo` | what it is |
+| --- | --- | --- | --- |
+| the Mac | `darwin` | unread | the primary machine, Apple Silicon, Homebrew |
+| Linux, sudo | `linux` | `true` | the distro's own package manager is usable |
+| Linux, no sudo | `linux` | `false` | mise installs the packages, bash stays the login shell |
+
+`.chezmoi.toml.tmpl` asks for `.sudo` on Linux alone, and every template that
+reads it pairs it with an `.chezmoi.os` test, so the value does not reach a
+darwin render. That is why `tests/render-matrix.sh` has one darwin row and
+prints it as `sudo=true`.
 
 A template gated off for a target renders empty, and chezmoi skips an empty
-`run_` script — so empty output is a pass.
+`run_` script, so empty output is a pass.
 
-## Defects this repository keeps producing
+What fails here, in the order it is usually the answer:
 
-- A file deployed everywhere that only works on one OS: a hardcoded
-  `/opt/homebrew` or `/Users/lipe` path, an ssh option macOS alone accepts, a
-  `df` or `uptime` column that differs. The fix is a template, not a comment.
-- A command used with no guard, on a target whose manifest entry does not
-  install it. An entry in `.chezmoidata/packages.toml` with only a `note` and no
-  distro column installs nowhere on Linux.
-- Something looked up before whatever puts it on `PATH` has run. On macOS
-  nothing puts `/opt/homebrew/bin` on `PATH` until this repository does.
-- A `run_once_` script with no `set -e`: it exits 0 after any number of failed
-  commands, chezmoi records it, and it never runs again.
-- A generated file tracked as source — a compiled binary, a `.DS_Store`, an
-  editor's state directory. `tests/check.py` refuses these now; the question to
-  ask of a new file is which program writes it.
-- A comment describing what the code was meant to do rather than what it does.
-  Where the two disagree, the comment is the thing being reported, and it is
-  fixed by describing the current behaviour.
+- A `.chezmoidata/packages.toml` entry with no `apt`, `fedora`, `el`, `mise` or
+  `repo` field installs nowhere on Linux, and its `note` says why. A `note`-only
+  entry named by a file that deploys to Linux fails on every Linux machine.
+- `UseKeychain` in an ssh config, a `/opt/homebrew` path, and a home directory
+  that is not under `/Users` are the three one-OS things that keep coming back.
+- On macOS nothing puts `/opt/homebrew/bin` on `PATH` until this repository
+  does, so a lookup before that point fails on a fresh machine and works on a
+  configured one.
+- `run_once_` is recorded when the script exits 0, and a script with no `set -e`
+  exits 0 after any number of failed commands.
+- `04-setup-fish` and `08-setup-ssh` stop and wait, for the account password and
+  for each key's passphrase, and each announces it first. A new prompt that does
+  not is a hang to whoever is watching an unattended apply.
+
+## The pairs, for `drift-checker`
+
+- every `brew` and `uv` entry in `private_dot_config/Brewfile` against
+  `.chezmoidata/packages.toml`;
+- every file in `dot_local/bin/` and every fish function under
+  `private_dot_config/private_fish/functions/` against the tables in
+  `README.md` — a function there is a command the user can type;
+- `DEPLOYED_ENTRY_POINTS`, `SHELL_FILES` and `GENERATED_NAMES` in
+  `tests/check.py` against the directories they mirror;
+- every path named in `README.md`, `CLAUDE.md` and `tests/README.md` against
+  what exists, in both directions. A source file renamed to or from `exact_` or
+  `.tmpl` leaves the old name behind in whichever document was not open;
+- every `run_` script named in documentation against the scripts at the repo
+  root, numbering included;
+- a file holding a secret that is not `encrypted_`, a `.tmpl` extension on a
+  file with no `{{` in it, and `{{` in a file without the extension.
 
 ## Where a finding goes
 
-A defect that changes behaviour goes in `TODO.md` for the user to approve, not
-straight into the code. A comment, a document, or a claim that disagrees with
-the system is corrected in place — that is not a behaviour change.
-
-Never commit, push, or open a pull request. Finished work is left uncommitted in
-the working tree, and the user is told where it is.
+A defect that changes behaviour goes in `TODO.md` for the user to approve. A
+comment, a document or a claim that disagrees with the system is corrected in
+place, because that is not a behaviour change.
