@@ -7,12 +7,12 @@ function convert-vp9-to-x264 --description "Re-encode VP9 .mkv files to H.264, s
     # nothing about the other.
 {{- if eq .chezmoi.os "darwin" }}
     #
-    # -q:v runs from 1 to 100 with higher the better quality. 55 is the setting
+    # -q:v runs from 1 to 100, where higher is better quality. 55 is the number
     # to raise or lower; VideoToolbox picks the bitrate that meets it.
     set -l encoder h264_videotoolbox -q:v 55 -profile:v high
 {{- else }}
     #
-    # -cq:v runs from 0 to 51 with lower the better quality, and -b:v 0 is what
+    # -cq:v runs from 0 to 51, where lower is better quality, and -b:v 0 is what
     # puts nvenc in that constant-quality mode rather than a bitrate one. p7 is
     # its slowest preset.
     set -l encoder h264_nvenc -preset:v p7 -tune:v hq -rc:v vbr -cq:v 32 \

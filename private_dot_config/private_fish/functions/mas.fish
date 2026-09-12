@@ -26,8 +26,8 @@ function mas --wraps mas --description "mas, with the subcommands that desync th
     echo "it, and the Brewfile then describes a machine this one is no longer." >&2
     echo >&2
     echo "There is no chezmoi-packages verb for the App Store: it reads the" >&2
-    echo "machine rather than installing from a name. So run the install or the" >&2
-    echo "uninstall yourself, then record it:" >&2
+    echo "machine rather than installing from a name. So the route is two steps," >&2
+    echo "the command and then the record:" >&2
     echo >&2
     echo "    command mas $argv" >&2
     echo "    chezmoi-packages dump          re-read this machine into the Brewfile" >&2

@@ -9,8 +9,9 @@ function khard-track --description "Record khard contacts in the chezmoi source 
     # A card written by 'khard new' has no entry in the chezmoi source, so it
     # exists on this machine and nowhere else: a reinstall, or a second machine,
     # never sees it, and nothing reports that because an untracked file is not a
-    # difference chezmoi knows about. The khard wrapper runs this after every
-    # write; this is the same step by hand, and safe to run at any time.
+    # difference chezmoi knows about. The khard wrapper does this after every
+    # write, for every address book under ~/.config/khard; this adds the work
+    # book alone, and is safe to run at any time.
     #
     # --encrypt keeps every card an age blob in the source, and --exact keeps
     # the exact_ prefix on the directory, which is what carries a deletion from

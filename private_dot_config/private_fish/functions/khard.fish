@@ -9,7 +9,7 @@ function khard --wraps khard --description "khard, recording every card it write
     # subcommands that write a card re-add the address book afterwards.
     # DOTFILES_KHARD_UNTRACKED skips it. The source directory is `exact_`, so a
     # card left unrecorded is deleted from this machine at the next apply: the
-    # variable buys a card that reaches no other machine, not one that stays.
+    # variable keeps a card off the other machines, and does not keep it here.
     set -l writes new edit add-email merge copy move modify
 
     command khard $argv

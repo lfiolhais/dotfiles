@@ -36,8 +36,11 @@ for key in "${keys[@]}"; do
         echo
         echo "Adding ${key} to the agent and storing its passphrase in the login"
         echo "Keychain. This asks for the key's passphrase; it is asked once."
+        # chezmoi records this script once it exits 0, so it does not run again.
+        # The command itself is what to repeat, the same one the no-terminal
+        # branch below prints.
         ssh-add --apple-use-keychain "${key}" \
-            || echo "${key}: not added. Re-run this script to try again." >&2
+            || echo "${key}: not added. Run: ssh-add --apple-use-keychain ${key}" >&2
     else
         echo
         echo "${key} is not in the agent, and this apply has no terminal to ask"

@@ -11,7 +11,7 @@
 # System Preferences; the error it prints otherwise is harmless.
 osascript -e 'tell application "System Preferences" to quit' 2>/dev/null || true
 
-# Five of the writes below need root. Asking once here means the password is
+# Some of the writes below need root. Asking once here means the password is
 # requested at the start rather than partway through an unattended run.
 sudo -v
 

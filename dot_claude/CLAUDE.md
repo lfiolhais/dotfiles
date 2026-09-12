@@ -51,4 +51,24 @@ convention = "google"
 
 Notes: `preview = true` is required or `DOC` (pydoclint) is silently ignored. `convention = "google"` is required because selecting all of `D` otherwise includes mutually-exclusive rules (`D203`⊥`D211`, `D212`⊥`D213`). Google-style docstrings (`Args:`/`Returns:`) are therefore mandatory on public functions.
 
+## Writing and reviewing documentation
+
+Any request that writes, rewrites or reviews documentation is held to
+`~/.claude/writing-style.md` from the first draft. This covers prose files,
+docstrings, code comments, `--help` text and anything a script prints. Prose
+that breaks the rules is rewritten, not explained.
+
+Load the skill before writing: `doc-review` for a documentation set,
+`deploy-review` for a repository whose output is a configured machine, and a
+repository's own review skill where it has one. Then dispatch the reviewers it
+names — `docs-newcomer` and `docs-structure` first, `docs-in-code` when comments
+and printed text are in scope, `drift-checker` for facts kept in two places, and
+`docs-factchecker` at the rewrite afterwards.
+
+Self-review does not substitute for them. Reading one's own prose against the
+rules catches the mechanical violations — second person, a restated clause — and
+none of the structural ones: a fact filed under a heading that does not cover
+it, a term used before it is defined, a procedure that exists only in agent
+material, a hand-counted number that is wrong.
+
 @~/.claude/writing-style.md

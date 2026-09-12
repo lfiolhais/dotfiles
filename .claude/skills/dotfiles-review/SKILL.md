@@ -6,33 +6,27 @@ description: Review this chezmoi dotfiles repository — the three profiles it r
 # Reviewing these dotfiles
 
 The method is the `deploy-review` skill: what a defect is here, the order to
-work in, which reviewer finds which class of defect, and where a finding goes.
+work in, and which reviewer finds which class of defect.
 The sandbox mechanics — the throwaway chezmoi config, what is read-only, how the
 naming prefixes work — are in `chezmoi-source-ops`. Read both. This file holds
 only what neither can know: what this repository calls things, which of its
 lists mirror each other, and which of its own failures keep recurring.
 
-The two agents `deploy-review` calls for are `drift-checker` and
-`deploy-auditor`. Neither is written for chezmoi, so each needs this
-repository's particulars in the prompt it is given; the two sections below are
-what to hand them.
+The agents `deploy-review` calls for are `drift-checker` and `deploy-auditor`.
+Neither is written for chezmoi, so each needs this repository's particulars in
+the prompt it is given, and the section named after it here is what to hand it.
 
-## Never applied, never run
+## The one thing to run
 
-`chezmoi apply`, `init` and `update` change the machine: the login shell, system
-defaults, package installs, launch agents, mounted shares. So does any `run_`
-script and anything under `tests/`. `chezmoi diff`, `status`, `cat`,
-`execute-template`, `source-path` and `archive` are read-only.
+`CLAUDE.md`'s hard rules say what is never yours to run here and which chezmoi
+subcommands are read-only. Within that, `bash tests/render-matrix.sh` is the
+fast first step `deploy-review` asks for: it renders every template for all
+three profiles and lints the output, in seconds, touching no `$HOME`. Its header
+says what that render does and does not prove.
 
-`bash tests/render-matrix.sh` is the fast first step `deploy-review` asks for.
-It renders every template for all three profiles and lints the output, in
-seconds, touching no `$HOME`. Its header says what that render does and does not
-prove.
+Ask for the output of the other harnesses rather than producing it.
 
-`python3 tests/check.py`, `tests/linux.py` and `tests/macos.py` are the user's
-to run. Ask for the output rather than producing it.
-
-## The three profiles, for `deploy-auditor`
+## The profiles, for `deploy-auditor`
 
 `.chezmoi.toml.tmpl` produces three, and a change that is right for one can be
 wrong for another. macOS never prompts for sudo:
@@ -86,6 +80,5 @@ What fails here, in the order it is usually the answer:
 
 ## Where a finding goes
 
-A defect that changes behaviour goes in `TODO.md` for the user to approve. A
-comment, a document or a claim that disagrees with the system is corrected in
-place, because that is not a behaviour change.
+`CLAUDE.md` has it, under "Reviewing this repo": which findings go to `TODO.md`
+for the user and which are corrected in place.

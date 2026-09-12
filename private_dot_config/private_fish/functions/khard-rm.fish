@@ -8,9 +8,9 @@ function __print_help_khard_rm
     echo -e "\t                      the target, so the next 'chezmoi apply' brings every"
     echo -e "\t                      contact deleted this way straight back."
     echo
-    echo -e "\tDeletes the vcf under ~/.config/khard/work/default and drops its entry"
-    echo -e "\tfrom the chezmoi source. Recovering one afterwards means git history in"
-    echo -e "\t"(chezmoi source-path 2>/dev/null; or echo "the chezmoi source directory")"."
+    echo -e "\tDeletes the vcf under ~/.config/khard/<addressbook>/default and drops"
+    echo -e "\tits entry from the chezmoi source. Recovering one afterwards means git"
+    echo -e "\thistory in "(chezmoi source-path 2>/dev/null; or echo "the chezmoi source directory")"."
     echo
     echo -e "\tThe picker lists each contact by name and email address, because two"
     echo -e "\tpeople can share a name and the card is chosen by what is on screen."

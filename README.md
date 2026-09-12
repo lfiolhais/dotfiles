@@ -12,7 +12,7 @@ looks like a dotfile:
 | source                 | target                       | meaning                                            |
 | ---                    | ---                          | ---                                                |
 | `dot_foo`              | `~/.foo`                     | a leading dot                                      |
-| `private_dot_ssh/`     | `~/.ssh`                     | target is `chmod 600`                              |
+| `private_dot_ssh/`     | `~/.ssh`                     | owner only: `0700` on a directory, `0600` on a file |
 | `encrypted_x.age`      | `~/x`                        | age-encrypted here, decrypted on apply             |
 | `exact_foo/`           | `~/foo`                      | target holds exactly these entries, strays deleted |
 | `executable_mount-nas` | `~/.local/bin/mount-nas`     | target is `0755`                                   |
@@ -39,8 +39,9 @@ sh -c "$(curl -fsLS get.chezmoi.io)" -- -b ~/.local/bin
 ```
 
 On a Mac that already has Homebrew, `command brew install chezmoi` is
-equivalent — `command` because the fish this repository deploys blocks a bare
-`brew install`. There are no other prerequisites — the bootstrap installs everything else, including
+equivalent — `command` because fish, the shell this repository installs and
+makes the login shell, wraps `brew` to block a bare `brew install`. There are
+no other prerequisites — the bootstrap installs everything else, including
 Homebrew.
 
 ### One command
@@ -57,14 +58,22 @@ Prompts interrupt it:
 
 - On Linux, `Do you have sudo on this machine`. The answer selects the profile
   and is remembered, so a later `chezmoi init` does not ask again. Changing it
-  afterwards means editing `[data] sudo` in `~/.config/chezmoi/chezmoi.toml`
+  afterwards means editing `~/.config/chezmoi/chezmoi.toml` to read
+
+  ```toml
+  [data]
+      sudo = true
+  ```
+
   and then `chezmoi apply -v`, because the answer decides the package manager,
   how fish becomes the login shell, and whether `~/.config/mise` is deployed at
   all. Nothing uninstalls what the previous profile installed, so those packages
   stay until they are removed by hand.
-- A passphrase for `key.txt.age`, which holds the age key that decrypts
-  everything else. The passphrase is not in this repository and cannot be
-  recovered from it. Without it, `chezmoi apply --exclude=encrypted,scripts`
+- A passphrase for `key.txt.age`. Encrypted files here are age blobs — age is
+  the encryption tool chezmoi is configured to call — and that file holds the
+  key that decrypts all of them. The passphrase is in neither this repository
+  nor anything it deploys, and cannot be recovered from either. Without it,
+  `chezmoi apply --exclude=encrypted,scripts`
   renders every unencrypted file and leaves mail, contacts and the bootstrap
   alone.
 
@@ -93,23 +102,30 @@ reversible operation. In order:
 | `08-setup-ssh`               | puts each deployed key's passphrase in the login Keychain; asks for it     |
 | `09-build-aerc-filters`      | compiles aerc's `colorize` and `wrap` filters from their C sources         |
 
-The compiler is there for it on every profile but one: macOS has `cc` from the
-Xcode command-line tools, and on Linux the manifest installs `gcc`. The no-sudo
-profile installs packages with mise, which carries no compiler, so the filters
-stay unbuilt there and aerc renders plain text and calendar parts unhighlighted.
-The script says so and exits 0 rather than failing the apply.
+Each name above is the tail of a filename at the top of the source directory —
+`03-setup-dock` is `run_once_after_install-03-setup-dock.sh.tmpl` — and
+`ls run_*` there lists every one.
+
+`09` needs a C compiler. macOS has `cc` from the Xcode command-line tools, and
+on Linux `.chezmoidata/packages.toml`, the file that names each tool's package
+on each distro, installs `gcc`. The no-sudo profile installs packages with mise,
+which carries no compiler, so the filters stay unbuilt there and aerc renders
+plain text and calendar parts unhighlighted. The script says so and exits 0
+rather than failing the apply.
 
 The whole Brewfile is installed, which takes a while — `grep -c '^brew ' ~/.config/Brewfile`
 and the same for `^cask ` and `^mas ` say how much there is. Everything but the
 App Store is installed first, and a failure there does stop the apply, because
 the rest of the bootstrap needs those packages.
 
-The App Store part needs the App Store already signed in. `mas` cannot sign in,
-and on a machine that never has it waits for a sign-in rather than failing, so
-`01-install-packages-darwin` gives that pass an hour and stops it at that. Both
-the failure and the ceiling print the command that finishes the job once the
-App Store is signed in, and neither stops the apply — nothing later depends on
-those apps.
+The App Store part is installed by `mas`, a command-line client for the Mac App
+Store, and it needs the App Store app itself already signed in — open
+App Store.app and sign in there, which `mas` cannot do. On a machine that never
+has, `mas` waits for a sign-in rather than failing, so
+`01-install-packages-darwin` gives that pass an hour. Reaching that ceiling
+prints the same thing a failure does: the command that finishes the install once
+the App Store is signed in. Neither stops the apply, because nothing later
+depends on those apps.
 
 On macOS and Linux with sudo the login shell changes for the account being set
 up, and `chsh -s /bin/zsh` puts it back. Without sudo the login shell is left
@@ -152,9 +168,8 @@ chezmoi apply -v                                   # run them all again
 ```
 
 That re-runs every `run_once_` script, so they are written to be safe to repeat.
-`03-setup-dock` is the one that looks least safe and is not: `dockutil --add`
-refuses an app the Dock already has, so a repeat adds nothing and leaves the
-Dock in the order it was.
+`dockutil --add` refuses an app the Dock already has, so re-running
+`03-setup-dock` adds nothing and leaves the Dock in the order it was.
 Editing a script also re-runs it, but reverting the edit restores the original
 hash and it does not run again — the state bucket is the reliable route.
 
@@ -226,8 +241,8 @@ as `origin/<branch>` rather than refusing because the branch it forked from has
 a different name.
 
 The fish functions live in `~/.config/fish/functions`, one function per file,
-named after the function. `functions -v <name>` prints what each one is for;
-these are the ones worth knowing about:
+named after the function. `functions -v <name>` prints what each one is for.
+The ones that come up:
 
 | function        | what it does                                                          |
 | ---             | ---                                                                   |
@@ -254,9 +269,9 @@ the source state come apart silently otherwise:
   `cleanup`, `bundle` and every query go straight through.
 - `mas install`, `get`, `purchase`, `lucky` and `uninstall` are refused for the
   same reason: the Brewfile records App Store apps too. There is no
-  `chezmoi-packages` verb for them, so the message says to run the command
-  through `command mas …` and then `chezmoi-packages dump`, which is also what
-  records an app installed through the App Store itself. `set -x
+  `chezmoi-packages` verb for them, so the route is `command mas …` and then
+  `chezmoi-packages dump`, which is also what records an app installed through
+  the App Store itself. `set -x
   DOTFILES_MAS_UNGUARDED 1` turns the guard off for a whole shell. `mas
   upgrade`, `outdated` and every query go straight through.
 - `khard new`, `edit`, `add-email`, `merge`, `copy`, `move` and `modify` re-add
@@ -289,6 +304,12 @@ Two files decide what is installed, and they are written by different hands:
 | ---                           | ---                                                            |
 | `private_dot_config/Brewfile` | what macOS installs — formulae, casks, Mac App Store apps      |
 | `.chezmoidata/packages.toml`  | what each Linux target calls the same tool, or why it has none |
+
+A third file is written from the second and never by hand:
+`private_dot_config/mise/config.toml.tmpl` renders the manifest's `mise` names
+into the config mise reads on the no-sudo Linux profile. An edit to
+`~/.config/mise/config.toml` on that machine is replaced at the next apply, so a
+version or a tool changes in the manifest.
 
 The Brewfile is derived. `brew bundle dump` writes it from what the Mac has
 installed, descriptions and taps and casks and Mac App Store apps included, so
@@ -424,6 +445,23 @@ the Brewfile must be claimed by a manifest entry, which is what stops a
 `brew bundle dump` on the Mac from quietly widening the gap between the two
 files.
 
+Uninstalling is what keeps something out, because the Brewfile is a dump of the
+machine: deleting a line by hand lasts until the next `chezmoi-packages dump`
+puts it back.
+
+### Apps this repository does not install
+
+A rebuild installs these by hand, because no package manager on the machine
+carries them:
+
+| app | where it comes from | why |
+| --- | --- | --- |
+| MakeMKV | [makemkv.com](https://www.makemkv.com/download/) | Homebrew's `makemkv` cask is disabled, and `brew bundle` exits non-zero on a disabled cask, which fails `01` and stops the apply |
+
+MakeMKV needs a registration key while it is in beta. The key expires and a
+current one is posted on the MakeMKV forum, so a fresh install asks for it
+again.
+
 ### Looking names up by hand
 
 ```sh
@@ -557,9 +595,15 @@ only by `security`. Should the first mount raise a Keychain prompt anyway,
 Always Allow grants the same access permanently.
 
 The account name is this machine's; on a NAS account with a different user,
-change `-a lfiolhais` and `USER` in `dot_local/lib/python/mountnas.py` together,
-because the lookup matches on both. `mount-nas` runs the deployed copy, so the
-edit takes effect only after an apply:
+change `-a lfiolhais` above and the line in
+`dot_local/lib/python/mountnas.py` that reads
+
+```python
+USER = "lfiolhais"
+```
+
+together, because the lookup matches on both. `mount-nas` runs the deployed
+copy, so the edit takes effect only after an apply:
 
 ```sh
 chezmoi cd
@@ -604,6 +648,9 @@ wake-from-sleep.
 
 It is a user agent rather than a `/Library/LaunchDaemons` job because a root
 daemon can read neither the login Keychain nor mount into the login session.
+autofs is out for the same reason: it would mount lazily and handle the network
+coming and going for free, but `automountd` runs as root, so the password would
+have to live in `/var/root/.nsmbrc`.
 
 It appears under System Settings -> General -> Login Items & Extensions as a
 background item, and mounts nothing while it is switched off there. To check and
@@ -699,6 +746,8 @@ prints it, and `srvr`, `acct`, and a `ptcl` of `smb ` are what NetAuthAgent
 matches on. `server rejected the authentication: Authentication error` means the
 NAS refused the account, and nothing on this machine will change that.
 
+### When the NAS refuses the account
+
 A Linux NAS serves SMB with Samba, which keeps its own password database
 separate from the Unix account. SMB authentication is challenge-response and
 needs an NT hash, which cannot be derived from the Unix password hash, so the
@@ -727,13 +776,12 @@ The Keychain item still holds the old password after any of this, so re-run the
 `security add-internet-password` command above; its `-U` updates the item in
 place rather than refusing because one exists.
 
-autofs would mount lazily and handle the network coming and going for free, but
-`automountd` runs as root and cannot reach a login Keychain, so the password
-would have to live in `/var/root/.nsmbrc`.
 
 ## Contacts
 
-khard's address book is `work`: one age-encrypted vCard per contact, in
+Contacts live in khard, a terminal address book that stores one vCard per
+person in a directory. The address book here is called `work`: one
+age-encrypted vCard per contact, in
 `private_dot_config/khard/work/exact_default/` here and
 `~/.config/khard/work/default/<uid>.vcf` on the machine. chezmoi is what carries
 contacts between machines — vdirsyncer is not part of this setup, and CardDAV is
@@ -801,8 +849,10 @@ applies — and so may re-run bootstrap scripts whose content has changed.
 
 ## Email
 
-mbsync pulls mail into `~/.local/share/mail`, notmuch indexes it, aerc reads it
-and msmtp sends it. The isync and notmuch configs are age-encrypted here;
+Four programs divide the job: mbsync pulls mail into `~/.local/share/mail`,
+notmuch indexes it for searching, aerc is the terminal mail reader, and msmtp
+sends. All four come from the Brewfile and the manifest, and mbsync is what the
+isync package installs. The isync and notmuch configs are age-encrypted here;
 passwords are not in this repository at all. On macOS they live in the login
 Keychain, on Linux in `pass`.
 
@@ -823,7 +873,8 @@ mbsync -a && notmuch new
 
 ## Sign-off on RISC-V commits
 
-RISC-V's DCO rejects a commit that carries no `Signed-off-by` trailer.
+RISC-V projects require a Developer Certificate of Origin sign-off, and their
+CI rejects a commit that carries no `Signed-off-by` trailer.
 `format.signOff` in `~/.gitconfig` puts one on `git format-patch` output, which
 covers a patch sent to a mailing list; a commit that goes out as a pull request
 is not format-patch output and carries nothing.
@@ -879,18 +930,17 @@ chezmoi renders rather than copies.
 A file naming a path, an option or a flag that only one OS has is a template
 gated on `.chezmoi.os`, so the other one renders without it. `UseKeychain` in
 the ssh config, `/opt/homebrew`, and a home directory that is not under
-`/Users` are the three that keep coming back.
+`/Users` are the ones that keep coming back.
 
 A new fish function is one file per function under
 `private_dot_config/private_fish/functions/`, named after the function, because
 fish autoloads by filename.
 
 A new command goes in `dot_local/bin/` with the `executable_` prefix, and the
-Python it is built on in `dot_local/lib/python/`, which the command reaches
-through a single import — each group of modules there has one that re-exports
-the rest, and that is the only name a command uses. Adding the command to
-`DEPLOYED_ENTRY_POINTS` in `tests/check.py` is what runs its `--help` under
-every `python3` on the host and puts it under ruff.
+Python it is built on in `dot_local/lib/python/`. Each group of modules there
+has one that re-exports the rest, and that name is the command's only import.
+Adding the command to `DEPLOYED_ENTRY_POINTS` in `tests/check.py` is what runs
+its `--help` under every `python3` on the host and puts it under ruff.
 
 Nothing a program writes is tracked — a compiled filter, a cache, an editor's
 state. Track what it is built from and build it in a `run_onchange_` script.

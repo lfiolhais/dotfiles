@@ -157,40 +157,20 @@ machine; what matters when editing them:
   either rebuilds the filter. Leave those digest lines in place.
 - `06-setup-mail` only prints instructions. It is safe to render and read with
   `chezmoi execute-template`.
-- `01-…-darwin` splits `brew bundle` in two, because the halves fail for
-  different reasons: everything except the App Store first, exiting non-zero if
-  it fails so chezmoi does not record the script, and the `mas` entries after,
-  reporting a failure without stopping the apply. `brew bundle install` has no
-  per-type filter, so the split is a filtered Brewfile on stdin.
-- `04-setup-fish` and `08-setup-ssh` both block on a prompt -- the account
-  password and each key's passphrase. Each announces it first; `08` prints the
-  command instead when stdin is not a terminal.
+- `01-…-darwin` splits `brew bundle` in two, and `README.md` says why under
+  "What the first apply changes". The mechanism is a filtered Brewfile on
+  stdin, because `brew bundle install` has no per-type filter.
+- `04-setup-fish` and `08-setup-ssh` block on a prompt, which `README.md`
+  covers in the same section. `08` prints the command instead when stdin is not
+  a terminal.
 
 ## The harness
 
-`tests/check.py` renders the source with `chezmoi archive`, confirms `CLAUDE.md`,
-`LICENSE`, `key.txt.age` and `tests` stay out of the target, lints every `run_`
-script with `bash -n` and shellcheck, lints the deployed shell that is not a
-`run_` script, parses every fish file with `fish -n`, hands the rendered ssh
-config to `ssh -G` and the rendered gitconfig to `git config --list`, refuses a
-compiled binary or a program-written file anywhere in the source, asks Homebrew
-whether it still installs every Brewfile entry, checks the Brewfile against the
-manifest, lints this repo's Python with ruff, imports
-`caskupd`/`gitwt`/`linux_distros`/`mountnas` and runs each stdlib entry point's
-`--help` under every `python3` on the host, runs the `mount-nas` unit
-tests, exercises `chezmoi-packages` through `uv run --script`, and prints a
-dry-run diff.
-
-The lists in `tests/check.py` are hand-maintained, and a new file has to be
-added to the right one: `SHELL_FILES` for deployed shell outside a `run_`
-script, `DEPLOYED_ENTRY_POINTS` for a new command in `dot_local/bin/`,
-`BINARY_MAGIC` for another executable format, and `GENERATED_NAMES` for another
-file a program writes. Everything else is globbed -- the library modules, and
-every fish file under `private_dot_config/private_fish/` -- so splitting one in
-two keeps it covered.
-
-Ruff covers `tests/` plus everything in `dot_local/lib/python/` and every entry
-point in `dot_local/bin/`.
+`tests/README.md` says what each harness runs, what it needs installed, and
+which of `tests/check.py`'s hand-maintained lists a new file belongs in. What
+matters when adding to this repository is that those lists exist: a new file
+outside a globbed directory is invisible to the harness until it is named in
+one.
 
 `tests/render-matrix.sh` is the fast pre-check: it renders every template for
 darwin, linux-with-sudo and linux-without-sudo and parses the output. chezmoi
@@ -209,14 +189,15 @@ read-only, runs no script and touches no `$HOME`.
 
 ## Reviewing this repo
 
-`.claude/skills/dotfiles-review/` is what this repository adds to the review:
-its three profiles, the lists it keeps in more than one place, and what is never
-yours to run. The method and the order are in the `deploy-review` skill, and the
-two reviewers it calls for are the `drift-checker` and `deploy-auditor` agents.
-Those three are deployed from `dot_claude/`, so on a machine this repository has
-configured they are the ones already installed; neither agent knows anything
-about chezmoi, which is why the skill supplies the pairs and the profiles in the
-prompt each one is given.
+The method and the order are in the `deploy-review` skill, and the reviewers it
+calls for are the `drift-checker` and `deploy-auditor` agents. All of them are
+deployed from `dot_claude/`, so a machine this repository has configured already
+has them.
+
+Neither agent knows anything about chezmoi, and
+`.claude/skills/dotfiles-review/` is what supplies it: the profiles it renders
+for, the lists this repository keeps in more than one place, and what is never
+yours to run. That goes in the prompt each agent is given.
 
 A defect that changes behaviour goes in `TODO.md` for the user to approve. A
 comment, a document or a claim that disagrees with the system is corrected in

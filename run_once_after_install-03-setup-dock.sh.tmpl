@@ -2,8 +2,8 @@
 #!/usr/bin/env bash
 # Appends to the Dock rather than replacing it: there is no `dockutil --remove
 # all` here, so Apple's defaults stay and these six land after them. Editing this
-# script re-runs it, because the run_once_ hash changes; a re-run leaves the Dock
-# as it is, because dockutil refuses an app the Dock already has.
+# script re-runs it, because the run_once_ hash changes; dockutil refuses an app
+# the Dock already has, so a re-run leaves the Dock as it is.
 
 # dockutil comes from the Brewfile, and this runs before any shell has loaded
 # Homebrew's environment. Apple Silicon prefix; an Intel Mac uses /usr/local.
@@ -19,7 +19,7 @@ dockutil --add /System/Applications/Music.app --after 'Notes'
 # On a re-run every one of those fails: dockutil prints "<app> already exists in
 # dock. Use --replacing '<app>' to update an existing item", adds nothing, and
 # exits 1. This echo is the last command, so the script still reports success --
-# at the cost of hiding a genuine dockutil failure too.
+# at the cost of hiding a genuine dockutil failure.
 echo "Completed Dock setup"
 
 {{ end -}}

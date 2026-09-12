@@ -124,10 +124,10 @@ function chezmoi-sync --description "Pull this machine's configuration back into
             echo "  chezmoi-sync --all           list every one"
         end
         echo "  chezmoi add PATH             track one"
-        echo "  chezmoi add --encrypt PATH   track one that holds a secret. A new"
-        echo "                               file goes into the source in plain text"
-        echo "                               without it, even where every file beside"
-        echo "                               it is encrypted."
+        echo "  chezmoi add --encrypt PATH   track one that holds a secret. This"
+        echo "                               flag is what makes the source copy an age"
+        echo "                               blob; chezmoi takes it from here, not from"
+        echo "                               the encrypted files already beside it."
         # khard's address book is the one place where both of those choices are
         # already made, and getting either wrong writes somebody's address into
         # git. `khard-track` adds the whole book with the flags it needs, so

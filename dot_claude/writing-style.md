@@ -48,6 +48,12 @@ A number is worth writing when it is a fixed property — a port, a protocol
 constant, a timeout the code sets. A number describing a collection that can
 grow belongs in the collection, not in prose about it.
 
+Counting a list in the sentence that also names it is the same defect at close
+range. "The two reviewers it calls for are X and Y", "the three sections
+below", "Five of the writes below need root" — the count adds nothing the list
+does not already say, and it is wrong the moment an item is added. Drop the
+number and name the things: "The reviewers it calls for are X and Y".
+
 ## Say it directly
 
 Cut the run-up. Sentences that announce a point instead of making it:
@@ -63,6 +69,18 @@ Delete: "it is worth noting", "the practical consequence is", "what this means
 is", "it should be pointed out", "as mentioned", "in order to", "at this point
 in time". If a sentence can lose its first clause and still say the same thing,
 it should.
+
+### State the procedure, not what the message says
+
+"The message says to run `command mas …` and then `chezmoi-packages dump`"
+describes a program's output where the reader wanted the two commands. Write
+what to run. Quote a program's wording only where the reader has to match it
+against what is on screen.
+
+The same applies to editorialising about the subject instead of describing it.
+"`03-setup-dock` is the one that looks least safe and is not" rates the script;
+"`dockutil --add` refuses an app the Dock already has, so a re-run leaves the
+Dock as it was" says what happens. Rating belongs to the reader.
 
 ### Do not restate the clause before it
 
@@ -191,6 +209,28 @@ The front door owes the reader four things before anything else:
 
 Everything after that may assume the reader has read it. Nothing before it can.
 
+## Name a thing the first time it is used
+
+A document that says "the fish this repository deploys blocks a bare `brew
+install`" has told a reader who already knows fish is a shell, and nobody else.
+Every program, format and acronym gets, at its first appearance, a few words
+saying what kind of thing it is: "fish, the shell this repository makes the
+login shell"; "age, the encryption tool chezmoi is configured to call"; "mas, a
+command-line client for the Mac App Store"; "khard, a terminal address book".
+Four tool names in one sentence need four.
+
+An acronym is expanded once, where it first appears, even where the expansion
+adds nothing to whoever already knew it.
+
+Where prose names things by a shorthand — a script called `03-setup-dock`
+whose file is `run_once_after_install-03-setup-dock.sh.tmpl` — say once how
+the shorthand maps to what the reader will type or search for, and name the
+command that lists them.
+
+Introducing a thing by what it is for is not the same as saying what it is. "The
+manifest records what each Linux target calls a tool" leaves the reader unable
+to find it; naming the file does.
+
 ## Register
 
 - No second person. Not "you", "your", "yourself". Write impersonally or as an
@@ -207,6 +247,9 @@ Everything after that may assume the reader has read it. Nothing before it can.
   rustc it installs" -- and keep the term of art where the reader has to type
   it or match it against the tool's own output.
 - Technical documentation, not conversation.
+- Text a program prints is documentation and follows these rules. A message
+  reading "run the install or the uninstall yourself" breaks the second-person
+  rule exactly as prose would.
 
 ## Structure and headings
 
@@ -222,6 +265,12 @@ Everything after that may assume the reader has read it. Nothing before it can.
   property of the subject, and it goes stale as soon as an item is added. Never
   a heading that editorialises: "The single most useful diagnostic", "The
   failure worth recognising".
+- Content falls under the heading it is filed beneath. A Samba
+  account-administration procedure inside "When the share is not appearing",
+  whose symptom table is all client-side, is unreachable by whoever needs it:
+  give it its own heading. The same for anything the automation deliberately
+  does not manage — an app installed by hand belongs under a heading that says
+  so, not inside "Removing a package".
 - Prose carries the explanation; tables and code carry the specifics. A table
   is right for symptom-to-cause, for a file inventory, for a version
   comparison. It is wrong as a substitute for a paragraph that has to reason
@@ -321,10 +370,17 @@ it is written. Something processes it first, and the processing can change it.
   el name" documents nothing: it has to say what the value is and when the flag
   is required. A destructive subcommand says what it destroys; a flag says what
   happens when it is omitted.
+- Help text describes the flag, not the default. A `--help` that says it deletes
+  from `~/.config/khard/work/default`, in a command whose `--addressbook` flag
+  chooses that directory, is wrong for everyone who passes the flag. Write the
+  placeholder the flag fills.
 - Printed instructions are a procedure, held to the whole procedure standard:
   resolvable placeholders, a stated success signal, and no counting of what
   follows — a script that announces "three things" and then branches to two is
   wrong on one of its paths.
+- "Re-run this script" is not an instruction a reader can follow when the script
+  is one the tool runs once and records. Print the command that does the work,
+  which is what the script itself would have run.
 
 ## Check claims against the system, not against memory
 

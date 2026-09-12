@@ -54,12 +54,12 @@ function khard-status --description "Say which contacts differ between this mach
         return 1
     end
 
-    # --include=files is what keeps this honest. The source directory is
-    # `exact_`, so chezmoi also governs the cards in the target that the source
-    # does not have -- it deletes them at the next apply -- and a bare
-    # `chezmoi managed` lists those alongside the tracked ones. Every card would
-    # then count as tracked, and the group below that names the ones about to be
-    # deleted would be empty.
+    # --include=files asks only which cards have a source entry. The source
+    # directory is `exact_`, so chezmoi also governs the cards in the target
+    # that the source does not have -- it deletes them at the next apply -- and
+    # a bare `chezmoi managed` lists those alongside the tracked ones. Every
+    # card would then count as tracked, and the group below that names the ones
+    # about to be deleted would be empty.
     set -l tracked (chezmoi managed --include=files --path-style=absolute $dir \
         | string match --regex '.*\.vcf$')
     set -l present $dir/*.vcf
