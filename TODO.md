@@ -258,24 +258,3 @@ the prompt. That is how they were dispatched in the session that wrote them, and
 it worked. The cost is that the pairs and profiles then live in a prompt rather
 than in a file, unless `.claude/skills/dotfiles-review/SKILL.md` keeps them and
 names which global agent to hand them to.
-
-## Linux-only helpers on a macOS-first machine
-
-### `restart-wifi` lists the devices instead of restarting the interface
-
-`private_dot_config/private_fish/functions/restart-wifi.fish`
-
-```fish
-sudo modprobe -r brcmfmac; sudo modprobe brcmfmac
-sleep 2
-sudo nmcli device
-```
-
-The reload is real; the last line reports rather than acts, and the description
-now says so. It also names one driver, so it works on the machine it was written
-for and no other.
-
-Ways out: delete it, replace the last line with
-`sudo nmcli networking off; and sudo nmcli networking on`, or take the driver as
-an argument. Which one depends on whether the Linux machine it was written for
-still exists.
