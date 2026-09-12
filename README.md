@@ -248,8 +248,11 @@ the source state come apart silently otherwise:
 - `khard new`, `edit`, `add-email`, `merge`, `copy`, `move` and `modify` re-add
   the address book afterwards. `set -x DOTFILES_KHARD_UNTRACKED 1` turns that
   off for a change meant to stay on one machine.
-- `zip` puts `-x '*.git*'` after the archive name, which is the only place zip
-  reads it as an exclude rather than as the archive to write.
+- `zip` puts `-x '*/.git/*' '.git/*'` after the archive name, which is the only
+  place zip reads a pattern as an exclude rather than as the archive to write.
+  The first catches a repository nested under what is being archived, the
+  second the one at the top when the archive is made from inside a checkout.
+  `.gitignore`, `.gitmodules` and `.github/` are archived.
 
 `chezmoi-sync` is the one to run after editing configuration in place. It
 re-adds every managed file, then reports the two things a re-add cannot do:

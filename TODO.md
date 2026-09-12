@@ -220,21 +220,6 @@ Dock, on a machine where duplicating the Dock is acceptable. Whichever comment
 turns out wrong is deleted, and if the apps do duplicate then the script needs a
 membership check before each add.
 
-## Shell functions
-
-### `zip` excludes more than the repository internals
-
-`private_dot_config/private_fish/functions/zip.fish`
-
-The wrapper passes `-x '*.git*'`. That is a substring match, so `.gitignore`,
-`.gitmodules` and the whole `.github/` tree are dropped alongside `.git/`, and
-zip says nothing about what it left out. An archive of a checkout handed to
-someone else arrives with no CI workflows.
-
-The description now says so. Whether the pattern should be narrowed to `.git/`
-alone -- `-x '*/.git/*' '.git/*'` -- is the decision, and it turns on whether
-the archives this is used for are meant to carry `.github/`.
-
 ## Documentation
 
 ### Authoring conventions live where a person does not read them
