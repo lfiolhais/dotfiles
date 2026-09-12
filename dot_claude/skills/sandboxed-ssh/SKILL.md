@@ -6,12 +6,12 @@ description: Reach SSH hosts (LAN servers, Raspberry Pis, remote boxes) from ins
 # SSH from inside the sandbox
 
 The sandbox denies raw sockets, so `ssh` fails before doing anything useful.
-The gates below are independent and each produces a different error. Work out
-which one you are hitting before changing any settings.
+Four independent things can block it, each with its own error. Work out which
+one applies before changing any settings.
 
-## Symptom → gate
+## Symptom → cause
 
-| Symptom | Gate |
+| Symptom | Cause |
 |---|---|
 | `ssh: connect ... Operation not permitted` | no raw sockets; must go via the proxy |
 | `Could not resolve hostname` / `dig: isc_socket_bind` | DNS blocked too; the proxy must resolve the name |
@@ -83,14 +83,30 @@ rsync -e "ssh $SSHOPTS" -a ./dir user@host:/tmp/
 
 ## Gotchas
 
-- **The remote login shell may not be bash.** With fish, `for` loops and
-  heredocs break. Pipe a script instead:
+- **The remote login shell may not be bash.** With fish, `for` loops, heredocs,
+  `$(...)`, `$?` and `&&`-chains after a failing command all break, and the
+  error names fish rather than the script, which is easy to misread as a
+  problem on the host. Piping a script is the reliable form, and is worth
+  using unconditionally rather than only where trouble is expected:
   `ssh ... 'bash -s' <<'EOF' … EOF`
+- **`sudo cmd < file` does not read a root-only file.** The redirection is
+  performed by the calling shell before sudo runs, so it fails with permission
+  denied while looking like sudo did not work. Use `sudo cat file | cmd`. The
+  same applies to `>` into a root-owned path: `... | sudo tee file`.
 - **Filter SSH banner noise** when parsing output:
   `| grep -v 'post-quantum\|openssh.com/pq'`
-- **Ansible** needs the same ProxyCommand plus writable temp dirs:
+- **A connection that worked a minute ago can fail with
+  `Connection timed out during banner exchange`.** That is the sandbox proxy,
+  not the host — it allocates a new port per tool call and occasionally drops
+  one. Retry once before investigating; if a direct `ssh` to the same host
+  succeeds in the same window, it was transient.
+- **Ansible** needs the same ProxyCommand plus a writable temp dir. Set
+  `ANSIBLE_LOCAL_TEMP` and **not** `ANSIBLE_HOME`: pointing `ANSIBLE_HOME` at a
+  scratch directory also moves the collection search path, and every module
+  from a collection then fails with `couldn't resolve module/action` even
+  though `ansible-galaxy collection list` shows it installed.
   ```bash
-  export ANSIBLE_LOCAL_TEMP="$TMPDIR/ans/tmp" ANSIBLE_HOME="$TMPDIR/ans/home"
+  export ANSIBLE_LOCAL_TEMP="$TMPDIR/ans/tmp"
   export ANSIBLE_HOST_KEY_CHECKING=False
   export ANSIBLE_SSH_ARGS="-o ControlMaster=no -o ControlPath=none \
     -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
@@ -98,9 +114,9 @@ rsync -e "ssh $SSHOPTS" -a ./dir user@host:/tmp/
   ```
   `ansible-core` 2.21+ also starts a local RPC server over a unix socket, which
   the sandbox may block outright (`TimeoutError: Local RPC server did not
-  start`). If that happens you cannot run playbooks from inside the sandbox at
-  all: validate templates offline (render them with Jinja2 directly) and have
-  the user run the playbook themselves.
+  start`). Where that happens, playbooks cannot be run from inside the sandbox
+  at all: validate templates offline by rendering them with Jinja2 directly,
+  and leave the playbook run to the user.
 - **Use `$TMPDIR`, not `/tmp`.** `~/.ansible`, `~/.cache` and friends are
   usually write-denied.
 - Prefer read-only commands, and when something must model a change use the

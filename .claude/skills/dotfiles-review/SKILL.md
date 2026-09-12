@@ -80,5 +80,5 @@ What fails here, in the order it is usually the answer:
 
 ## Where a finding goes
 
-`CLAUDE.md` has it, under "Reviewing this repo": which findings go to `TODO.md`
-for the user and which are corrected in place.
+`CLAUDE.md` has it, under "Reviewing this repo": which findings go to the user
+as a decision and which are corrected in place.

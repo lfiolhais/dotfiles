@@ -455,3 +455,65 @@ Anything meant to be followed while something is broken:
 - Instructions must match what the automation actually renders. A runbook that
   says to hand-edit a file the config management overwrites produces a fix that
   silently disappears on the next run.
+
+### A rebuild list is verified against the automation, not recalled
+
+Telling a reader what a rebuild must restore by hand also claims that
+everything else is handled. That claim is checkable, and it is checked by
+searching the automation for the thing rather than by remembering whether it
+was ever automated.
+
+Omission is the expensive direction. An item wrongly listed as manual costs a
+few minutes of redundant work. An item wrongly assumed to be automated is
+discovered at the point the rebuild stops, often after the machine has been
+wiped, and often where it blocks the automation from running at all —
+credentials, an account's keys, a privilege grant the configuration management
+itself depends on.
+
+Write the list by searching for each candidate:
+
+```bash
+grep -rn 'sudoers\|authorized_keys\|visudo' roles/
+```
+
+An empty result means nothing manages it, which means it belongs in the
+document. State beside each item the command that puts it back, and what fails
+if it is missing, because that is what tells the reader whether to restore it
+before or after the automation runs.
+
+## A cross-reference resolves in every document it names
+
+"Never reference a document that does not exist" covers a pointer to a missing
+file. It does not cover the commoner failure: a pointer naming several
+documents and resolving in only some of them.
+
+"The procedure is under 'Rebuilding the blocklist database' in the affected
+machine's reference, `delta7.md` or `stardestroyer.md`" is read during an
+outage, by someone who has already established which machine is affected. Where
+only one of the two carries that heading, half the readers who follow the
+pointer land in a file that does not contain it, and the pointer looked
+authoritative on the way there.
+
+Name the document that has the procedure. Where the other genuinely needs one
+and has none, say so — an absence stated is a gap the reader can plan around,
+and an absence implied is a dead end.
+
+Quote a heading exactly as it appears, because a reader searches for the string
+given rather than for the idea behind it.
+
+## Parallel documents are symmetric, or say why not
+
+Two machines with one reference document each, two services with one runbook
+each, two environments with one setup guide each: a reader who has used one
+reads the second expecting the same shape.
+
+So a section present in one and absent from its counterpart is read as a fact
+about the systems rather than about the documents. A recovery reference that
+covers restoring SSH access and passwordless sudo for one host, and omits both
+for the other, tells the reader those steps do not apply to the second host.
+Where the omission is an oversight, the reader following that document is
+stopped by the thing it did not mention.
+
+Before finishing either document in a parallel set, list the headings of both
+side by side. For every heading in one and not the other, either write the
+missing section or state in the shorter document why it does not apply there.

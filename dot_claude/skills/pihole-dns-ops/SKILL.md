@@ -7,7 +7,7 @@ description: Operational rules for changing DNS on a Pi-hole v5 or v6 host — r
 
 A Pi-hole usually serves DNS **and** DHCP for every device on its network, so a
 mistake here is not a service outage, it is a house outage — and it takes out
-the tooling you would use to diagnose it, because the box typically resolves
+the tooling used to diagnose it, because the box typically resolves
 through itself.
 
 Assume every change is high-blast-radius. Verify from a client, not the Pi.
@@ -51,7 +51,7 @@ dnsmasq ignores leading dots and there is no "subdomains only" syntax, so this
 also answers for `example.com` itself and breaks the real public domain from
 inside the LAN. Write one explicit record per name.
 
-The same trap applies to `dns.domain` / `PIHOLE_DOMAIN`: setting it to your
+The same trap applies to `dns.domain` / `PIHOLE_DOMAIN`: setting it to the
 real domain makes the whole zone local-only and never forwarded upstream.
 
 ## An empty apex answer is often correct
@@ -71,8 +71,77 @@ address, which is the signature of a wildcard having swallowed it.
    beside a generated one means every name is defined twice.
 3. FTL only reads `/etc/dnsmasq.d/` at startup, so a restart is unavoidable —
    which is precisely why the verification below is mandatory.
-4. There is no reliable offline syntax check for FTL's embedded dnsmasq. The
-   guard has to be a live query after the restart.
+4. v6 has a real offline syntax check: `pihole-FTL dnsmasq-test-file <file>`
+   returns rc=0 and `syntax check OK` on a good file, rc=1 and
+   `dnsmasq: bad option at line N` on a bad one, without touching the running
+   config. Use it as a pre-write validator. v5 has no per-file equivalent — its
+   `dnsmasq-test` checks the whole installed config and cannot be pointed at a
+   temporary file — so on v5 the only check is a live query after the restart.
+
+## Querying FTL's telnet API without hanging
+
+v5 exposes counters on `127.0.0.1:4711`. `domains_being_blocked` is the single
+most useful number on a sick resolver: a negative value means FTL cannot read
+its gravity database and is **dropping every query** while its sockets stay
+bound, a state no port check reveals.
+
+FTL keeps the session open after a command, and `nc.openbsd` does not exit when
+its stdin reaches EOF — it waits for the server to hang up. So the obvious form
+never returns:
+
+```bash
+(echo ">stats"; sleep 2) | nc 127.0.0.1 4711     # blocks forever
+(echo ">stats"; echo ">quit") | timeout 10 nc 127.0.0.1 4711    # 0.05s
+```
+
+Send `>quit`, and wrap it in `timeout` anyway so a genuinely wedged FTL fails
+the command instead of stalling whatever is running it.
+
+When testing the value, treat an **empty** answer as a failure. `'' | int` is
+`0` in both shell and Jinja, which is not negative — so a check written only as
+"is the number below zero" reports "FTL never replied" as healthy, which is
+precisely the fault it exists to catch.
+
+## Never leave backups in `/etc/dnsmasq.d`
+
+dnsmasq reads *every* file in that directory. It skips names ending in `~`, so
+an editor or an Ansible `backup: true` appears to do no harm — but that is
+dnsmasq's filter doing the work rather than a decision anyone made, and the
+next tool that writes `.conf.bak` or `.orig` double-defines every record in it.
+
+Render the file whole from source control and keep backups outside the
+directory. Where a rollback genuinely needs the previous copy — v5 has no
+per-file validator, so the only way to test a file is to install it — delete
+the backup again as soon as the syntax check passes.
+
+## v6 can validate a file offline; v5 cannot
+
+```bash
+pihole-FTL dnsmasq-test-file <file>   # v6: rc=1 + "bad option at line N", rc=0 + "syntax check OK"
+pihole-FTL dnsmasq-test               # v5: whole installed config, takes no filename
+```
+
+On v6 this is a genuine pre-write check — use it as a `validate:` so a broken
+render never lands. On v5 there is no equivalent: install, then test, then roll
+back on failure. Note `dnsmasq-test` writes its result to **stderr**, so a
+check that greps stdout alone fails a perfectly valid config.
+
+## The query database does not shrink on its own
+
+`MAXDBDAYS` (v5) and `database.maxDBdays` (v6) bound how much history FTL
+*keeps*, not the file size — SQLite leaves freed pages in place. On an SD card
+that matters:
+
+```bash
+sudo systemctl stop pihole-FTL
+sudo sqlite3 /etc/pihole/pihole-FTL.db 'VACUUM;'
+sudo chown pihole:pihole /etc/pihole/pihole-FTL.db   # sqlite3 ran as root
+sudo systemctl start pihole-FTL
+```
+
+The `chown` is not optional; without it FTL cannot write to its own database.
+This stops the resolver for the duration — seconds to a minute — so do it
+deliberately, and check the other resolver is healthy first.
 
 ## Verify from a client, not the Pi
 
