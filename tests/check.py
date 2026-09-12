@@ -756,10 +756,24 @@ def _dry_run() -> None:
     # --force answers apply's "overwrite/remove?" prompts up front, so the diff is
     # complete rather than truncated at the first question. It changes nothing on
     # its own: --dry-run still writes nothing and still runs no script.
-    diff = chezmoi("apply", "--dry-run", "--force", "--verbose").output
+    #
+    # --exclude=encrypted because a verbose diff renders an encrypted file
+    # decrypted, and this runs from the pre-push hook: without it every push
+    # prints the ssh keys, the mail passwords and every contact whose target
+    # differs. On a machine where nothing is deployed yet, that is all of them.
+    diff = chezmoi("apply", "--dry-run", "--force", "--verbose", "--exclude=encrypted").output
 
-    print("\n-- chezmoi apply --dry-run --")
+    print("\n-- chezmoi apply --dry-run (encrypted files excluded) --")
     print("\n".join("  " + line for line in diff.splitlines()) if diff else "  (no differences)")
+
+    # The exclusion above hides the change as well as the content, so the
+    # encrypted entries are listed by name instead. `chezmoi status` prints two
+    # status columns and the path, which is what a name-only view needs.
+    encrypted = chezmoi("status", "--include=encrypted").output
+
+    print("\n-- encrypted files that differ --")
+    listed = "\n".join("  " + line for line in encrypted.splitlines())
+    print(listed or "  (none)")
 
 
 def _report(results: list[Result]) -> bool:
