@@ -167,7 +167,11 @@ function khard-rm --description "Delete several khard contacts at once, dropping
         contains -- $dir $dirs; or set -a dirs $dir
     end
 
-    set -l managed (chezmoi managed --path-style=absolute $dirs)
+    # --include=files asks only which cards have a source entry. Without it an
+    # `exact_` source directory also reports the cards it is about to delete
+    # from the target, and `chezmoi forget` would then be handed a path it does
+    # not manage -- which it refuses for the whole list.
+    set -l managed (chezmoi managed --include=files --path-style=absolute $dirs)
     or begin
         set_color red
         echo "khard-rm: 'chezmoi managed' failed, source state left untouched" >&2

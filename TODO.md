@@ -47,41 +47,6 @@ address on the home network is published in public DNS.
 The alternative is to keep the record local and flush the cache on the days it
 happens, now that `mount-nas status` names the cause.
 
-## Contacts
-
-### A contact deleted on one machine stays on every other
-
-`private_dot_config/khard/work/default/`
-
-The source directory is not `exact_`, so chezmoi does not declare the
-target to hold exactly the entries the source has. The consequences pull in
-opposite directions:
-
-- a card `khard new` writes survives the next apply, so `khard-track` is a
-  convenience and not the only way to keep a card;
-- a card dropped from the source stays on every machine that
-  already has it. `khard-rm` forgets the source entry, the commit reaches the
-  other machine, and the contact stays there for good.
-
-Deletions only reach the other machines if the source directory is `exact_`,
-which means restoring `exact_default`. The danger in it is covered from the
-other side: the `khard` wrapper re-adds the address book after every subcommand
-that writes a card, and `khard-status` lists by name — decrypting each card to
-do it — anything on the machine and not in the source, in the source and not on
-the machine, or different between the two.
-
-Restoring it is a directory rename:
-
-```sh
-git -C "$(chezmoi source-path)" mv \
-    private_dot_config/khard/work/default \
-    private_dot_config/khard/work/exact_default
-```
-
-Run `khard-status` on every machine before doing it. After the rename, a contact
-that is on a machine and not in the source is deleted at that machine's next
-apply.
-
 ## Packages
 
 ### Linux has no compiler, so aerc's filters are built from source

@@ -246,8 +246,9 @@ the source state come apart silently otherwise:
   DOTFILES_MAS_UNGUARDED 1` turns the guard off for a whole shell. `mas
   upgrade`, `outdated` and every query go straight through.
 - `khard new`, `edit`, `add-email`, `merge`, `copy`, `move` and `modify` re-add
-  the address book afterwards. `set -x DOTFILES_KHARD_UNTRACKED 1` turns that
-  off for a change meant to stay on one machine.
+  the address book afterwards, encrypted. `set -x DOTFILES_KHARD_UNTRACKED 1`
+  turns that off, and the card then lasts until the next `chezmoi apply`
+  deletes it — see [Contacts](#contacts).
 - `zip` puts `-x '*/.git/*' '.git/*'` after the archive name, which is the only
   place zip reads a pattern as an exclude rather than as the archive to write.
   The first catches a repository nested under what is being archived, the
@@ -719,7 +720,7 @@ would have to live in `/var/root/.nsmbrc`.
 ## Contacts
 
 khard's address book is `work`: one age-encrypted vCard per contact, in
-`private_dot_config/khard/work/default/` here and
+`private_dot_config/khard/work/exact_default/` here and
 `~/.config/khard/work/default/<uid>.vcf` on the machine. chezmoi is what carries
 contacts between machines — vdirsyncer is not part of this setup, and CardDAV is
 not used.
@@ -735,8 +736,9 @@ chezmoi diff              # the new .vcf appears as an addition
 ```
 
 `khard-track` is the same step by hand, for a card written by something other
-than khard. `set -x DOTFILES_KHARD_UNTRACKED 1` turns the wrapper off for a
-change meant to stay on one machine.
+than khard. `set -x DOTFILES_KHARD_UNTRACKED 1` turns the wrapper off; since
+the source directory is `exact_`, a card written with it set reaches no other
+machine and is deleted here at the next `chezmoi apply`.
 
 Because each file is named after a uid and encrypted, `git status` and
 `chezmoi status` name contacts in a way nobody can read. `khard-status` decrypts
@@ -749,9 +751,12 @@ khard-status              # what differs, by contact name
 khard-status -a work      # -a names the address book; `work` is the default
 ```
 
-A contact dropped from the source is not deleted from a machine that already has
-it — the source directory is not `exact_`. `TODO.md` has the trade-off and what
-restoring `exact_` would mean.
+The source directory carries the `exact_` prefix, so `chezmoi apply` makes
+`~/.config/khard/work/default` hold exactly the cards the source holds. That is
+what carries a deletion from one machine to the others — and it is also what
+deletes a card that was never recorded. Run `khard-status` before applying on a
+machine that has been away from the source for a while, and `khard-track`
+anything it lists under "on this machine, not in the source".
 
 `khard-rm` deletes contacts and drops them from the source state in one step. It
 opens an fzf picker, multi-select with TAB and confirm with ENTER:

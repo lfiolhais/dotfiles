@@ -11,7 +11,12 @@ function khard-track --description "Record khard contacts in the chezmoi source 
     # never sees it, and nothing reports that because an untracked file is not a
     # difference chezmoi knows about. The khard wrapper runs this after every
     # write; this is the same step by hand, and safe to run at any time.
-    chezmoi add ~/.config/khard/work/default
+    #
+    # --encrypt keeps every card an age blob in the source, and --exact keeps
+    # the exact_ prefix on the directory, which is what carries a deletion from
+    # one machine to the rest. The khard wrapper passes both for the same
+    # reasons.
+    chezmoi add --encrypt --exact ~/.config/khard/work/default
     or return 1
 
     echo "Tracked. 'khard-status' lists any contact still loose, by name."

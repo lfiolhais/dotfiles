@@ -37,7 +37,7 @@ because the change survives review and disappears at the next write.
 | `private_dot_config/Brewfile` | `brew bundle dump` | never hand-edit; `chezmoi-packages dump` is the only path |
 | `.chezmoidata/packages.toml` | `chezpkg_manifest.py` | never hand-edit; every write rewrites it whole, and hand-written comments are lost — use `note` |
 | `private_dot_config/mise/config.toml.tmpl` | rendered from the manifest | change the manifest, not this |
-| `private_dot_config/khard/work/default/` | the `khard` wrapper, via `chezmoi add` | one age-encrypted vCard per contact |
+| `private_dot_config/khard/work/exact_default/` | the `khard` wrapper, via `chezmoi add --encrypt --exact` | one age-encrypted vCard per contact |
 | `~/.config/aerc/filters/colorize`, `wrap` | `run_onchange_…-09` compiles them | the C sources are what this repo tracks; a built filter is one architecture's |
 
 The manifest's field set is `brew`, `apt`, `fedora`, `el`, `mise`, `mise_exe`,

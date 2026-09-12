@@ -124,7 +124,18 @@ function chezmoi-sync --description "Pull this machine's configuration back into
             echo "  chezmoi-sync --all           list every one"
         end
         echo "  chezmoi add PATH             track one"
-        echo "  chezmoi add --encrypt PATH   track one that holds a secret"
+        echo "  chezmoi add --encrypt PATH   track one that holds a secret. A new"
+        echo "                               file goes into the source in plain text"
+        echo "                               without it, even where every file beside"
+        echo "                               it is encrypted."
+        # khard's address book is the one place where both of those choices are
+        # already made, and getting either wrong writes somebody's address into
+        # git. `khard-track` adds the whole book with the flags it needs, so
+        # name it whenever one of its cards is in the list above.
+        if string match -q -- "$HOME/.config/khard/*" $untracked
+            echo "  khard-track                  the khard cards above, with the flags"
+            echo "                               that address book needs"
+        end
     end
 
     # --- 4. what to review ---------------------------------------------------

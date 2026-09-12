@@ -7,8 +7,9 @@ function khard --wraps khard --description "khard, recording every card it write
     #
     # So the tracking happens here rather than being remembered: the
     # subcommands that write a card re-add the address book afterwards.
-    # DOTFILES_KHARD_UNTRACKED skips it, for a change that should stay on this
-    # machine.
+    # DOTFILES_KHARD_UNTRACKED skips it. The source directory is `exact_`, so a
+    # card left unrecorded is deleted from this machine at the next apply: the
+    # variable buys a card that reaches no other machine, not one that stays.
     set -l writes new edit add-email merge copy move modify
 
     command khard $argv
@@ -32,7 +33,14 @@ function khard --wraps khard --description "khard, recording every card it write
         return $code
     end
 
-    chezmoi add $books
+    # --encrypt because a vCard is a person's address and phone number and the
+    # source directory is a git repository; without it chezmoi asks, for every
+    # card it already holds, whether to drop the encryption, and answering that
+    # wrong writes them all back in plain text. --exact because the source
+    # directory carries the exact_ prefix, and an add without it renames the
+    # directory in the source, after which a contact deleted on one machine
+    # stops being deleted on the others.
+    chezmoi add --encrypt --exact $books
     or begin
         echo "khard: the contact was written but not recorded in chezmoi." >&2
         echo "       Run 'khard-track', or 'khard-status' to see what is loose." >&2
