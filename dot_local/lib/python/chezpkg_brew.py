@@ -25,8 +25,9 @@ ENTRY = re.compile(r'^(brew|cask|uv|mas|tap|vscode)\s+"([^"]+)"', re.MULTILINE)
 # Mac App Store apps and editor extensions are macOS GUI software, which the
 # Linux profiles do not attempt to mirror.
 ACCOUNTABLE = frozenset({"brew", "uv"})
-# How to remove each kind. `mas` has no uninstall verb and a tap is not
-# installed software, so neither appears here.
+# How to remove each kind. `mas uninstall` takes an app id and needs root,
+# while a Brewfile line carries the app's name, and a tap is not installed
+# software, so neither appears here.
 UNINSTALL = {
     "brew": ("brew", "uninstall"),
     "cask": ("brew", "uninstall"),

@@ -220,6 +220,7 @@ these are the ones worth knowing about:
 | `update`        | update every package on the machine, whatever installed it            |
 | `chezmoi-sync`  | pull this machine's configuration back into the source state          |
 | `brew`          | Homebrew, with the subcommands that desync the Brewfile blocked       |
+| `mas`           | the App Store, with the same subcommands blocked                      |
 | `khard`         | khard, recording every contact it writes in the source state          |
 | `khard-status`  | which contacts differ between this machine and the source, by name    |
 | `khard-rm`      | delete contacts and drop them from the source state                   |
@@ -237,6 +238,13 @@ the source state come apart silently otherwise:
   guard for one command, and `set -x DOTFILES_BREW_UNGUARDED 1` for a whole
   shell — the message says both when it refuses. `brew update`, `upgrade`,
   `cleanup`, `bundle` and every query go straight through.
+- `mas install`, `get`, `purchase`, `lucky` and `uninstall` are refused for the
+  same reason: the Brewfile records App Store apps too. There is no
+  `chezmoi-packages` verb for them, so the message says to run the command
+  through `command mas …` and then `chezmoi-packages dump`, which is also what
+  records an app installed through the App Store itself. `set -x
+  DOTFILES_MAS_UNGUARDED 1` turns the guard off for a whole shell. `mas
+  upgrade`, `outdated` and every query go straight through.
 - `khard new`, `edit`, `add-email`, `merge`, `copy`, `move` and `modify` re-add
   the address book afterwards. `set -x DOTFILES_KHARD_UNTRACKED 1` turns that
   off for a change meant to stay on one machine.

@@ -129,18 +129,6 @@ entry from the Brewfile, timed. If it waits, bounding the pass is the fix:
 `tests/lume/entrypoint.sh` has the equivalent in plain bash for a machine where
 it is not.
 
-### `brew` is guarded and `mas` is not
-
-`private_dot_config/private_fish/functions/brew.fish`
-
-The Brewfile records App Store apps as well as formulae and casks, so
-`mas install` and `mas uninstall` desync it exactly as `brew install` does. A
-`mas.fish` alongside `brew.fish`, blocking the same two verbs and naming
-`chezmoi-packages dump`, would close it.
-
-Whether it is worth a second wrapper depends on how often the App Store is used
-outside the bundle.
-
 ### `~/.cargo/bin` holds symlinks that resolve to nothing
 
 `~/.cargo/bin`, where `find -L ~/.cargo/bin -type l` prints anything
