@@ -140,25 +140,3 @@ because the disable is permanent:
 
 The beta key MakeMKV needs while it is in beta rotates about monthly and is
 posted on their forum; none of these routes tracks it.
-
-## Bootstrap
-
-### `03-setup-dock` gives two answers about what a re-run does
-
-`run_once_after_install-03-setup-dock.sh.tmpl`
-
-Line 5 says editing the script re-runs it, "which appends them again". Lines
-18-20 say `dockutil --add` "exits non-zero when the item is already in the
-Dock", and that the trailing echo hides it. Both describe the same re-run and
-they do not agree: one has the apps appended a second time, the other has
-`dockutil` refusing and the failure swallowed.
-
-`README.md` tells anyone whose bootstrap failed to run `chezmoi state
-delete-bucket --bucket=scriptState && chezmoi apply -v`, which re-runs every
-`run_once_` script, and justifies it with "they are written to be safe to
-repeat". That claim rests on this script among others.
-
-Settling it takes one run of `dockutil --add` against an app already in the
-Dock, on a machine where duplicating the Dock is acceptable. Whichever comment
-turns out wrong is deleted, and if the apps do duplicate then the script needs a
-membership check before each add.

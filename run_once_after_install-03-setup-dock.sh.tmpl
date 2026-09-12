@@ -2,7 +2,8 @@
 #!/usr/bin/env bash
 # Appends to the Dock rather than replacing it: there is no `dockutil --remove
 # all` here, so Apple's defaults stay and these six land after them. Editing this
-# script re-runs it (the run_once_ hash changes), which appends them again.
+# script re-runs it, because the run_once_ hash changes; a re-run leaves the Dock
+# as it is, because dockutil refuses an app the Dock already has.
 
 # dockutil comes from the Brewfile, and this runs before any shell has loaded
 # Homebrew's environment. Apple Silicon prefix; an Intel Mac uses /usr/local.
@@ -15,9 +16,10 @@ dockutil --add /Applications/Ghostty.app --after 'Tapestry'
 dockutil --add /System/Applications/Notes.app --after 'Ghostty'
 dockutil --add /System/Applications/Music.app --after 'Notes'
 
-# `dockutil --add` exits non-zero when the item is already in the Dock, which is
-# the ordinary case on a re-run. This echo is the last command, so the script
-# still reports success -- at the cost of hiding a genuine dockutil failure.
+# On a re-run every one of those fails: dockutil prints "<app> already exists in
+# dock. Use --replacing '<app>' to update an existing item", adds nothing, and
+# exits 1. This echo is the last command, so the script still reports success --
+# at the cost of hiding a genuine dockutil failure too.
 echo "Completed Dock setup"
 
 {{ end -}}

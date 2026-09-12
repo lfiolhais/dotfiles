@@ -147,6 +147,9 @@ chezmoi apply -v                                   # run them all again
 ```
 
 That re-runs every `run_once_` script, so they are written to be safe to repeat.
+`03-setup-dock` is the one that looks least safe and is not: `dockutil --add`
+refuses an app the Dock already has, so a repeat adds nothing and leaves the
+Dock in the order it was.
 Editing a script also re-runs it, but reverting the edit restores the original
 hash and it does not run again — the state bucket is the reliable route.
 
