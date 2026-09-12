@@ -129,64 +129,6 @@ entry from the Brewfile, timed. If it waits, bounding the pass is the fix:
 `tests/lume/entrypoint.sh` has the equivalent in plain bash for a machine where
 it is not.
 
-### `~/.cargo/bin` holds symlinks that resolve to nothing
-
-`~/.cargo/bin`, where `find -L ~/.cargo/bin -type l` prints anything
-
-Each entry there is a symlink to `~/.cargo/bin/rustup`, and that one a symlink
-to `/opt/homebrew/bin/rustup-init`. The `rustup` formula provides no binary of
-that name, so none of them resolves; `find -L ~/.cargo/bin -type l` lists them.
-
-Nothing crashes, which is why it goes unnoticed. `fish_add_path --path` keeps
-the directory because the directory itself exists, and `command --query` answers
-no for a symlink pointing at nothing. The guarded commands go quiet, each for
-its own reason:
-
-- `aliases.fish` guards on `command --query cargo`, so `c` and `clippy` are
-  never defined;
-- `update` guards on `command --query rustup`, so its rust step is skipped —
-  but only while `rustup` itself is unreachable. The `rustup` formula puts a
-  working `/opt/homebrew/bin/rustup` on PATH and that step returns, whatever
-  state `~/.cargo/bin` is in.
-
-Putting `/opt/homebrew/opt/rustup/bin` ahead of `~/.cargo/bin` in `exports.fish`
-answers the first, and takes effect at the next apply. Until then a shell has
-neither the dead links nor rustup's directory, and `cargo` and `rustc` are
-absent.
-
-Clearing the dead links is separate and is one line per machine. `aliases.fish`
-aliases `find` to `fd`, which does not take find's predicates, so in a shell
-this repository has configured it is the fd form that works:
-
-```fish
-fd --hidden --no-ignore --type symlink . ~/.cargo/bin \
-   --exec sh -c 'test -e "$1" || echo "$1"' _ {}      # list the dead ones
-fd --hidden --no-ignore --type symlink . ~/.cargo/bin \
-   --exec sh -c 'test -e "$1" || rm "$1"' _ {}        # remove them
-```
-
-`fd` has no broken-symlink predicate, so `--type symlink` selects every link and
-`test -e`, which follows the link, keeps only those pointing at nothing. The
-real `find`, reached past the alias, does it the same way:
-
-```fish
-command find ~/.cargo/bin -type l ! -exec test -e '{}' ';' -delete
-```
-
-The shorter `command find -L ~/.cargo/bin -type l -delete` does not work on
-macOS: BSD find refuses `-delete` whenever `-L` makes it follow symlinks —
-`find: -delete: forbidden when symlinks are followed` — so the brokenness test
-has to be the `-exec`, not the `-L`. It is fine for listing, just not for
-deleting.
-
-All of these delete inside `$HOME`, at a path chezmoi does not manage — nothing
-in this repository writes `~/.cargo/bin`. That is why it is a line to run by
-hand and not a `run_once_` script. The directory still belongs on PATH
-afterwards: it is where `cargo install` puts things.
-
-Done on the Mac this was written on; `find -L ~/.cargo/bin -type l` says
-whether another machine still needs it.
-
 ### anylinuxfs is uninstalled, and the tap may be sound
 
 `private_dot_config/Brewfile`, `.chezmoidata/packages.toml`
