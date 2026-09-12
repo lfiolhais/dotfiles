@@ -72,9 +72,18 @@ mas_limit=3600
 
 run_mas_pass() {
     if command -v gtimeout > /dev/null 2>&1; then
+        # --foreground leaves the pass in this script's process group, which is
+        # the terminal's foreground group, so a prompt it raises can be answered.
+        # Without it gtimeout calls setpgid(2) first, the pass runs in a
+        # background group, and the kernel stops it with SIGTTIN the moment it
+        # reads the terminal: the prompt is on screen and nothing typed reaches
+        # it. The cost is that the ceiling then covers only `brew bundle`
+        # itself, not a `mas` it leaves behind.
+        #
         # 124 when the ceiling is reached, 137 when the pass ignored the TERM
         # that came first and had to be killed.
-        gtimeout --kill-after=30s "${mas_limit}" brew bundle install --file=-
+        gtimeout --foreground --kill-after=30s "${mas_limit}" \
+            brew bundle install --file=-
     else
         brew bundle install --file=-
     fi
