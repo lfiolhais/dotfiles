@@ -6,6 +6,11 @@
 # plist: {{ include "Library/LaunchAgents/xyz.botasal.mount-nas.plist.tmpl" | sha256sum }}
 set -eu
 
+bold=$(tput bold)
+normal=$(tput sgr0)
+
+echo "${bold}===Setup NAS===${normal}"
+
 label="xyz.botasal.mount-nas"
 plist="${HOME}/Library/LaunchAgents/${label}.plist"
 domain="gui/$(id -u)"

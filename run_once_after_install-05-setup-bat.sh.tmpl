@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 set -eu
+
+bold=$(tput bold)
+normal=$(tput sgr0)
+
+echo "${bold}===Setup Bat===${normal}"
+
 {{ if eq .chezmoi.os "darwin" -}}
 eval "$(/opt/homebrew/bin/brew shellenv)"
 {{- else if eq .chezmoi.os "linux" -}}

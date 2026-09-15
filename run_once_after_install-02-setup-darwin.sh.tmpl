@@ -1,6 +1,11 @@
 {{- if eq .chezmoi.os "darwin" -}}
 #!/usr/bin/env bash
 
+bold=$(tput bold)
+normal=$(tput sgr0)
+
+echo "${bold}===Set macOS Settings===${normal}"
+
 # macOS defaults, adapted from https://mths.be/macos and since diverged: check a
 # setting here rather than upstream. Nothing sets -e, so a write that fails is
 # skipped and the rest still run; the script always reports success.

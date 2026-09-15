@@ -9,6 +9,11 @@
 # wrap.c: {{ include "private_dot_config/aerc/private_filters/wrap.c" | sha256sum }}
 set -eu
 
+bold=$(tput bold)
+normal=$(tput sgr0)
+
+echo "${bold}===Setup aerc===${normal}"
+
 filters="${HOME}/.config/aerc/filters"
 
 if ! command -v cc > /dev/null 2>&1; then

@@ -7,6 +7,12 @@
 # This is run_once_, so it prints during the first apply and not again. Re-read it
 # at any time with:
 #     chezmoi execute-template < run_once_after_install-06-setup-mail.sh.tmpl
+
+bold=$(tput bold)
+normal=$(tput sgr0)
+
+echo "${bold}===Setup Mail===${normal}"
+
 echo "Mail needs some setup by hand. Until it is done, mbsync has no"
 echo "credentials and fetches nothing."
 echo

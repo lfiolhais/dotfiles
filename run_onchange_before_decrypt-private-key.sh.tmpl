@@ -10,6 +10,11 @@
 # run_onchange_ rather than run_once_: editing this script re-runs it, and it
 # then does nothing on a machine whose key is already in place.
 
+bold=$(tput bold)
+normal=$(tput sgr0)
+
+echo "${bold}===Decrypt Chezmoi files===${normal}"
+
 if [ ! -f "${HOME}/.config/chezmoi/key.txt" ]; then
     mkdir -p "${HOME}/.config/chezmoi"
     chezmoi age decrypt --output "${HOME}/.config/chezmoi/key.txt" --passphrase "{{ .chezmoi.sourceDir }}/key.txt.age"

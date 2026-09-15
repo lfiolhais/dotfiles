@@ -12,6 +12,11 @@
 # command when it does not.
 set -u
 
+bold=$(tput bold)
+normal=$(tput sgr0)
+
+echo "${bold}===Setup SSH0===${normal}"
+
 keys=("${HOME}/.ssh/id_ed25519" "${HOME}/.ssh/gh_sign")
 
 # Load whatever the Keychain already holds, so a key stored on an earlier run is

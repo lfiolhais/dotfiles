@@ -7,6 +7,11 @@
 # it after a success.
 set -u
 
+bold=$(tput bold)
+normal=$(tput sgr0)
+
+echo "${bold}===Setup Homebrew===${normal}"
+
 brewfile="${HOME}/.config/Brewfile"
 
 if ! command -v brew > /dev/null 2>&1; then
@@ -114,6 +119,8 @@ elif [ "${mas_status}" -ne 0 ]; then
     echo
     echo "'mas list' prints the App Store apps this machine already has."
 fi
+
+echo "${bold}===Setup Rust===${normal}"
 
 # Homebrew does not put rustup's copies of cargo, rustc and rustfmt in
 # /opt/homebrew/bin with everything else. They stay in rustup's own directory,

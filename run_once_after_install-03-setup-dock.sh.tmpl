@@ -5,6 +5,11 @@
 # script re-runs it, because the run_once_ hash changes; dockutil refuses an app
 # the Dock already has, so a re-run leaves the Dock as it is.
 
+bold=$(tput bold)
+normal=$(tput sgr0)
+
+echo "${bold}===Setup Dock===${normal}"
+
 # dockutil comes from the Brewfile, and this runs before any shell has loaded
 # Homebrew's environment. Apple Silicon prefix; an Intel Mac uses /usr/local.
 eval "$(/opt/homebrew/bin/brew shellenv)"

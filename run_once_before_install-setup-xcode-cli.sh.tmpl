@@ -1,6 +1,11 @@
 {{- if eq .chezmoi.os "darwin" -}}
 #!/usr/bin/env bash
 
+bold=$(tput bold)
+normal=$(tput sgr0)
+
+echo "${bold}===Setup Xcode===${normal}"
+
 # The pipeline's status is grep's, since grep ends it: non-zero means either
 # pkgutil found no such package or its output had no version line. Both mean the
 # command-line tools have to be installed.
