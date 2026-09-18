@@ -9,9 +9,11 @@ SUDO="${SUDO:-false}"
 FULL="${FULL:-false}"
 
 # Tools the harness itself needs (the bootstrap installs the rest under --full).
+# openssh and python3 are for the rendered-config checks below: ssh -G reads the
+# ssh config, and tomllib reads the mise config.
 if command -v apt-get > /dev/null 2>&1; then
     apt-get update -qq
-    apt-get install -y -qq curl git shellcheck age
+    apt-get install -y -qq curl git shellcheck age openssh-client python3
 else
     # Fedora carries ShellCheck/age in its base repos; RHEL rebuilds need EPEL --
     # and CRB, which several EPEL packages depend on. The bootstrap script enables
@@ -21,9 +23,12 @@ else
         dnf config-manager --set-enabled crb 2> /dev/null \
             || dnf config-manager --set-enabled powertools 2> /dev/null \
             || true
+        # The rebuilds' default python3 is 3.9, which has no tomllib; their
+        # AppStream repository carries 3.11.
+        dnf install -y -q python3.11
     fi
     # --allowerasing lets curl replace RHEL's curl-minimal instead of conflicting.
-    dnf install -y -q --allowerasing curl git ShellCheck age
+    dnf install -y -q --allowerasing curl git ShellCheck age openssh-clients python3
 fi
 
 sh -c "$(curl -fsLS get.chezmoi.io)" -- -b /usr/local/bin
@@ -45,6 +50,26 @@ EOF
 
 # Render every non-encrypted target: proves templates render for this distro + sudo mode.
 chezmoi archive --source /src --exclude encrypted --output /tmp/state.tar
+
+# Hand the rendered configs to the programs that read them. The host harness
+# does the same for its own render, which on a Mac exercises only the darwin
+# branches; the branches rendered here are what a real machine of this distro
+# and sudo mode reads. ssh rejects a whole config over one unknown option, so a
+# bad Linux branch stops every ssh on the machine.
+mkdir -p /tmp/state
+tar -xf /tmp/state.tar -C /tmp/state
+ssh -G -F /tmp/state/.ssh/config github.com > /dev/null
+git config --list --file /tmp/state/.gitconfig > /dev/null
+if [ "$SUDO" = "false" ]; then
+    # The generated mise config exists on the no-sudo profile alone. A
+    # duplicate key or a syntax slip in it stops mise, the profile's only
+    # package manager.
+    py=python3
+    command -v python3.11 > /dev/null 2>&1 && py=python3.11
+    "$py" -c "import tomllib
+with open('/tmp/state/.config/mise/config.toml', 'rb') as fh:
+    tomllib.load(fh)"
+fi
 
 # Lint the bootstrap scripts that apply to this target (empty renders are gated off).
 for f in /src/run_*.sh /src/run_*.sh.tmpl; do

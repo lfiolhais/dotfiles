@@ -42,6 +42,10 @@ It:
   `fish -n`, rendering the templates first. fish is the login shell, so a parse
   error here is what every new terminal opens with, and nothing else checks it:
   ruff does not read fish and shellcheck refuses it;
+- parses the deployed awk -- aerc's `calendar`, `hldiff` and `plaintext`
+  filters, listed in `AWK_FILES` -- with `awk -f` on empty input, for the same
+  reason: shellcheck refuses awk too, and a filter with a syntax error renders
+  every message of its type as an awk complaint;
 - hands the rendered ssh config to `ssh -G` and the rendered gitconfig to
   `git config --list`, so the programs that read them are what say whether they
   are valid. ssh rejects a whole config file over one option it does not know,
@@ -63,6 +67,16 @@ It:
   next fresh one. A disabled entry fails the harness, a deprecated one warns.
   Fixing it means dropping the entry from the Brewfile and uninstalling the
   package here, since `chezmoi-packages dump` writes back whatever is installed;
+- checks its own hand-maintained lists in the other direction: each list
+  already fails on a file it names that is missing, and this is the reverse --
+  every command under `dot_local/bin/` and every deployed file with a sh, bash,
+  awk or python shebang has to appear in a checked list, so a new deployed
+  script cannot be read by nothing and still deploy;
+- checks that the Linux target matrix spells the same targets everywhere it
+  lives: `linux_distros.TARGET_OF`, the manifest's distro columns, and the
+  branches of `.chezmoitemplates/linux-target`. A distro added to the first two
+  alone falls into the template's apt fallback, and the container harness then
+  checks its names against the wrong repositories with nothing failing;
 - checks the Brewfile against `.chezmoidata/packages.toml`. Every `brew "…"` and
   `uv "…"` entry must be claimed by a `[packages]` entry through its `brew`
   field, which is what stops a `brew bundle dump` on the Mac from silently
@@ -89,13 +103,17 @@ It:
   interpreter: 3.9, on both a fresh macOS and the RHEL rebuilds. `--help` makes
   argparse exit before any git command runs, so nothing is written. A host with
   no `python3` at all is a warning;
-- runs `tests/mountnas.py`, the unit tests for what `mount-nas` decides. Note the
-  name: the tests are `tests/mountnas.py`, the library they exercise is
-  `dot_local/lib/python/mountnas.py`. They stub out the network and every
-  subprocess, so no mount is started and no Keychain is read, and the harness is
-  safe to run with the share mounted and away from home alike. Most of what they
-  assert is a command not being run, since the point of `mount-nas` is to raise
-  no dialog;
+- runs the unit-test suites, each named after the library it exercises:
+  `tests/mountnas.py` for what `mount-nas` decides (most of what it asserts is
+  a command *not* being run, since the point of `mount-nas` is to raise no
+  dialog), `tests/gitwt.py` for the worktree planning, `tests/caskupd.py` for
+  the updater classification, and `tests/chezpkg.py` for what the two package
+  files agreeing means. All of them stub the network and every subprocess, so
+  no mount starts, nothing clones, and no Keychain is read. The 3.9-clean
+  suites run under every interpreter found -- the runtime half of the 3.9
+  floor, since importing proves the syntax and only running the code catches a
+  3.10+ stdlib call inside a function body -- while `chezpkg`'s needs
+  `tomllib` and runs under the harness's own interpreter;
 - runs `chezmoi-packages --help` through `uv run --script`, which is how that
   command really runs: its shebang is a PEP 723 script, so uv supplies both the
   interpreter and `tomlkit`. This proves the dependency block resolves and that
@@ -152,6 +170,11 @@ Runs from any machine with Docker, macOS included. It crosses every distro in
 AlmaLinux — with sudo and no-sudo, and spins up a throwaway
 container per distro-and-sudo combination (`tests/docker/entrypoint.sh`). `--full` is the only flag:
 there is no way to select one target or resume a run.
+
+The entrypoint also hands the rendered ssh config and gitconfig to `ssh -G` and
+`git config --list`, and parses the no-sudo profile's generated mise config as
+TOML -- the Linux branches of files the host harness exercises only as their
+darwin render.
 
 Besides rendering and linting, the entrypoint asks the package manager whether
 every name the manifest targets at that distro resolves (`apt-cache show`,
@@ -407,10 +430,10 @@ is not version-controlled, so enable it once per clone:
 git config core.hooksPath tests/githooks
 ```
 
-The hook runs `check.py` under the same interpreter git invoked it with, so on a
-host whose `python3` is older than 3.11 it reports `pre-push: BLOCKED — harness
-failed` for an interpreter mismatch rather than for anything in the change. Run
-`python3 tests/check.py` directly to see which it is.
+The hook runs `check.py` under the same interpreter git invoked it with. On a
+host whose `python3` is older than 3.11, `check.py` exits with a line naming
+its 3.11 floor, and the hook's output carries it -- a blocked push on a fresh
+Mac is that line, not a fault in the change.
 
 `git push --no-verify` skips the hook. That is the escape hatch for a host that
 cannot run the harness, and it means the next machine to pull is the one that

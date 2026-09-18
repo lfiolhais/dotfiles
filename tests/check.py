@@ -2,12 +2,14 @@
 """Safety harness for the chezmoi dotfiles.
 
 It renders the source, lints the bootstrap scripts and the rest of the deployed
-shell, parses every fish file, hands the ssh config and the gitconfig to the
-programs that read them, refuses a compiled binary in the source, asks Homebrew
+shell and awk, parses every fish file, hands the ssh config and the gitconfig
+to the programs that read them, refuses a compiled binary in the source, checks
+that its own hand-maintained lists cover everything deployed, asks Homebrew
 whether it still installs every Brewfile entry, checks the Brewfile against the
-Linux manifest, lints and imports this repo's Python under every interpreter on
-the host, runs the mount-nas unit tests, and prints a dry-run diff -- without
-touching ``$HOME`` and without running the ``run_*`` bootstrap scripts.
+Linux manifest and the target matrix against its template, lints and imports
+this repo's Python under every interpreter on the host, runs the unit-test
+suites, and prints a dry-run diff -- without touching ``$HOME`` and without
+running the ``run_*`` bootstrap scripts.
 
 Needs Python 3.11: ``enum.StrEnum`` below, and ``tomllib`` inside the manifest
 reader it imports. That is a higher floor than the 3.9 it holds the deployed
@@ -21,11 +23,25 @@ Usage::
 
 from __future__ import annotations
 
+import sys
+
+if sys.version_info < (3, 11):
+    # StrEnum below and tomllib inside the manifest reader arrive in 3.11. On
+    # an older interpreter every import after this line is a bare traceback,
+    # which reads as a broken harness rather than as the requirement it is --
+    # and the pre-push hook runs this under whatever python3 is on PATH, which
+    # on a fresh Mac is Apple's 3.9.
+    sys.exit(
+        "tests/check.py needs Python 3.11 or newer; this is Python "
+        + ".".join(str(part) for part in sys.version_info[:3])
+        + ". Run it with a newer python3 -- Homebrew's, or the distro's.",
+    )
+
 import itertools
 import json
+import re
 import shutil
 import subprocess
-import sys
 import tempfile
 from dataclasses import dataclass
 from enum import StrEnum
@@ -39,6 +55,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "dot_local" / "lib" / "python"))
 
 from chezpkg import TARGETS, Brewfile, Manifest
+from linux_distros import TARGET_OF
 
 REPO = Path(__file__).resolve().parent.parent
 BREWFILE = REPO / "private_dot_config" / "Brewfile"
@@ -66,10 +83,30 @@ DEPLOYED_ENTRY_POINTS = (
     REPO / "dot_local" / "bin" / "executable_cask-updates",
     REPO / "dot_local" / "bin" / "executable_mount-nas",
 )
-# The one part of this repo with unit tests of its own: what mount-nas decides
-# is a table of outcomes, and most of them assert that no command was run --
-# being silent away from home is the behaviour, so it is what has to be tested.
-MOUNTNAS_TESTS = REPO / "tests" / "mountnas.py"
+# The unit-test suites, each named after the library it exercises. All of them
+# stub subprocess and the network, so nothing mounts, clones, or writes. The
+# 3.9-clean ones run under every interpreter `_interpreters()` finds, which is
+# the runtime half of the 3.9 floor: the import check above proves the syntax
+# parses, and only running the code catches a 3.10+ stdlib call inside a
+# function body. `chezpkg`'s suite needs tomllib, so it runs under this
+# harness's own 3.11+ interpreter alone.
+UNIT_TESTS_39 = (
+    REPO / "tests" / "mountnas.py",
+    REPO / "tests" / "gitwt.py",
+    REPO / "tests" / "caskupd.py",
+)
+UNIT_TESTS_311 = (REPO / "tests" / "chezpkg.py",)
+# The render-time half of the Linux target matrix; the Python half is
+# `linux_distros.TARGET_OF` and the manifest columns in `chezpkg.TARGETS`.
+LINUX_TARGET_TEMPLATE = REPO / ".chezmoitemplates" / "linux-target"
+# Deployed awk, listed by hand like SHELL_FILES: shellcheck refuses awk, ruff
+# does not read it, and an aerc filter with a syntax error renders every
+# message of its type as an awk complaint.
+AWK_FILES = (
+    REPO / "private_dot_config" / "aerc" / "private_filters" / "executable_calendar",
+    REPO / "private_dot_config" / "aerc" / "private_filters" / "executable_hldiff",
+    REPO / "private_dot_config" / "aerc" / "private_filters" / "executable_plaintext",
+)
 # Deployed Python that ruff would not otherwise find: it lives outside tests/,
 # and the entry points have no .py extension because they are commands.
 DEPLOYED_PYTHON = (*sorted(LIB_PYTHON.glob("*.py")), *DEPLOYED_ENTRY_POINTS, CHEZMOI_PACKAGES)
@@ -548,27 +585,185 @@ def check_python_imports() -> Result:
     return Result(Status.OK, f"python: imports clean ({len(interpreters)} interpreter(s))")
 
 
-def check_mountnas() -> Result:
-    """Run the NAS mount unit tests.
+def _run_suite(tests: Path, interpreters: list[str]) -> Result:
+    """Run one unit-test file under each of these interpreters.
 
-    They stub out the network and every subprocess, so this starts no mount and
-    reads no Keychain -- safe with the share mounted and away from home alike.
+    Args:
+        tests: The test file, named after the library it exercises.
+        interpreters: The python3 executables to run it under.
 
     Returns:
-        A failing result if any test fails, a warning if the host has no
-        python3, otherwise a passing result.
+        A failing result naming the interpreter that failed, otherwise a
+        passing result with the suite's own tally.
+
+    """
+    tally = ""
+    for interp in interpreters:
+        # -B: never leave a __pycache__ behind in the source directory.
+        tested = run(interp, "-B", str(tests))
+        if not tested.ok:
+            return Result(Status.FAIL, f"{tests.stem} unit tests ({interp})", tested.output)
+        tally = tested.output.splitlines()[-1] if tested.output else ""
+
+    return Result(Status.OK, f"{tests.stem}: {tally} ({len(interpreters)} interpreter(s))")
+
+
+def check_unit_tests() -> list[Result]:
+    """Run every unit-test suite, the 3.9-clean ones under every interpreter.
+
+    They stub out the network and every subprocess, so this starts no mount,
+    clones nothing, and reads no Keychain -- safe with the share mounted and
+    away from home alike.
+
+    Returns:
+        One result per suite, or a single warning if the host has no python3.
 
     """
     interpreters = _interpreters()
     if not interpreters:
-        return Result(Status.WARN, "mount-nas tests skipped (no python3 found)")
+        return [Result(Status.WARN, "unit tests skipped (no python3 found)")]
 
-    # -B: never leave a __pycache__ behind in the source directory.
-    tested = run(interpreters[0], "-B", str(MOUNTNAS_TESTS))
-    if not tested.ok:
-        return Result(Status.FAIL, "mount-nas unit tests", tested.output)
+    results = [_run_suite(tests, interpreters) for tests in UNIT_TESTS_39]
+    results += [_run_suite(tests, [sys.executable]) for tests in UNIT_TESTS_311]
 
-    return Result(Status.OK, f"mount-nas: {tested.output.splitlines()[-1]}")
+    return results
+
+
+def check_target_matrix() -> Result:
+    """Check the three spellings of the Linux target matrix agree.
+
+    The targets live in three places: ``TARGET_OF`` maps each distro onto its
+    manifest column, ``TARGETS`` is the column set the manifest accepts, and
+    ``.chezmoitemplates/linux-target`` dispatches a machine onto a column at
+    render time. A distro added to the first two but not the template falls
+    into the template's apt fallback, and the container harness then checks
+    that distro's names against the wrong repositories with nothing failing.
+
+    Returns:
+        A failing result naming each disagreement, otherwise a passing result.
+
+    """
+    spoken = set(TARGET_OF.values())
+    columns = TARGETS - {"mise"}
+    template = LINUX_TARGET_TEMPLATE.read_text(encoding="utf-8")
+
+    problems = []
+    if spoken != columns:
+        problems.append(
+            f"TARGET_OF speaks for {sorted(spoken)}; the manifest's distro "
+            f"columns are {sorted(columns)}",
+        )
+    problems += [
+        f"{target!r} is not a branch of .chezmoitemplates/linux-target"
+        for target in sorted(spoken)
+        if not re.search(rf"^{re.escape(target)}$", template, flags=re.MULTILINE)
+    ]
+
+    if problems:
+        return Result(Status.FAIL, "Linux target matrix", "\n".join(problems))
+
+    return Result(Status.OK, "Linux target matrix agrees in all three spellings")
+
+
+def check_awk_files() -> list[Result]:
+    """Parse the deployed awk with awk itself.
+
+    ``awk -f`` reads the whole program before its first input line, and stdin
+    is empty here, so a syntax error is reported and a valid filter does
+    nothing.
+
+    Returns:
+        One result per file in ``AWK_FILES``.
+
+    """
+    results = []
+    for path in AWK_FILES:
+        rel = path.relative_to(REPO)
+        if not path.exists():
+            results.append(Result(Status.FAIL, f"{rel}: missing", "listed in AWK_FILES"))
+            continue
+        parsed = run("awk", "-f", str(path))
+        if parsed.missing:
+            return [Result(Status.WARN, "awk files not parsed (awk not installed)")]
+        if not parsed.ok:
+            results.append(Result(Status.FAIL, f"{rel}: awk syntax", parsed.output))
+        else:
+            results.append(Result(Status.OK, str(rel)))
+    return results
+
+
+def _shebang(path: Path) -> str:
+    """Read the interpreter a deployed file names on its first line.
+
+    Args:
+        path: The file to read.
+
+    Returns:
+        The first line when it is a shebang, otherwise the empty string.
+
+    """
+    with path.open("rb") as handle:
+        first = handle.readline(120)
+    if not first.startswith(b"#!"):
+        return ""
+    return first.decode("utf-8", errors="replace").strip()
+
+
+def check_coverage() -> Result:
+    """Check the hand-maintained lists cover everything actually deployed.
+
+    Each list fails when a file it names is missing; this is the other
+    direction, which nothing else reports: a new command under
+    ``dot_local/bin/``, or a new deployed script, is linted and imported by
+    nothing until it is named in a list -- and it deploys anyway.
+
+    Returns:
+        A failing result naming each uncovered file and the list it belongs
+        in, otherwise a passing result.
+
+    """
+    known_bin = {*DEPLOYED_ENTRY_POINTS, CHEZMOI_PACKAGES}
+    covered_python = set(DEPLOYED_PYTHON)
+    covered_shell = {*SHELL_FILES, *_scripts()}
+
+    uncovered = [
+        f"{path.relative_to(REPO)}: a deployed command; add it to DEPLOYED_ENTRY_POINTS"
+        for path in sorted((REPO / "dot_local" / "bin").glob("executable_*"))
+        if path not in known_bin
+    ]
+
+    wants = (
+        ("sh", covered_shell, "SHELL_FILES"),
+        ("bash", covered_shell, "SHELL_FILES"),
+        ("awk", set(AWK_FILES), "AWK_FILES"),
+        ("python3", covered_python | known_bin, "DEPLOYED_PYTHON"),
+    )
+    for path in sorted(REPO.rglob("*")):
+        rel = path.relative_to(REPO)
+        if not path.is_file() or path.is_symlink() or path in known_bin:
+            continue
+        if rel.parts[0] in {".git", ".claude", ".ruff_cache", "tests"}:
+            continue
+        shebang = _shebang(path)
+        if not shebang:
+            continue
+        # The interpreter is the first non-flag token's basename, looked up
+        # through `env` when the shebang goes that way -- so `/usr/bin/awk -f`,
+        # `/bin/sh` and `/usr/bin/env bash` all name their program.
+        names = [Path(token).name for token in shebang[2:].split() if not token.startswith("-")]
+        if names and names[0] == "env":
+            names = names[1:]
+        interpreter = names[0] if names else ""
+        uncovered += [
+            f"{rel}: deployed {name} that no check reads; add it to {where}"
+            for name, covered, where in wants
+            if interpreter == name and path not in covered
+        ]
+
+    if uncovered:
+        return Result(Status.FAIL, "deployed but checked by nothing", "\n".join(uncovered))
+
+    return Result(Status.OK, "every deployed script and command is in a checked list")
 
 
 def check_uv_script() -> Result:
@@ -805,13 +1000,16 @@ def main() -> int:
             check_fish(workdir),
             check_ssh_config(workdir),
             check_gitconfig(workdir),
+            *check_awk_files(),
             check_source_is_text(),
+            check_coverage(),
             check_brewfile(),
             check_brew_disabled(),
             check_package_parity(),
+            check_target_matrix(),
             check_python(),
             check_python_imports(),
-            check_mountnas(),
+            *check_unit_tests(),
             check_uv_script(),
         ]
         hard_failure = _report(results)
