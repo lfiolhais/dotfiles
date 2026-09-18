@@ -30,8 +30,8 @@ function brew --wraps brew --description "brew, with the subcommands that desync
     echo "    chezmoi-packages remove NAME   uninstall it and drop the record" >&2
     echo "    chezmoi-packages dump          re-read this machine into the Brewfile" >&2
     echo >&2
-    echo "To reach brew itself anyway -- debugging brew, or a package you do not" >&2
-    echo "want recorded -- either bypass this function for one command:" >&2
+    echo "To reach brew itself anyway -- debugging brew, or a package that should" >&2
+    echo "not be recorded -- either bypass this function for one command:" >&2
     echo >&2
     echo "    command brew $argv" >&2
     echo >&2

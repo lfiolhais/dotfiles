@@ -1,10 +1,10 @@
 {{- if eq .chezmoi.os "linux" -}}
 #!/usr/bin/env bash
 # Two profiles:
-#   * sudo:    native package manager (apt/dnf), plus gh and starship from their
-#              own repo/installer -- the only two exceptions, because neither is
-#              in any base repository. A tool the distro does not package is
-#              simply not installed.
+#   * sudo:    native package manager (apt/dnf), plus the two exceptions outside
+#              the distro's own set: gh from GitHub's repository (Fedora's dnf
+#              carries it itself) and starship from its installer. A tool the
+#              distro does not package is simply not installed.
 #   * no-sudo: rootless mise under ~/.local -- the only option without root.
 #
 # The package names come from .chezmoidata/packages.toml, which maps every
@@ -94,9 +94,13 @@ if ! command -v mise > /dev/null 2>&1 && [ ! -x "$HOME/.local/bin/mise" ]; then
     # Downloaded to a file first: a pipeline's status is the last command's,
     # and sh reading empty stdin after a failed curl exits 0 with nothing
     # installed -- the file form makes `set -e` stop on the curl instead.
+    #
+    # MISE_VERSION pins the release the installer fetches, so a fresh machine
+    # gets a known mise rather than whatever mise.run serves on apply day; the
+    # `update` fish function is what moves past the pin, via self-update.
     mise_install="$(mktemp)"
     curl -fsSL https://mise.run -o "${mise_install}"
-    sh "${mise_install}"
+    MISE_VERSION=v2026.9.11 sh "${mise_install}"
     rm "${mise_install}"
 fi
 export PATH="$HOME/.local/bin:$PATH"

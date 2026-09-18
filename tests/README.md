@@ -1,5 +1,8 @@
 # Test harness
 
+The harness for the chezmoi source directory the top-level
+[README](../README.md) documents; that file is assumed read.
+
 Other machines pull `main`, so a broken `main` breaks them. These are what stands
 between a change and that: `render-matrix.sh` parses every template for every
 profile in seconds, `check.py` validates the current host, `linux.py` the Linux
@@ -78,7 +81,7 @@ It:
   modules are globbed rather than listed, so splitting one in two keeps it
   covered; a new entry point has to be added to `DEPLOYED_ENTRY_POINTS`;
 - imports each deployed library (`caskupd`, `gitwt`, `linux_distros`,
-  `mountnas`) and runs the four stdlib entry points' `--help` under every
+  `mountnas`) and runs the stdlib entry points' `--help` under every
   `python3` on the host — `chezmoi-packages` is excluded here and exercised
   through uv below, since uv supplies its interpreter — `which python3`, `/usr/bin/python3`, and the interpreter running the
   harness, deduplicated. `ruff` never executes anything, so this is what catches
@@ -159,12 +162,9 @@ of each distro only: the names do not vary with the sudo flag, and the no-sudo
 profile's mise names are exercised by `mise install` under `--full`.
 
 A failure lists the offending names. The manifest is generated, so correct them
-by re-running `chezmoi-packages add` with the right flags rather than editing
-`.chezmoidata/packages.toml`:
-
-```sh
-chezmoi-packages add ripgrep --no-install --apt ripgrep --fedora ripgrep --mise ripgrep
-```
+by re-running `chezmoi-packages add` with `--no-install` and the corrected
+flags rather than editing `.chezmoidata/packages.toml` — "Adding a package" in
+the top-level [README](../README.md) walks it.
 
 `--full` on the sudo targets installs the full toolchain, TeX included: expect
 several gigabytes and a long run.
@@ -182,8 +182,9 @@ python3 tests/linux.py --full
 ```
 
 Without one, mise reports `mise WARN GitHub rate limit exceeded` followed by
-`mise ERROR Failed to install tools`; the limit resets on the hour, and the whole
-eight-target run has to start again.
+`mise ERROR Failed to install tools`; the limit resets on the hour, and the
+whole run — every distro in `IMAGES` crossed with sudo and no-sudo — has to
+start again.
 
 Packages are edited with `chezmoi-packages`, a deployed command
 (`dot_local/bin/executable_chezmoi-packages`) documented in the Packages section

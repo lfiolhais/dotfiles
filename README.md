@@ -40,9 +40,19 @@ sh -c "$(curl -fsLS get.chezmoi.io)" -- -b ~/.local/bin
 
 On a Mac that already has Homebrew, `command brew install chezmoi` is
 equivalent — `command` because fish, the shell this repository installs and
-makes the login shell, wraps `brew` to block a bare `brew install`. There are
-no other prerequisites — the bootstrap installs everything else, including
-Homebrew.
+makes the login shell, wraps `brew` to block a bare `brew install`. The
+bootstrap installs everything else, including Homebrew. What it cannot supply
+has to exist first:
+
+- The passphrase for `key.txt.age`. It unlocks the mail configs, contacts and
+  SSH keys, is in neither this repository nor anything it deploys, and cannot
+  be recovered from either — it has to be brought to the machine. The
+  passphrase prompt below covers installing without it.
+- An administrator account: Homebrew's installer, `/etc/shells` and the root
+  settings in `02-setup-darwin` all go through sudo.
+- For the Mac App Store apps, an Apple ID signed in to App Store.app. The
+  sign-in can happen later; "What the first apply changes" says what the
+  bootstrap does until then.
 
 ### One command
 
@@ -52,7 +62,11 @@ Homebrew.
 
 `init` clones the repository into `~/.local/share/chezmoi`, which is the source
 directory and the only copy to edit. `--apply` then renders it into `$HOME` and
-runs the bootstrap scripts. Add `--ssh` to clone over SSH rather than HTTPS.
+runs the bootstrap scripts. `lfiolhais/dotfiles` is this repository's GitHub
+path, cloned anonymously over HTTPS; a fork installs by its own path. Add
+`--ssh` to clone over SSH instead — it needs a key GitHub already accepts, and
+a machine that has never applied this repository holds none of its keys, so a
+blank machine's first clone is HTTPS.
 
 Prompts interrupt it:
 
@@ -91,8 +105,8 @@ reversible operation. In order:
 | ---                          | ---                                                                        |
 | `setup-xcode-cli`            | installs Xcode Command Line Tools and Rosetta 2                            |
 | `decrypt-private-key`        | writes `~/.config/chezmoi/key.txt`                                         |
-| `01-install-packages-darwin` | updates or installs Homebrew, then the whole Brewfile, then Rust's stable toolchain |
-| `01-install-packages-linux`  | apt/dnf and the `gh`/`starship` repos, or a rootless mise                  |
+| `01-install-packages-darwin` | updates or installs Homebrew, then the whole Brewfile — the list of everything macOS installs — then Rust's stable toolchain |
+| `01-install-packages-linux`  | apt/dnf, plus `starship` (the shell prompt) from its installer and `gh` (GitHub's CLI) from GitHub's repository — Fedora's dnf carries `gh` itself — or a rootless mise |
 | `02-setup-darwin` | rewrites preferences across the Dock, Finder, Safari, trackpad, keyboard, screenshots and Software Update, then kills the affected apps to reload them |
 | `03-setup-dock`              | appends the apps it names to the Dock, leaving existing items in place     |
 | `04-setup-fish`              | adds fish to `/etc/shells` and makes it the login shell with `chsh`        |
@@ -149,7 +163,20 @@ chezmoi status      # prints nothing when the target matches the source
 chezmoi doctor      # chezmoi's own environment check
 ```
 
+`doctor` prints one row per check, first column `ok`, `info`, `warning`,
+`skipped` or `failed`. The `failed` rows are the ones to fix; `warning` rows —
+a dirty source tree, say — accompany normal use.
+
 `exec fish` starts the new shell without logging out.
+
+On a machine that will push this repository, turn on the hook that keeps a
+broken `main` from reaching the other machines — `core.hooksPath` is a local
+git setting, so this is once per clone, from the source directory
+(`chezmoi cd`):
+
+```sh
+git config core.hooksPath tests/githooks
+```
 
 ### When a bootstrap script fails
 
@@ -160,9 +187,12 @@ that fail for different reasons — and instead checks `brew bundle` itself: it
 exits non-zero when anything but the App Store failed, so that case is retried
 too, and reports an App Store failure without stopping the apply.
 
-`02`, `03`, `06`, `setup-xcode-cli` and the decrypt script set no `-e` and are
-not checked, so a command that fails inside one of them leaves the script exiting
-0 and recorded. Clearing the record is what re-runs one:
+`02`, `03`, `06` and the decrypt script set no `-e` and are not checked, so a
+command that fails inside one of them leaves the script exiting 0 and recorded.
+`setup-xcode-cli` is the same apart from two failure points — the tools-install
+timeout and a failed Rosetta install — each of which exits 1, stops the apply,
+and is not recorded, so the next apply retries it. Clearing the record is what
+re-runs one:
 
 ```sh
 chezmoi state delete-bucket --bucket=scriptState   # forget every run_once_ hash
@@ -170,8 +200,9 @@ chezmoi apply -v                                   # run them all again
 ```
 
 That re-runs every `run_once_` script, so they are written to be safe to repeat.
-`dockutil --add` refuses an app the Dock already has, so re-running
-`03-setup-dock` adds nothing and leaves the Dock in the order it was.
+`03-setup-dock` drives dockutil, a command-line Dock editor from the Brewfile,
+whose `--add` refuses an app the Dock already has — so a re-run adds nothing
+and leaves the Dock in the order it was.
 Editing a script also re-runs it, but reverting the edit restores the original
 hash and it does not run again — the state bucket is the reliable route.
 
@@ -218,8 +249,9 @@ chezmoi edit ~/.notmuch-config      # not the .age blob in the source directory
 ```
 
 `update` walks every package manager on the machine — brew and mas, apt or dnf,
-mise, rustup, uv — skipping the ones that are absent and listing failures at the
-end rather than stopping at the first. It deliberately leaves `chezmoi update`
+mise, rustup (the Rust toolchain manager) and uv (the installer for the
+Brewfile's Python tools) — skipping the ones that are absent and listing
+failures at the end rather than stopping at the first. It deliberately leaves `chezmoi update`
 alone, because applying dotfiles can re-run bootstrap scripts.
 
 ## Commands
@@ -236,11 +268,12 @@ These deploy to `~/.local/bin`, which is on `PATH` on every profile.
 
 `git-wt-clone` names the folder after the repository when no directory is given,
 and creates the default branch's worktree straight away, tracking `origin`.
-`git-wt-add` creates a branch that does not exist yet. A branch already on
-`origin` tracks it; a tag or commit is checked out detached; a brand-new branch
-is left with no upstream, so `git push` with `push.autoSetupRemote` publishes it
-as `origin/<branch>` rather than refusing because the branch it forked from has
-a different name.
+`git-wt-add` creates a branch that does not exist yet, confirming first when
+run at a terminal — a typo'd ref would otherwise silently become a branch and
+a folder. A branch already on `origin` tracks it; a tag or commit is checked
+out detached; a brand-new branch is left with no upstream, so `git push` with
+`push.autoSetupRemote` publishes it as `origin/<branch>` rather than refusing
+because the branch it forked from has a different name.
 
 The fish functions live in `~/.config/fish/functions`, one function per file,
 named after the function. `functions -v <name>` prints what each one is for.
@@ -252,7 +285,7 @@ The ones that come up:
 | `chezmoi-sync`  | pull this machine's configuration back into the source state          |
 | `brew`          | Homebrew, with the subcommands that desync the Brewfile blocked       |
 | `mas`           | the App Store, with the same subcommands blocked                      |
-| `khard`         | khard, recording every contact it writes in the source state          |
+| `khard`         | the khard address book (see [Contacts](#contacts)), recording every contact it writes in the source state |
 | `khard-status`  | which contacts differ between this machine and the source, by name    |
 | `khard-rm`      | delete contacts and drop them from the source state                   |
 | `khard-track`   | record a contact by hand (see [Contacts](#contacts))                  |
@@ -502,7 +535,8 @@ run needs no list to be updated anywhere.
 
 `update` runs `disable` on every macOS run. Nothing inside an app bundle is
 touched, so no code signature is disturbed, and `enable` puts every app back as
-it was found — the keys are deleted rather than set true.
+it was found — the keys `disable` wrote are deleted rather than set true, and a
+value set by hand in an app's own preferences is left in place.
 
 Apps installed by hand are never touched. Homebrew does not know about them, so
 nothing else would update them.
@@ -520,8 +554,9 @@ $EDITOR dot_local/lib/python/caskupd_app.py
 chezmoi apply -v
 ```
 
-Apps that update through Keystone, Electron or their own installer expose no
-preference key worth chasing. `status` lists them by name, and
+Apps that update through Keystone (Google's updater), an Electron app's
+built-in updater, or their own installer expose no preference key worth
+chasing. `status` lists them by name, and
 `brew upgrade --greedy` owns their versions whenever it wins the race.
 
 ## Mounting the NAS
@@ -789,7 +824,8 @@ is configured to change the Unix login password to match. A `Yes` is a
 configuration rather than a result: the change is handed to PAM where
 `pam password change = Yes`, and to the `passwd program` chat otherwise, and it
 stays silent when either fails, leaving the two passwords different while the
-setting says they agree. `chage -l lfiolhais` settles which happened, since its
+setting says they agree. (PAM — Pluggable Authentication Modules — is the
+system's login machinery.) `chage -l lfiolhais` settles which happened, since its
 `Last password change` moves whenever the sync really runs, even where the
 password it sets is the one already there.
 
@@ -875,12 +911,14 @@ notmuch indexes it for searching, aerc is the terminal mail reader, and msmtp
 sends. All four come from the Brewfile and the manifest, and mbsync is what the
 isync package installs. The isync and notmuch configs are age-encrypted here;
 passwords are not in this repository at all. On macOS they live in the login
-Keychain, on Linux in `pass`.
+Keychain, on Linux in `pass`, the GnuPG-backed password store.
 
-`06-setup-mail` prints the steps for the current OS during the bootstrap and
-changes nothing itself, so it can be read at any time:
+`06-setup-mail` prints the steps for the current OS during the bootstrap —
+the commands that seed the passwords included — and changes nothing itself, so
+it can be re-read at any time from the source directory:
 
 ```sh
+chezmoi cd
 chezmoi execute-template < run_once_after_install-06-setup-mail.sh.tmpl
 ```
 
@@ -937,7 +975,8 @@ the conditional matches the URL as written:
 	path = ~/.config/git/dco.inc
 ```
 
-`hasconfig:remote.*.url` needs git 2.36.
+`hasconfig:remote.*.url` needs git 2.36; `git --version` says whether this
+machine's qualifies.
 
 ## Adding to this repository
 
@@ -963,6 +1002,20 @@ has one that re-exports the rest, and that name is the command's only import.
 Adding the command to `DEPLOYED_ENTRY_POINTS` in `tests/check.py` is what runs
 its `--help` under every `python3` on the host and puts it under ruff.
 
+Python here passes `ruff check` and `ruff format` with the config in
+`tests/pyproject.toml`, which also enforces Google-style docstrings —
+`Args:`/`Returns:` sections on every public function. The deployed libraries
+stay Python 3.9-clean and standard-library-only, because a fresh Mac and the
+RHEL rebuilds ship 3.9 — except `chezpkg`, which uv runs on an interpreter it
+supplies. `tests/check.py` imports each library under every `python3` on the
+host, which is what catches a construct ruff cannot see. The same checks run
+from the `pre-push` hook, and by hand:
+
+```sh
+ruff check --config tests/pyproject.toml dot_local/lib/python dot_local/bin tests/*.py
+ruff format --check --config tests/pyproject.toml dot_local/lib/python dot_local/bin tests/*.py
+```
+
 Nothing a program writes is tracked — a compiled filter, a cache, an editor's
 state. Track what it is built from and build it in a `run_onchange_` script.
 `tests/check.py` fails on a compiled binary or a program-written name anywhere
@@ -986,11 +1039,7 @@ header says what that render can and cannot prove.
 age key; [tests/README.md](tests/README.md) lists what it needs installed.
 
 Other machines pull `main`, so a broken `main` breaks them. A `pre-push` hook
-runs `check.py` before any push to `main`; `core.hooksPath` is a local git
-setting, so enable it once per clone:
-
-```sh
-git config core.hooksPath tests/githooks
-```
+runs `check.py` before any push to `main`; enabling it is part of installing,
+and the command is under "Confirming it worked".
 
 [tests/README.md](tests/README.md) documents the harness and the hook in full.
