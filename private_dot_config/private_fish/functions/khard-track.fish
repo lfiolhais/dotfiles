@@ -1,7 +1,31 @@
 function khard-track --description "Record khard contacts in the chezmoi source so they reach other machines"
+    set -l options (fish_opt --short=h --long=help)
+    set options $options (fish_opt --short=a --long=addressbook --required-val)
+    argparse $options -- $argv
+    or return 1
+
+    if set -q _flag_help
+        echo "khard-track [-h|--help] [-a|--addressbook NAME]"
+        echo -e "\t-h | --help        => Prints this message"
+        echo -e "\t-a | --addressbook => Address book to record. Defaults to 'work'"
+        return 0
+    end
+
     if not command -q chezmoi
         set_color red
         echo "khard-track: chezmoi is not installed" >&2
+        set_color normal
+        return 1
+    end
+
+    set -l abook work
+    if set -q _flag_addressbook
+        set abook $_flag_addressbook
+    end
+
+    if not test -d "$HOME/.config/khard/$abook/default"
+        set_color red
+        echo "khard-track: no address book '$abook' under ~/.config/khard" >&2
         set_color normal
         return 1
     end
@@ -10,16 +34,17 @@ function khard-track --description "Record khard contacts in the chezmoi source 
     # exists on this machine and nowhere else: a reinstall, or a second machine,
     # never sees it, and nothing reports that because an untracked file is not a
     # difference chezmoi knows about. The khard wrapper does this after every
-    # write, for every address book under ~/.config/khard; this adds the work
-    # book alone, and is safe to run at any time.
+    # write, for every address book under ~/.config/khard; this adds one book
+    # at a time -- work, unless -a names another -- and is safe to run at any
+    # time.
     #
     # --encrypt keeps every card an age blob in the source, and --exact keeps
     # the exact_ prefix on the directory, which is what carries a deletion from
     # one machine to the rest. The khard wrapper passes both for the same
     # reasons.
-    chezmoi add --encrypt --exact ~/.config/khard/work/default
+    chezmoi add --encrypt --exact "$HOME/.config/khard/$abook/default"
     or return 1
 
-    echo "Tracked. 'khard-status' lists any contact still loose, by name."
+    echo "Tracked. 'khard-status -a $abook' lists any contact still loose, by name."
     echo "Review with 'chezmoi diff', then commit in "(chezmoi source-path)
 end
