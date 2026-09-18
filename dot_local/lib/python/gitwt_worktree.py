@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -60,7 +61,12 @@ class Worktree:
         return cls(plan.path, plan.kind, "already checked out")
 
     @classmethod
-    def add_worktree(cls, repo: Repo, ref: str) -> Worktree:
+    def add_worktree(
+        cls,
+        repo: Repo,
+        ref: str,
+        confirm_new: Callable[[str], bool] | None = None,
+    ) -> Worktree:
         """Check a ref out into its own folder beside the bare clone.
 
         A branch is checked out as a branch, tracking its remote when it exists only
@@ -72,9 +78,17 @@ class Worktree:
         Args:
             repo: The layout to add to.
             ref: A branch, tag, commit, or new branch name.
+            confirm_new: Called with the default branch's name when ``ref``
+                still matches nothing after the fetch, before the new branch
+                and its folder exist -- the moment a typo is still free to
+                abandon. None creates the branch without asking, which is what
+                a non-interactive caller wants.
 
         Returns:
             The worktree, whether it was just created or was already there.
+
+        Raises:
+            GitWtError: If ``confirm_new`` declined the new branch.
 
         """
         kind = RefKind.resolve(repo, ref)
@@ -82,6 +96,14 @@ class Worktree:
             # Only pay for the network when the ref is genuinely unfamiliar.
             repo.fetch()
             kind = RefKind.resolve(repo, ref)
+
+        if (
+            kind is RefKind.UNKNOWN
+            and confirm_new is not None
+            and not confirm_new(repo.default_branch())
+        ):
+            msg = f"{ref!r} matches no branch, tag or commit; nothing created"
+            raise GitWtError(msg)
 
         plan = Plan.from_repo(repo, ref, kind)
 

@@ -93,9 +93,13 @@ class Repo:
             The new repository, with its remote-tracking refs already fetched.
 
         Raises:
-            GitWtError: If ``dest`` already exists and is not empty.
+            GitWtError: If ``dest`` already exists as anything but an empty
+                directory.
 
         """
+        if dest.exists() and not dest.is_dir():
+            msg = f"{dest} already exists and is not a directory"
+            raise GitWtError(msg)
         if dest.exists() and any(dest.iterdir()):
             msg = f"{dest} already exists and is not empty"
             raise GitWtError(msg)

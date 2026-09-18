@@ -13,10 +13,12 @@ How the argument is treated:
 - a tag or commit is checked out detached, since moving a branch onto a tag is
   never what was meant;
 - anything unknown triggers one fetch, and if it is still unknown it becomes a
-  new branch off the default branch, deliberately with **no** upstream: git would
-  otherwise track the branch it forked from, whose name differs, and ``git push``
-  refuses that. The first push sets the upstream to ``origin/<ref>`` instead,
-  provided ``push.autoSetupRemote`` is on.
+  new branch off the default branch -- after a confirmation when run at a
+  terminal, because a typo'd branch name lands here too. The new branch
+  deliberately has **no** upstream: git would otherwise track the branch it
+  forked from, whose name differs, and ``git push`` refuses that. The first
+  push sets the upstream to ``origin/<ref>`` instead, provided
+  ``push.autoSetupRemote`` is on.
 
 The worktree path is printed on stdout, so ``cd (git wt-add <ref>)`` lands
 straight into it.
@@ -49,9 +51,28 @@ def main() -> int:
     parser.add_argument("ref", help="branch, tag, commit, or new branch name")
     args = parser.parse_args()
 
+    def confirm_new(default: str) -> bool:
+        """Ask before a ref that matches nothing becomes a new branch.
+
+        Args:
+            default: The default branch the new branch would fork from.
+
+        Returns:
+            True to create it. Without a terminal there is nobody to ask, so a
+            scripted caller keeps the old unconditional behaviour.
+
+        """
+        if not sys.stdin.isatty():
+            return True
+        answer = input(
+            f"git-wt-add: {args.ref!r} matches no branch, tag or commit; "
+            f"create it as a new branch off {default}? [y/N] ",
+        )
+        return answer.strip().lower() in {"y", "yes"}
+
     try:
         repo = Repo.discover(Path.cwd())
-        worktree = Worktree.add_worktree(repo, args.ref)
+        worktree = Worktree.add_worktree(repo, args.ref, confirm_new=confirm_new)
     except GitWtError as exc:
         print(f"git-wt-add: {exc}", file=sys.stderr)
         return 1
