@@ -18,6 +18,11 @@ function __print_help_chezmoi_sync
     echo
     echo -e "\tNothing is committed. The source directory's git status is printed"
     echo -e "\tlast so the change can be reviewed and committed by hand."
+    echo
+    echo -e "\tRun 'chezmoi apply' first on a machine that has pulled source"
+    echo -e "\tchanges it has not applied: re-add copies the target over the"
+    echo -e "\tsource, so an unapplied pulled edit is reverted, and the"
+    echo -e "\treversion shows only as a modification in that final git status."
 end
 
 function chezmoi-sync --description "Pull this machine's configuration back into the chezmoi source state"
@@ -44,6 +49,8 @@ function chezmoi-sync --description "Pull this machine's configuration back into
     set_color --bold blue
     echo "==> re-adding managed files"
     set_color normal
+    echo "(the machine wins over the source: a pulled change not yet applied is"
+    echo " reverted here -- 'chezmoi apply' first when one is waiting)"
     if set -q _flag_dry_run
         echo "(dry run: nothing re-added)"
     else
