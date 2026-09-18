@@ -71,6 +71,11 @@ def main() -> int:
     except GitWtError as exc:
         print(f"git-wt-clone: {exc}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        # A streamed clone invites a Ctrl-C; 130 is the shell's own code for
+        # it, and a traceback would bury the interrupt.
+        print(file=sys.stderr)
+        return 130
 
     print(path)
     return 0

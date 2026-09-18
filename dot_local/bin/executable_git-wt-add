@@ -76,6 +76,11 @@ def main() -> int:
     except GitWtError as exc:
         print(f"git-wt-add: {exc}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        # A fetch over a slow link invites a Ctrl-C; 130 is the shell's own
+        # code for it, and a traceback would bury the interrupt.
+        print(file=sys.stderr)
+        return 130
 
     print(f"{worktree.path.name}/  {worktree.summary}", file=sys.stderr)
     print(worktree.path)

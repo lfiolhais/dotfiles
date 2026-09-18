@@ -403,6 +403,11 @@ def main() -> int:
     except PackagesError as exc:
         print(f"chezmoi-packages: {exc}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        # A streamed brew install invites a Ctrl-C; 130 is the shell's own
+        # code for it, and a traceback would bury the interrupt.
+        print(file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":
