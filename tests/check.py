@@ -80,6 +80,8 @@ CHEZMOI_PACKAGES = REPO / "dot_local" / "bin" / "executable_chezmoi-packages"
 DEPLOYED_ENTRY_POINTS = (
     REPO / "dot_local" / "bin" / "executable_git-wt-clone",
     REPO / "dot_local" / "bin" / "executable_git-wt-add",
+    REPO / "dot_local" / "bin" / "executable_git-wt-ls",
+    REPO / "dot_local" / "bin" / "executable_git-wt-rm",
     REPO / "dot_local" / "bin" / "executable_cask-updates",
     REPO / "dot_local" / "bin" / "executable_mount-nas",
 )

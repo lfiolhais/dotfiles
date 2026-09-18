@@ -262,6 +262,8 @@ These deploy to `~/.local/bin`, which is on `PATH` on every profile.
 | ---                        | ---                                                       |
 | `git wt-clone <URL> [DIR]` | clone a repository as a bare clone plus per-ref worktrees |
 | `git wt-add <REF>`         | check a branch, tag or commit out into its own folder     |
+| `git wt-ls`                | list the clone's worktrees and what each holds            |
+| `git wt-rm <REF>`          | remove a ref's worktree and its merged local branch       |
 | `chezmoi-packages`         | maintain the Brewfile and the Linux manifest together     |
 | `cask-updates`             | stop Homebrew's apps updating themselves (macOS)          |
 | `mount-nas`                | keep the NAS share mounted while it is reachable (macOS)  |
@@ -274,6 +276,15 @@ a folder. A branch already on `origin` tracks it; a tag or commit is checked
 out detached; a brand-new branch is left with no upstream, so `git push` with
 `push.autoSetupRemote` publishes it as `origin/<branch>` rather than refusing
 because the branch it forked from has a different name.
+
+`git-wt-rm` is `git-wt-add`'s counterpart and takes the same argument, the
+ref: the folder is found by the same flattening, so `git wt-rm feature/foo`
+removes `feature-foo/`. Two of git's own refusals guard it — `git worktree
+remove` refuses uncommitted work, which `-f` discards, and the branch goes
+through `git branch -d`, which refuses an unmerged one; the refusal is printed
+with the `git branch -D` that overrides it, and `--keep-branch` keeps the
+branch entirely. `git-wt-ls` prints one line per worktree — the folder, the
+branch it holds or `detached`, and a `*` on the one the shell is in.
 
 The fish functions live in `~/.config/fish/functions`, one function per file,
 named after the function. `functions -v <name>` prints what each one is for.

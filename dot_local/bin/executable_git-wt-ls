@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""List the worktrees of the current bare-clone-plus-worktrees layout.
+
+Run from anywhere inside a repository cloned by ``git-wt-clone``. One line per
+worktree: the folder, and the branch it holds or ``detached`` for a tag or
+commit checkout. A ``*`` marks the worktree the shell is currently in.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+# The shared library sits beside this script's bin directory, not on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib" / "python"))
+
+from gitwt import GitWtError, Repo
+
+
+def main() -> int:
+    """Parse arguments and list the worktrees.
+
+    Returns:
+        Process exit code: 0 on success, 1 on a reported failure.
+
+    """
+    parser = argparse.ArgumentParser(
+        prog="git-wt-ls",
+        description="List this repository's worktrees, one line each.",
+        epilog="example: git wt-ls",
+    )
+    parser.parse_args()
+
+    try:
+        repo = Repo.discover(Path.cwd())
+        registered = repo.worktrees()
+    except GitWtError as exc:
+        print(f"git-wt-ls: {exc}", file=sys.stderr)
+        return 1
+
+    here = Path.cwd().resolve()
+    for path in sorted(p for p in registered if p != repo.bare):
+        holds = f"branch {registered[path]}" if registered[path] else "detached"
+        marker = "*" if path == here or path in here.parents else " "
+        print(f"{marker} {path.name}/  {holds}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

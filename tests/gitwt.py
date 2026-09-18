@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "dot_local" / "l
 from gitwt_git import REMOTE, GitWtError
 from gitwt_plan import Plan
 from gitwt_refkind import RefKind
-from gitwt_worktree import Worktree
+from gitwt_worktree import Worktree, remove_worktree
 
 ROOT = Path("/repo")
 SHORT = "abc1234"
@@ -64,6 +64,7 @@ class FakeRepo:
         tags: tuple[str, ...] = (),
         *,
         commit: bool = False,
+        fails: str = "",
     ) -> None:
         """Prepare a repository.
 
@@ -72,9 +73,12 @@ class FakeRepo:
             remotes: Branch names that exist on the remote.
             tags: Tag names that exist.
             commit: Whether an unmatched ref still resolves to a commit.
+            fails: A git subcommand whose invocation should raise, or "".
 
         """
         self.root = ROOT
+        self.bare = ROOT / ".bare"
+        self.fails = fails
         self.refs = (
             {f"refs/heads/{name}" for name in heads}
             | {f"refs/remotes/{REMOTE}/{name}" for name in remotes}
@@ -108,11 +112,15 @@ class FakeRepo:
             ``SHORT`` for a short rev-parse, the empty string otherwise.
 
         Raises:
-            GitWtError: For a commit probe when the fixtures hold no commit.
+            GitWtError: For a commit probe when the fixtures hold no commit,
+                and for the subcommand ``fails`` names.
 
         """
         del stream
         self.calls.append(argv)
+        if argv[0] == self.fails:
+            message = f"{argv[0]}: refused"
+            raise GitWtError(message)
         if argv[:2] == ("rev-parse", "--short"):
             return SHORT
         if argv[:3] == ("rev-parse", "--verify", "--quiet") and not self.commit:
@@ -285,6 +293,74 @@ def test_reuse_non_worktree_refuses() -> None:
     repo = FakeRepo(heads=("dev",))
     plan = Plan.from_repo(repo, "dev", RefKind.LOCAL_BRANCH)
     assert "not a worktree" in _message(lambda: Worktree._reuse(repo, plan, "dev"))
+
+
+# --- Removing -----------------------------------------------------------------
+
+
+def test_remove_deletes_folder_then_branch() -> None:
+    """The worktree goes first, then the branch it held, with plain -d."""
+    repo = FakeRepo(heads=("dev",))
+    repo.registered = {(ROOT / "dev").resolve(): "dev"}
+    removal = remove_worktree(repo, "dev")
+    assert ("worktree", "remove", str(ROOT / "dev")) in repo.calls
+    assert ("branch", "-d", "dev") in repo.calls
+    assert removal.branch_deleted
+
+
+def test_remove_flattens_the_ref_like_add() -> None:
+    """The folder for feature/foo is feature-foo, exactly as add named it."""
+    repo = FakeRepo(heads=("feature/foo",))
+    repo.registered = {(ROOT / "feature-foo").resolve(): "feature/foo"}
+    removal = remove_worktree(repo, "feature/foo")
+    assert removal.path == (ROOT / "feature-foo").resolve()
+    assert ("branch", "-d", "feature/foo") in repo.calls
+
+
+def test_remove_force_reaches_git() -> None:
+    """--force is git's own override for a dirty worktree, passed through."""
+    repo = FakeRepo(heads=("dev",))
+    repo.registered = {(ROOT / "dev").resolve(): "dev"}
+    remove_worktree(repo, "dev", force=True)
+    assert ("worktree", "remove", "--force", str(ROOT / "dev")) in repo.calls
+
+
+def test_remove_can_keep_the_branch() -> None:
+    """delete_branch=False removes the folder and runs no branch command."""
+    repo = FakeRepo(heads=("dev",))
+    repo.registered = {(ROOT / "dev").resolve(): "dev"}
+    removal = remove_worktree(repo, "dev", delete_branch=False)
+    assert not removal.branch_deleted
+    assert all(call[0] != "branch" for call in repo.calls)
+
+
+def test_remove_detached_has_no_branch_to_delete() -> None:
+    """A tag or commit worktree is a folder alone; nothing else is touched."""
+    repo = FakeRepo()
+    repo.registered = {(ROOT / "v1.0").resolve(): None}
+    removal = remove_worktree(repo, "v1.0")
+    assert removal.branch is None
+    assert all(call[0] != "branch" for call in repo.calls)
+
+
+def test_remove_reports_a_refused_branch_delete() -> None:
+    """The unmerged-branch refusal is returned, never escalated to -D."""
+    repo = FakeRepo(heads=("dev",), fails="branch")
+    repo.registered = {(ROOT / "dev").resolve(): "dev"}
+    removal = remove_worktree(repo, "dev")
+    assert not removal.branch_deleted
+    assert "refused" in removal.branch_error
+
+
+def test_remove_unknown_ref_names_the_worktrees() -> None:
+    """A ref with no worktree fails before anything runs, listing what exists."""
+    repo = FakeRepo()
+    repo.registered = {repo.bare: None, (ROOT / "main").resolve(): "main"}
+    message = _message(lambda: remove_worktree(repo, "typo"))
+    assert "not a worktree" in message
+    assert "main" in message
+    assert ".bare" not in message
+    assert repo.calls == []
 
 
 def _run(name: str, test: object) -> bool:

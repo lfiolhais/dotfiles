@@ -1,4 +1,4 @@
-"""Creating a worktree for a ref, or accepting the one already there."""
+"""Creating a worktree for a ref, removing one, or accepting the one in place."""
 
 from __future__ import annotations
 
@@ -113,3 +113,67 @@ class Worktree:
         repo.git("worktree", "add", *plan.argv, stream=True)
 
         return cls(plan.path, plan.kind, plan.summary)
+
+
+@dataclass(frozen=True)
+class Removal:
+    """A worktree that was removed, and what happened to its branch."""
+
+    path: Path
+    branch: str | None
+    branch_deleted: bool
+    branch_error: str
+
+
+def remove_worktree(
+    repo: Repo,
+    ref: str,
+    *,
+    force: bool = False,
+    delete_branch: bool = True,
+) -> Removal:
+    """Remove a ref's worktree, and the local branch it held.
+
+    The folder is found the way ``add`` named it, so the argument is the ref as
+    it was checked out and ``feature/foo`` removes ``feature-foo/``. ``git
+    worktree remove`` refuses a folder holding uncommitted work unless
+    ``force``. The branch is deleted with ``git branch -d``, which refuses an
+    unmerged one; that refusal comes back in the result rather than escalating
+    to ``-D``, because deleting unmerged work is the caller's decision alone. A
+    detached worktree -- a tag or a commit -- has no branch to delete.
+
+    Args:
+        repo: The layout to remove from.
+        ref: The ref whose worktree should go.
+        force: Remove the worktree even when it holds uncommitted changes,
+            discarding them.
+        delete_branch: Whether to delete the local branch the worktree held.
+
+    Returns:
+        What was removed, and what the branch deletion said.
+
+    Raises:
+        GitWtError: If the ref has no worktree here.
+
+    """
+    path = (repo.root / Plan._folder_name(ref)).resolve()
+    registered = repo.worktrees()
+    if path not in registered:
+        names = sorted(p.name for p in registered if p != repo.bare)
+        listing = f"; the worktrees here are: {', '.join(names)}" if names else ""
+        msg = f"{path.name} is not a worktree of {repo.root}{listing}"
+        raise GitWtError(msg)
+
+    branch = registered[path]
+    force_flag = ("--force",) if force else ()
+    repo.git("worktree", "remove", *force_flag, str(path))
+
+    if branch is None or not delete_branch:
+        return Removal(path, branch, branch_deleted=False, branch_error="")
+
+    try:
+        repo.git("branch", "-d", branch)
+    except GitWtError as exc:
+        return Removal(path, branch, branch_deleted=False, branch_error=str(exc))
+
+    return Removal(path, branch, branch_deleted=True, branch_error="")

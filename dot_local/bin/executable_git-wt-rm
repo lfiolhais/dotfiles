@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Remove a ref's worktree, and the merged local branch it held.
+
+The counterpart of ``git-wt-add``: the argument is the ref, and the folder is
+found by the same flattening that named it, so ``feature/foo`` removes
+``feature-foo/``. Two refusals guard the destructive ends:
+
+- ``git worktree remove`` refuses a folder holding uncommitted work;
+  ``--force`` discards that work along with the folder.
+- ``git branch -d`` refuses an unmerged branch. The refusal is printed with
+  the ``git branch -D`` that overrides it, and is never escalated here --
+  deleting unmerged work is a decision, not a cleanup.
+
+``--keep-branch`` removes the folder alone. A detached worktree -- a tag or a
+commit -- has no branch, so only its folder goes.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+# The shared library sits beside this script's bin directory, not on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib" / "python"))
+
+from gitwt import GitWtError, Repo, remove_worktree
+
+
+def main() -> int:
+    """Parse arguments and remove the worktree.
+
+    Returns:
+        Process exit code: 0 on success, 1 on a reported failure -- including
+        a removed worktree whose branch deletion was refused, since the
+        cleanup asked for is then half done.
+
+    """
+    parser = argparse.ArgumentParser(
+        prog="git-wt-rm",
+        description="Remove a ref's worktree, and the merged local branch it held.",
+        epilog="example: git-wt-rm feature/login",
+    )
+    parser.add_argument("ref", help="the ref whose worktree should go")
+    parser.add_argument(
+        "-f",
+        "--force",
+        action="store_true",
+        help="remove the worktree even with uncommitted changes, discarding them",
+    )
+    parser.add_argument(
+        "--keep-branch",
+        action="store_true",
+        help="remove the folder alone; without this the branch goes through 'git branch -d'",
+    )
+    args = parser.parse_args()
+
+    try:
+        repo = Repo.discover(Path.cwd())
+        removal = remove_worktree(
+            repo,
+            args.ref,
+            force=args.force,
+            delete_branch=not args.keep_branch,
+        )
+    except GitWtError as exc:
+        print(f"git-wt-rm: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"removed {removal.path.name}/")
+    if removal.branch_deleted:
+        print(f"deleted branch {removal.branch!r}")
+    elif removal.branch and args.keep_branch:
+        print(f"kept branch {removal.branch!r}")
+    elif removal.branch_error:
+        print(f"git-wt-rm: {removal.branch_error}", file=sys.stderr)
+        print("the worktree is gone; once losing the branch is intended:", file=sys.stderr)
+        print(f"    git branch -D {removal.branch}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

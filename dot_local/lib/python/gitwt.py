@@ -17,7 +17,7 @@ from gitwt_git import (
 from gitwt_plan import Plan
 from gitwt_refkind import RefKind
 from gitwt_repo import Repo
-from gitwt_worktree import Worktree
+from gitwt_worktree import Removal, Worktree, remove_worktree
 
 __all__ = [
     "BARE_DIR",
@@ -27,7 +27,9 @@ __all__ = [
     "GitWtError",
     "Plan",
     "RefKind",
+    "Removal",
     "Repo",
     "Worktree",
     "git",
+    "remove_worktree",
 ]

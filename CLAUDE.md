@@ -49,8 +49,9 @@ harness.
 ## Where things are
 
 - `dot_local/bin/` — the deployed commands, `0755` via `executable_`:
-  `git-wt-clone`, `git-wt-add`, `chezmoi-packages`, `cask-updates`, `mount-nas`.
-  The `git-` prefix is what makes git dispatch the first two as subcommands.
+  the `git-wt-*` family (`clone`, `add`, `ls`, `rm`), `chezmoi-packages`,
+  `cask-updates`, `mount-nas`. The `git-` prefix is what makes git dispatch
+  the `git-wt-*` commands as subcommands.
   `cask-updates`, `mount-nas` and `chezmoi-packages` are chezmoi-ignored off
   darwin — the first two are macOS-only, and `chezmoi-packages` runs through uv,
   which is a Homebrew and Fedora package only.
@@ -73,7 +74,7 @@ Each family is a facade over modules that import strictly downwards, which is
 what keeps them free of cycles. Each entry point imports its facade and
 nothing else, so a split inside a family never touches the command.
 
-`gitwt`, behind `git-wt-clone` and `git-wt-add`:
+`gitwt`, behind the `git-wt-*` commands:
 
 | module | holds | imports |
 | --- | --- | --- |
@@ -81,7 +82,7 @@ nothing else, so a split inside a family never touches the command.
 | `gitwt_refkind.py` | `RefKind` (what a ref names) | `gitwt_git`; `gitwt_repo` for typing only |
 | `gitwt_repo.py` | `Repo` (layout discovery, clone, fetch) | `gitwt_git` |
 | `gitwt_plan.py` | `Plan` (folder name + `worktree add` argv) | git, refkind, repo |
-| `gitwt_worktree.py` | `Worktree` (create, or reuse in place) | git, refkind, repo, plan |
+| `gitwt_worktree.py` | `Worktree` (create, or reuse in place), `remove_worktree()`, `Removal` | git, refkind, repo, plan |
 | `gitwt.py` | `__all__`, nothing else | all of the above |
 
 `chezpkg`, behind `chezmoi-packages`:
