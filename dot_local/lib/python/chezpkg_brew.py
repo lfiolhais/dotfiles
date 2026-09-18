@@ -133,10 +133,13 @@ class Brewfile:
             formula: The formula name, tap-qualified if it needs to be.
 
         """
-        run("brew", "install", formula, stream=True)
+        # No timeout: a formula with no bottle builds from source, which can
+        # honestly outlast any budget, and killing it partway leaves Homebrew
+        # holding a half-built formula.
+        run("brew", "install", formula, stream=True, timeout=None)
 
     @staticmethod
-    def uninstall(entries: tuple[Entry, ...]) -> tuple[str, ...]:
+    def uninstall(entries: tuple[Entry, ...]) -> tuple[tuple[str, ...], tuple[Entry, ...]]:
         """Remove a package by every route that installed it.
 
         Args:
@@ -147,18 +150,22 @@ class Brewfile:
         an entry for something still installed.
 
         Returns:
-            One description per uninstall that ran, empty when nothing could be.
+            One description per uninstall that ran, and the entries no
+            uninstall route exists for -- ``mas`` apps and taps, per
+            ``UNINSTALL`` -- so the caller can say they were left in place.
 
         """
         done = []
+        skipped = []
         for entry in entries:
             argv = UNINSTALL.get(entry.kind)
             if argv is None:
+                skipped.append(entry)
                 continue
             run(*argv, entry.name, stream=True)
             done.append(f"{' '.join(argv)} {entry.name}")
 
-        return tuple(done)
+        return tuple(done), tuple(skipped)
 
     @property
     def accountable(self) -> frozenset[str]:

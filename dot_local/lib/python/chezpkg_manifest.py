@@ -92,7 +92,10 @@ class Manifest:
             Its ``[packages]`` table.
 
         Raises:
-            PackagesError: If the file cannot be read or is not valid TOML.
+            PackagesError: If the file cannot be read, is not valid TOML, or
+                its ``[packages]`` entries are not tables -- the shape a hand
+                edit breaks, which every caller would otherwise meet as an
+                AttributeError instead of a message.
 
         """
         try:
@@ -104,7 +107,19 @@ class Manifest:
             message = f"{path} is not valid TOML: {exc}"
             raise PackagesError(message) from exc
 
-        return cls(path, parsed.get("packages", {}))
+        packages = parsed.get("packages", {})
+        if not isinstance(packages, dict):
+            message = f"{path}: [packages] is not a table"
+            raise PackagesError(message)
+        broken = sorted(name for name, entry in packages.items() if not isinstance(entry, dict))
+        if broken:
+            message = (
+                f"{path}: not tables, so not valid entries: {', '.join(broken)}. "
+                f"The file is generated -- rewrite the entry with chezmoi-packages add"
+            )
+            raise PackagesError(message)
+
+        return cls(path, packages)
 
     def added(self, name: str, fields: dict[str, str]) -> Manifest:
         """Add or replace one entry.
@@ -245,15 +260,21 @@ class Manifest:
             for name, entry in sorted(self.packages.items())
             if entry.keys() - KNOWN
         ]
-        problems += self._mise_clashes()
+        # Two entries claiming one mise tool render a duplicate key into the
+        # generated mise config, a TOML error on the no-sudo profile. Two
+        # claiming one formula hide one of the owners from the stale-formula
+        # check above, since `claimed` keeps a single owner per formula.
+        problems += self._clashes("brew", "formula")
+        problems += self._clashes("mise", "mise tool")
 
         return problems
 
-    def _mise_clashes(self) -> list[str]:
-        """Find two entries claiming one mise tool.
+    def _clashes(self, field: str, what: str) -> list[str]:
+        """Find two entries claiming one name in a field.
 
-        The mise names all land in one generated ``[tools]`` table, where a
-        repeat is a TOML error that would break the no-sudo profile's config.
+        Args:
+            field: The manifest field whose values must be unique.
+            what: What to call the clashing value in the report.
 
         Returns:
             One line per clash.
@@ -262,11 +283,11 @@ class Manifest:
         owner: dict[str, str] = {}
         clashes = []
         for name, entry in sorted(self.packages.items()):
-            tool = entry.get("mise")
-            if tool is None:
+            value = entry.get(field)
+            if value is None:
                 continue
-            if tool in owner:
-                clashes.append(f"{name}: mise tool {tool!r} already claimed by {owner[tool]}")
-            owner.setdefault(tool, name)
+            if value in owner:
+                clashes.append(f"{name}: {what} {value!r} already claimed by {owner[value]}")
+            owner.setdefault(value, name)
 
         return clashes

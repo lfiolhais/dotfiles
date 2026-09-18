@@ -24,14 +24,16 @@ class PackagesError(Exception):
     """A failure to report to the user as a message, without a traceback."""
 
 
-def run(*argv: str, stream: bool = False, timeout: int = TIMEOUT) -> str:
+def run(*argv: str, stream: bool = False, timeout: int | None = TIMEOUT) -> str:
     """Run a command and return its output.
 
     Args:
         argv: The command and its arguments.
         stream: Let the command write straight to the terminal instead of being
             captured, so a slow install can show its progress.
-        timeout: Seconds to wait before giving up.
+        timeout: Seconds to wait before giving up, or None to wait it out --
+            for a command whose honest duration has no ceiling, such as a
+            formula built from source.
 
     Returns:
         The command's stripped stdout, or the empty string when streaming.
@@ -64,7 +66,7 @@ def run(*argv: str, stream: bool = False, timeout: int = TIMEOUT) -> str:
     return "" if stream else proc.stdout.strip()
 
 
-def maybe(*argv: str, timeout: int = TIMEOUT) -> str:
+def maybe(*argv: str, timeout: int | None = TIMEOUT) -> str:
     """Run a command whose failure is an answer rather than an error.
 
     Asking a package manager about a name it does not have is not a failure, and

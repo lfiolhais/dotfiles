@@ -164,20 +164,26 @@ def search(args: argparse.Namespace) -> int:
         Process exit code: 0 if any platform had it, 1 if none did.
 
     """
-    if not have("docker"):
-        print(
-            "docker is not available; only brew and mise will be searched",
-            file=sys.stderr,
-        )
-
     found = Search.everywhere(args.name)
 
     print(f"\n{found.query}\n")
     for match in found.matches:
         print(f"  {match.platform:<8}  {match.summary}")
 
+    if found.unanswered:
+        print(
+            f"\ndocker could not be asked, so {', '.join(found.unanswered)} are "
+            f"unanswered rather than empty. Start Docker (docker info confirms "
+            f"it is up) and search again before recording a tool as not "
+            f"packaged there.",
+            file=sys.stderr,
+        )
+
     if found.empty:
-        print(f"\nNo platform has {found.query}. Nothing to add.")
+        if found.unanswered:
+            print(f"\nNo reachable platform has {found.query}.")
+        else:
+            print(f"\nNo platform has {found.query}. Nothing to add.")
         return 1
 
     print("\nExact matches only; check the near-matches above for a rename.\n")
@@ -280,8 +286,15 @@ def _detach(source: Source, entries: tuple[Entry, ...], *, uninstall: bool) -> N
         return
 
     if uninstall:
-        for done in Brewfile.uninstall(entries):
-            print(f"  {done}")
+        done, skipped = Brewfile.uninstall(entries)
+        for line in done:
+            print(f"  {line}")
+        for entry in skipped:
+            print(
+                f"  no uninstall route for {entry}; remove it by hand, "
+                f"then chezmoi-packages dump",
+                file=sys.stderr,
+            )
 
     _report_dump(
         source,

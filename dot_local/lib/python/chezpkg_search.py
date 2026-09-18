@@ -48,6 +48,11 @@ class Match:
     platform: str
     query: str
     names: tuple[str, ...]
+    # False when the platform could not be asked at all -- Docker absent or its
+    # daemon down -- which is a different answer from "asked, and it has
+    # nothing". Collapsing the two made a closed Docker Desktop read as "no
+    # distro packages this".
+    asked: bool = True
 
     @property
     def exact(self) -> str | None:
@@ -65,9 +70,12 @@ class Match:
 
         Returns:
             The first ``MAX_MATCHES`` names with a count when there are more,
-            or ``-`` when the platform has nothing.
+            ``-`` when the platform has nothing, or a note when it could not
+            be asked.
 
         """
+        if not self.asked:
+            return "(unanswered: docker is not running)"
         if not self.names:
             return "-"
 
@@ -93,15 +101,27 @@ class Search:
             query: The name to look for.
 
         Returns:
-            One match per platform, in the order the manifest lists them.
+            One match per platform, in the order the manifest lists them. A
+            distro Docker could not be asked for comes back unanswered rather
+            than empty.
 
         """
+        # One probe for every distro: `docker info` fails both when the binary
+        # is absent and when the daemon is not running -- the everyday state of
+        # a Mac with Docker Desktop closed -- and each of the container runs
+        # below would swallow that same failure into a false "no match here".
+        docker_up = bool(maybe("docker", "info", timeout=30))
+
         found = [cls._brew(query)]
         for distro in IMAGES:
             target = TARGET_OF[distro]
             # rocky and alma are the same repositories; ask once.
-            if not any(match.platform == target for match in found):
+            if any(match.platform == target for match in found):
+                continue
+            if docker_up:
                 found.append(cls._distro(distro, target, query))
+            else:
+                found.append(Match(target, query, (), asked=False))
         found.append(cls._mise(query))
 
         return cls(query, tuple(found))
@@ -135,7 +155,9 @@ class Search:
             query: The name to look for.
 
         Returns:
-            That target's matches, empty if Docker is absent.
+            That target's matches. Only called once ``everywhere`` has seen the
+            daemon answer, so an empty result means the repositories have
+            nothing.
 
         """
         if distro == "ubuntu":
@@ -187,6 +209,16 @@ class Search:
 
         """
         return not any(match.names for match in self.matches)
+
+    @property
+    def unanswered(self) -> tuple[str, ...]:
+        """The platforms that could not be asked.
+
+        Returns:
+            Their names, in platform order, empty when every one answered.
+
+        """
+        return tuple(m.platform for m in self.matches if not m.asked)
 
     @property
     def add_command(self) -> str:
