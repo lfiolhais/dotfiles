@@ -71,16 +71,33 @@ class Sparkle:
         for key in KEYS:
             run("defaults", "write", bundle_id, key, "-bool", "false")
 
-    @staticmethod
-    def restore(bundle_id: str) -> None:
+    @classmethod
+    def written(cls, bundle_id: str) -> bool:
+        """Report whether the domain still carries a value ``disable`` writes.
+
+        Args:
+            bundle_id: The app's bundle identifier.
+
+        Returns:
+            True when at least one key reads false.
+
+        """
+        return OFF in cls.state(bundle_id).values()
+
+    @classmethod
+    def restore(cls, bundle_id: str) -> None:
         """Put an app back the way it was found.
 
-        The keys are deleted rather than set true: unset is the real original
-        state, and it is what lets the bundle's own ``Info.plist`` decide again.
+        Only a key reading false is deleted, because false is the one value
+        ``disable`` writes: a true set by hand in the app's own preferences is
+        somebody's deliberate choice and stays. Deleted rather than set true,
+        since unset is the real original state, and it is what lets the
+        bundle's own ``Info.plist`` decide again.
 
         Args:
             bundle_id: The app's bundle identifier.
 
         """
-        for key in KEYS:
-            maybe("defaults", "delete", bundle_id, key)
+        for key, value in cls.state(bundle_id).items():
+            if value == OFF:
+                maybe("defaults", "delete", bundle_id, key)

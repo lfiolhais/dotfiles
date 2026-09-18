@@ -153,9 +153,11 @@ def enable(args: argparse.Namespace) -> int:
     apps = App.discover()
     # `app.sparkle` rather than `app.manageable`: `disable` skips exempt apps, so
     # matching that filter here would strand SUEnableAutomaticChecks=false on an
-    # app silenced before it joined EXEMPT. `state()` returns "" for an unset key,
-    # so `any(...)` means "at least one of the two keys is currently set".
-    todo = [app for app in apps if app.sparkle and any(Sparkle.state(app.bundle_id).values())]
+    # app silenced before it joined EXEMPT. `Sparkle.written` selects apps where
+    # a key still reads false -- the one value `disable` writes -- so a value
+    # somebody set true in an app's own preferences neither counts as restorable
+    # nor gets deleted.
+    todo = [app for app in apps if app.sparkle and Sparkle.written(app.bundle_id)]
 
     for app in todo:
         if not args.dry_run:
