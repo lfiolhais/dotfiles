@@ -7,18 +7,33 @@
 # it after a success.
 set -u
 
-bold=$(tput bold)
-normal=$(tput sgr0)
+# Without TERM (ssh without a tty, a container) tput exits 2 and prints an
+# error; the styling is cosmetic, so it falls back to plain text.
+bold=$(tput bold 2>/dev/null || true)
+normal=$(tput sgr0 2>/dev/null || true)
 
 echo "${bold}===Setup Homebrew===${normal}"
 
 brewfile="${HOME}/.config/Brewfile"
 
 if ! command -v brew > /dev/null 2>&1; then
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    # The download is checked apart from the run: `bash -c "$(curl ...)"` runs
+    # `bash -c ""` when curl fails, which succeeds having installed nothing,
+    # and the failure would only surface two steps later as a missing brew.
+    if ! installer="$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"; then
+        echo "Downloading the Homebrew installer failed. Check the network and" >&2
+        echo "re-run 'chezmoi apply'." >&2
+        exit 1
+    fi
+    /bin/bash -c "${installer}"
 
     # The installer does not put brew on this shell's PATH. Apple Silicon
     # prefix; an Intel Mac installs to /usr/local instead.
+    if [ ! -x /opt/homebrew/bin/brew ]; then
+        echo "The installer finished without leaving brew at /opt/homebrew/bin." >&2
+        echo "Fix what it printed above and re-run 'chezmoi apply'." >&2
+        exit 1
+    fi
     eval "$(/opt/homebrew/bin/brew shellenv)"
 else
     # `brew bundle install` below resolves names against the API index and the

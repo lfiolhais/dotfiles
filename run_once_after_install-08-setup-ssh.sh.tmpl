@@ -12,8 +12,10 @@
 # command when it does not.
 set -u
 
-bold=$(tput bold)
-normal=$(tput sgr0)
+# Without TERM (ssh without a tty, a container) tput exits 2 and prints an
+# error; the styling is cosmetic, so it falls back to plain text.
+bold=$(tput bold 2>/dev/null || true)
+normal=$(tput sgr0 2>/dev/null || true)
 
 echo "${bold}===Setup SSH0===${normal}"
 

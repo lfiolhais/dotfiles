@@ -75,14 +75,26 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubc
 "${SUDO[@]}" apt-get install -y gh
 {{- end }}
 
-# Starship prompt is not in the base repos; use its official installer.
+# Starship prompt is not in the base repos; use its official installer. The
+# download goes to a file first: a pipeline's status is the last command's, and
+# sh reading empty stdin after a failed curl exits 0 with nothing installed --
+# the file form makes `set -e` stop on the curl instead.
 if ! command -v starship > /dev/null 2>&1; then
-    curl -fsSL https://starship.rs/install.sh | "${SUDO[@]}" sh -s -- --yes
+    starship_install="$(mktemp)"
+    curl -fsSL https://starship.rs/install.sh -o "${starship_install}"
+    "${SUDO[@]}" sh "${starship_install}" --yes
+    rm "${starship_install}"
 fi
 {{- else }}
 # --- no-sudo: rootless mise toolchain ---------------------------------------
 if ! command -v mise > /dev/null 2>&1 && [ ! -x "$HOME/.local/bin/mise" ]; then
-    curl -fsSL https://mise.run | sh
+    # Downloaded to a file first: a pipeline's status is the last command's,
+    # and sh reading empty stdin after a failed curl exits 0 with nothing
+    # installed -- the file form makes `set -e` stop on the curl instead.
+    mise_install="$(mktemp)"
+    curl -fsSL https://mise.run -o "${mise_install}"
+    sh "${mise_install}"
+    rm "${mise_install}"
 fi
 export PATH="$HOME/.local/bin:$PATH"
 eval "$(mise activate bash)"

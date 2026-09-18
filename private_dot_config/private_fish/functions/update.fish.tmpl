@@ -63,10 +63,14 @@ function update --description "Update the packages each installer on this machin
         __update_step "dnf cleanup" sudo dnf autoremove --assumeyes
     end
 
-    # starship came from its own installer, which is also how it updates.
+    # starship came from its own installer, which is also how it updates. The
+    # download goes to a file first: a pipeline's status is the last command's,
+    # and sh reading empty stdin after a failed curl exits 0 -- the step would
+    # report success having updated nothing. The `and` chain makes the step's
+    # status the first failure's.
     if command --query starship
         __update_step "starship" fish -c \
-            "curl -fsSL https://starship.rs/install.sh | sudo sh -s -- --yes"
+            'set f (mktemp); and curl -fsSL https://starship.rs/install.sh -o $f; and sudo sh $f --yes; and rm $f'
     end
 {{ else }}
     # --- Linux without sudo: mise bootstrapped itself, so it updates itself ---

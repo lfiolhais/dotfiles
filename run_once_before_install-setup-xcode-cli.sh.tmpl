@@ -1,8 +1,10 @@
 {{- if eq .chezmoi.os "darwin" -}}
 #!/usr/bin/env bash
 
-bold=$(tput bold)
-normal=$(tput sgr0)
+# Without TERM (ssh without a tty, a container) tput exits 2 and prints an
+# error; the styling is cosmetic, so it falls back to plain text.
+bold=$(tput bold 2>/dev/null || true)
+normal=$(tput sgr0 2>/dev/null || true)
 
 echo "${bold}===Setup Xcode===${normal}"
 
@@ -22,8 +24,25 @@ else
     # block until a developer directory is selected. This reports the directory
     # rather than the package, so it can succeed slightly before the install has
     # finished writing.
+    #
+    # The wait has a ceiling because the dialog can be cancelled, and an apply
+    # over ssh opens it on the console where nobody may see it -- either way
+    # the directory never appears and the bootstrap would sit here silently.
+    xcode_limit=3600
+    waited=0
     until xcode-select --print-path > /dev/null 2>&1; do
+        if [ "${waited}" -ge "${xcode_limit}" ]; then
+            echo "The command-line tools were still not installed after ${xcode_limit}s:" >&2
+            echo "the dialog was cancelled, or it opened where nobody saw it (an" >&2
+            echo "apply over ssh opens it on the console). Run:" >&2
+            echo "    xcode-select --install" >&2
+            echo "confirm the dialog, and re-run 'chezmoi apply' once it finishes." >&2
+            echo "This exit stopped the apply before anything was recorded, so the" >&2
+            echo "re-run starts from here." >&2
+            exit 1
+        fi
         sleep 5
+        waited=$((waited + 5))
     done
 fi
 

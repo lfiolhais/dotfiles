@@ -13,7 +13,12 @@ mise activate fish | source
 # Installs fzf's Ctrl-T, Ctrl-R and Alt-C bindings. Order matters: setting
 # fish_key_bindings below re-runs the binding functions, so fzf has to be
 # sourced first for functions/fish_user_key_bindings.fish to find its bindings.
-fzf --fish | source
+# Probed rather than assumed: `fzf --fish` arrived in fzf 0.48 and Debian-family
+# repositories package older ones, and a machine mid-bootstrap has no fzf at
+# all -- either way an unguarded call errors on every prompt.
+if command --query fzf
+    fzf --fish 2>/dev/null | source
+end
 
 source $HOME/.config/fish/aliases.fish
 source $HOME/.config/fish/greet.fish
@@ -35,4 +40,6 @@ end
 
 set -g fish_key_bindings fish_vi_key_bindings
 
-starship init fish | source
+# Guarded for the machine mid-bootstrap: the 01 script is what installs
+# starship, and config.fish is deployed before any script runs.
+command --query starship; and starship init fish | source

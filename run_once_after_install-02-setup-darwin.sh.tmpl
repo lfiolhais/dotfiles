@@ -1,8 +1,10 @@
 {{- if eq .chezmoi.os "darwin" -}}
 #!/usr/bin/env bash
 
-bold=$(tput bold)
-normal=$(tput sgr0)
+# Without TERM (ssh without a tty, a container) tput exits 2 and prints an
+# error; the styling is cosmetic, so it falls back to plain text.
+bold=$(tput bold 2>/dev/null || true)
+normal=$(tput sgr0 2>/dev/null || true)
 
 echo "${bold}===Set macOS Settings===${normal}"
 
@@ -17,14 +19,26 @@ echo "${bold}===Set macOS Settings===${normal}"
 osascript -e 'tell application "System Preferences" to quit' 2>/dev/null || true
 
 # Some of the writes below need root. Asking once here means the password is
-# requested at the start rather than partway through an unattended run.
-sudo -v
+# requested at the start rather than partway through the run. An apply with no
+# terminal cannot ask at all; every root write would then fail one by one and
+# the script would still report success, so that case is said once here, with
+# the commands that apply the settings from a terminal later.
+if sudo -n true 2>/dev/null || [ -t 0 ]; then
+    sudo -v
 
-# Refresh the sudo timestamp every 60s so it does not expire mid-run. `kill -0`
-# tests whether this script is still alive and ends the loop when it is not, so
-# no background job is left holding a credential. Errors go nowhere because the
-# loop's last iteration always races the exit.
-while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
+    # Refresh the sudo timestamp every 60s so it does not expire mid-run.
+    # `kill -0` tests whether this script is still alive and ends the loop when
+    # it is not, so no background job is left holding a credential. Errors go
+    # nowhere because the loop's last iteration always races the exit.
+    while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
+else
+    echo "This apply has no terminal for sudo to ask a password on, so the" >&2
+    echo "root-level settings below (systemsetup, pmset, chflags on /Volumes)" >&2
+    echo "are skipped, and chezmoi still records this script as run. To apply" >&2
+    echo "them, run from a terminal:" >&2
+    echo "    chezmoi state delete-bucket --bucket=scriptState" >&2
+    echo "    chezmoi apply" >&2
+fi
 
 ###############################################################################
 # General UI/UX                                                               #

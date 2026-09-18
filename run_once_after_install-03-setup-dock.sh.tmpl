@@ -1,12 +1,14 @@
 {{- if eq .chezmoi.os "darwin" -}}
 #!/usr/bin/env bash
 # Appends to the Dock rather than replacing it: there is no `dockutil --remove
-# all` here, so Apple's defaults stay and these six land after them. Editing this
+# all` here, so Apple's defaults stay and these land after them. Editing this
 # script re-runs it, because the run_once_ hash changes; dockutil refuses an app
 # the Dock already has, so a re-run leaves the Dock as it is.
 
-bold=$(tput bold)
-normal=$(tput sgr0)
+# Without TERM (ssh without a tty, a container) tput exits 2 and prints an
+# error; the styling is cosmetic, so it falls back to plain text.
+bold=$(tput bold 2>/dev/null || true)
+normal=$(tput sgr0 2>/dev/null || true)
 
 echo "${bold}===Setup Dock===${normal}"
 
@@ -14,17 +16,35 @@ echo "${bold}===Setup Dock===${normal}"
 # Homebrew's environment. Apple Silicon prefix; an Intel Mac uses /usr/local.
 eval "$(/opt/homebrew/bin/brew shellenv)"
 
-dockutil --add /System/Applications/Mail.app
-dockutil --add /System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app/ --after 'Mail'
-dockutil --add /Applications/Tapestry.app --after 'Safari'
-dockutil --add /Applications/Ghostty.app --after 'Tapestry'
-dockutil --add /System/Applications/Notes.app --after 'Ghostty'
-dockutil --add /System/Applications/Music.app --after 'Notes'
+# add() adds only an app that is installed. The App Store pass in 01 has a time
+# ceiling, which a machine never signed in to the App Store waits out, so an
+# App Store app can be legitimately absent here; dockutil's failure on it would
+# disappear behind the echo at the end, and the run_once_ record would keep
+# this script from ever adding the app. Collecting the exact command instead
+# leaves something to paste once the app is installed.
+skipped=()
+add() {
+    if [ -e "$1" ]; then
+        dockutil --add "$@"
+    else
+        skipped+=("dockutil --add $*")
+    fi
+}
 
-# On a re-run every one of those fails: dockutil prints "<app> already exists in
-# dock. Use --replacing '<app>' to update an existing item", adds nothing, and
-# exits 1. This echo is the last command, so the script still reports success --
-# at the cost of hiding a genuine dockutil failure.
-echo "Completed Dock setup"
+add /System/Applications/Mail.app
+add /System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app/ --after Mail
+add /Applications/Tapestry.app --after Safari
+add /Applications/Ghostty.app --after Tapestry
+add /System/Applications/Notes.app --after Ghostty
+add /System/Applications/Music.app --after Notes
 
+# On a re-run every add fails: dockutil prints "<app> already exists in dock.
+# Use --replacing '<app>' to update an existing item", adds nothing, and exits
+# 1. Nothing sets -e, so those failures are what leave the Dock as it was.
+if [ "${#skipped[@]}" -gt 0 ]; then
+    echo "Not added, because the app is not installed -- once it is, run:"
+    printf '    %s\n' "${skipped[@]}"
+else
+    echo "Completed Dock setup"
+fi
 {{ end -}}

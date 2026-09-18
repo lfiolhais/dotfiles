@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -eu
 
-bold=$(tput bold)
-normal=$(tput sgr0)
+# Without TERM (ssh without a tty, a container) tput exits 2 and prints an
+# error; the styling is cosmetic, so it falls back to plain text.
+bold=$(tput bold 2>/dev/null || true)
+normal=$(tput sgr0 2>/dev/null || true)
 
 echo "${bold}===Setup Fish===${normal}"
 
@@ -38,9 +40,7 @@ fish_path="$(command -v fish)"
 
 if ! grep -qxF "${fish_path}" /etc/shells; then
     echo "Adding ${fish_path} to /etc/shells."
-    # ${SUDO[@]+...} because an empty array under `set -u` is an unbound
-    # variable to bash before 4.4, which Rocky and Alma still ship.
-    printf '%s\n' "${fish_path}" | ${SUDO[@]+"${SUDO[@]}"} tee -a /etc/shells > /dev/null
+    printf '%s\n' "${fish_path}" | "${SUDO[@]}" tee -a /etc/shells > /dev/null
 fi
 
 # Minimal container images carry neither chsh nor a password for the account it

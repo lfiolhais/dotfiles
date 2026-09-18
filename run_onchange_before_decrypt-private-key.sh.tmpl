@@ -10,8 +10,10 @@
 # run_onchange_ rather than run_once_: editing this script re-runs it, and it
 # then does nothing on a machine whose key is already in place.
 
-bold=$(tput bold)
-normal=$(tput sgr0)
+# Without TERM (ssh without a tty, a container) tput exits 2 and prints an
+# error; the styling is cosmetic, so it falls back to plain text.
+bold=$(tput bold 2>/dev/null || true)
+normal=$(tput sgr0 2>/dev/null || true)
 
 echo "${bold}===Decrypt Chezmoi files===${normal}"
 
