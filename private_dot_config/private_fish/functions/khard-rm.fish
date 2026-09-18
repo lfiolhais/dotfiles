@@ -53,9 +53,32 @@ function khard-rm --description "Delete several khard contacts at once, dropping
         end
     end
 
+    # chezmoi is only used at the end, to drop the deleted cards from the
+    # source state -- checked here, before anything is deleted, because
+    # discovering it missing after 'khard remove' strands source entries whose
+    # next 'chezmoi apply' recreates every deleted contact. --no-forget never
+    # touches the source state, so it works without chezmoi.
+    if not set -q _flag_no_forget; and not command -q chezmoi
+        set_color red
+        echo "khard-rm: chezmoi is not installed, and deleting without it would let" >&2
+        echo "the next 'chezmoi apply' recreate every deleted contact. --no-forget" >&2
+        echo "deletes from this machine alone." >&2
+        set_color normal
+        return 1
+    end
+
     set -l abook work
     if set -q _flag_addressbook
         set abook $_flag_addressbook
+    end
+
+    # Checked before asking khard, because khard's own answer for a
+    # misspelled book is the same "no contacts" an empty one produces.
+    if not test -d "$HOME/.config/khard/$abook/default"
+        set_color red
+        echo "khard-rm: no address book '$abook' under ~/.config/khard" >&2
+        set_color normal
+        return 1
     end
 
     # --parsable prints one contact per line, tab separated, in the order -F
@@ -146,11 +169,6 @@ function khard-rm --description "Delete several khard contacts at once, dropping
     if set -q _flag_no_forget
         echo "khard-rm: leaving the chezmoi source state untouched (--no-forget)"
         return $failed
-    end
-
-    if not command -q chezmoi
-        echo "khard-rm: chezmoi is not installed, source state left untouched" >&2
-        return 1
     end
 
     # 'chezmoi forget' takes every path or none: hand it one path it does not
