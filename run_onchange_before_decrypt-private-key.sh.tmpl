@@ -18,8 +18,10 @@ normal=$(tput sgr0 2>/dev/null || true)
 echo "${bold}===Decrypt Chezmoi files===${normal}"
 
 if [ ! -f "${HOME}/.config/chezmoi/key.txt" ]; then
+    # umask 077 creates the directory 0700 and the key 0600 from the first
+    # byte; a chmod after the write would leave a window in which the
+    # inherited umask has the key readable by other local users.
+    umask 077
     mkdir -p "${HOME}/.config/chezmoi"
     chezmoi age decrypt --output "${HOME}/.config/chezmoi/key.txt" --passphrase "{{ .chezmoi.sourceDir }}/key.txt.age"
-    # Written under the inherited umask first, so tighten it immediately.
-    chmod 600 "${HOME}/.config/chezmoi/key.txt"
 fi

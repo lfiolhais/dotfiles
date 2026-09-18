@@ -78,11 +78,14 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubc
 # Starship prompt is not in the base repos; use its official installer. The
 # download goes to a file first: a pipeline's status is the last command's, and
 # sh reading empty stdin after a failed curl exits 0 with nothing installed --
-# the file form makes `set -e` stop on the curl instead.
+# the file form makes `set -e` stop on the curl instead. It installs to
+# ~/.local/bin, which exports.fish puts first on PATH: the installer needs no
+# root there, so a compromised download runs unprivileged.
 if ! command -v starship > /dev/null 2>&1; then
+    mkdir -p "$HOME/.local/bin"
     starship_install="$(mktemp)"
     curl -fsSL https://starship.rs/install.sh -o "${starship_install}"
-    "${SUDO[@]}" sh "${starship_install}" --yes
+    sh "${starship_install}" --yes --bin-dir "$HOME/.local/bin"
     rm "${starship_install}"
 fi
 {{- else }}
