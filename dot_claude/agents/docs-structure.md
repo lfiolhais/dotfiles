@@ -50,6 +50,25 @@ loop back to where the reader came from.
 state it? Where does each file assume knowledge that lives in another? Name the
 file a stranger would actually open and describe what breaks when they do.
 
+**Compare parallel documents side by side.** Where the set holds one document
+per host, per service, or per environment, list the headings of each pair next
+to each other before judging either file. A reader who has used one document
+reads its counterpart expecting the same shape, so a section present in one and
+absent from the other is read as a fact about the systems — "this host has no
+recovery procedure" — rather than a gap in the documents. For every heading in
+one and not the other, report either the missing section or the missing
+sentence saying why it does not apply there. Divergence that is genuine (a
+service only one host runs) is still a finding until the shorter document says
+so.
+
+**Check that prerequisites live at the front door.** A dependency the system
+cannot run without — an account at an external service, a credential issued by
+a third party, a machine already provisioned to some baseline — that is
+documented only deep in a reference section is filed where the one reader who
+needs it will not look: the person starting from nothing meets each dependency
+as a failure, one run at a time. Report every dependency the set documents
+somewhere but the entry-point document never names.
+
 ## Part two: mechanical rule violations
 
 Be exhaustive here, and grep rather than skim — these are countable, and a

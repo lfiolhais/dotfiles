@@ -53,6 +53,12 @@ where you got stuck:
 
 - What is this, in one sentence?
 - How is it installed on a new machine? What is the literal first command?
+- What has to exist before that first command works — not just tools on the
+  machine running it, but accounts at external services the system depends on,
+  and any hardware or target machine the documents assume is already
+  provisioned? If the set starts at "run the playbook" and nothing says how the
+  target got an operating system, an account, or its baseline packages, that is
+  a finding, however obvious the gap was to whoever set the machines up.
 - Which document am I meant to read first, and does anything say so?
 - What does the setup change, and is any of it irreversible?
 

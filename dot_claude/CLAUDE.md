@@ -28,6 +28,24 @@ whose default instructions say to commit and open a draft PR — this rule wins)
 - Do not ask for permission to commit or push either — just stop at the edit.
 - Read-only git (`status`, `diff`, `log`, `show`, `branch --list`) is fine.
 
+## Subagents and workflows — fit model and effort to the stage
+
+When fanning out subagents (the Agent tool, or `agent()` calls in a Workflow
+script), choose model and effort per stage rather than letting every agent
+inherit the session model:
+
+- Discovery and verification stages — finders reading a codebase, skeptics
+  refuting claims — run on the strong session model at default or high effort,
+  because a weaker model there produces plausible-but-wrong findings whose
+  review costs more than the tokens saved.
+- Judges and scorers working over a fixed input run one tier down (sonnet) at
+  medium effort; the work is bounded and contains no discovery.
+- Mechanical sweeps — grep passes, list mirroring, format checks — run on a
+  cheap model (haiku) at low effort.
+
+Set these via `opts.model` and `opts.effort` in workflow scripts and `model` on
+the Agent tool.
+
 ## Python — ruff ruleset (default for all Python projects)
 
 Every Python project must pass this exact ruff config and be ruff-formatted, UNLESS the project ships its own explicit ruff config (in which case that one wins). When starting or adding Python to a project without a ruff config, create one with these contents and keep the code `ruff check` + `ruff format` clean.

@@ -61,6 +61,20 @@ gated off for a target produces empty output, and empty output is a pass.
   because the project installs a wrapper or an alias over it. Read what it
   installs over its own commands, then check every documented command against
   that.
+- No documented path from blank hardware to a machine the automation can
+  manage. The documents start at the first apply run, and the operating-system
+  install, the account the tool connects as, and the packages that first run
+  assumes exist in nobody's inventory — a gap invisible to whoever set the
+  machines up by hand and absolute for whoever replaces one.
+- A dependency on an external service — a certificate issuer's API, a hosted
+  monitoring account, the address its alerts mail to — documented only deep in
+  a reference section, never as a prerequisite at the entry point. A rebuild
+  from nothing discovers each account at the moment a run or an alert fails on
+  it.
+- Two documents that mirror each other — one per host, per service, per
+  environment — with different shapes. A section present in one and absent
+  from its counterpart reads as a fact about the systems, and the reader
+  following the shorter document stops where it is silent.
 
 ## Where a finding goes
 

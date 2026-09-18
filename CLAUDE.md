@@ -40,8 +40,8 @@ because the change survives review and disappears at the next write.
 | `private_dot_config/khard/work/exact_default/` | the `khard` wrapper, via `chezmoi add --encrypt --exact` | one age-encrypted vCard per contact |
 | `~/.config/aerc/filters/colorize`, `wrap` | `run_onchange_…-09` compiles them | the C sources are what this repo tracks; a built filter is one architecture's |
 
-The manifest's field set is `brew`, `apt`, `fedora`, `el`, `mise`, `mise_exe`,
-`repo`, `note`; `tests/check.py` fails on any other field name. The distro
+The manifest's field set is what `tests/check.py` enforces; `README.md`'s
+"Packages" section shows the full entry template. The distro
 dispatch that maps a machine onto the `apt`/`fedora`/`el` columns lives once, in
 `.chezmoitemplates/linux-target`, and is read by both bootstrap scripts and the
 harness.
@@ -107,8 +107,8 @@ nothing else, so a split inside a family never touches the command.
 device column, whether the NAS answers, where it is mounted, whether the
 Keychain has its password), `Outcome`, `flush()`, and `sync()` over them.
 `unmount()` takes `force` and `gone`. `gone` is for a caller that has
-established the server no longer answers -- `sync()` always, `cmd_unmount` for a
-share that does not answer -- and it forces on its own as well as recording the
+established the server no longer answers — `sync()` always, `cmd_unmount` for a
+share that does not answer — and it forces on its own as well as recording the
 outcome as `CLEARED` rather than `UNMOUNTED`, which is what keeps a deliberate
 eject from reporting that the NAS stopped answering. `force` is that same
 override asked for against a server that is still there. It is both facade
@@ -141,7 +141,7 @@ it, so that module alone must stay stdlib-only and 3.9-clean.
 
 ## Bootstrap scripts
 
-The `run_` scripts at the repo root execute in prefix order on apply -- `ls
+The `run_` scripts at the repo root execute in prefix order on apply — `ls
 run_*` is the list. `README.md` has the table of what each one does to the
 machine; what matters when editing them:
 
@@ -150,11 +150,10 @@ machine; what matters when editing them:
   `09` runs everywhere.
 - `run_once_` is tracked by content hash, so editing an already-run script
   re-runs it on the next apply. Keep them idempotent.
-- `07-setup-nas` and `09-build-aerc-filters` are `run_onchange_` and each embeds
-  a sha256 of the file it depends on in a comment. For `07` that is the plist,
-  because launchd caches a job's definition at bootstrap and reads an edited
-  plist only on a fresh one; for `09` it is the two C sources, so an edit to
-  either rebuilds the filter. Leave those digest lines in place.
+- `07-setup-nas` and `09-build-aerc-filters` are `run_onchange_`, each embedding
+  a sha256 of what it depends on in a comment — the plist for `07` (`README.md`,
+  "What runs it", says why) and the two C sources for `09`, so an edit to either
+  rebuilds the filter. Leave those digest lines in place.
 - `06-setup-mail` only prints instructions. It is safe to render and read with
   `chezmoi execute-template`.
 - `01-…-darwin` splits `brew bundle` in two, and `README.md` says why under
@@ -171,18 +170,6 @@ which of `tests/check.py`'s hand-maintained lists a new file belongs in. What
 matters when adding to this repository is that those lists exist: a new file
 outside a globbed directory is invisible to the harness until it is named in
 one.
-
-`tests/render-matrix.sh` is the fast pre-check: it renders every template for
-darwin, linux-with-sudo and linux-without-sudo and parses the output. chezmoi
-takes `.chezmoi.os` from the machine it runs on, so it rewrites that to a
-`.fakeos` data variable -- which is why it proves the branch renders and parses,
-and nothing about that machine's packages. `tests/linux.py` is the authority
-there.
-
-`tests/linux.py` renders and lints every image in `linux_distros.IMAGES`
-crossed with sudo and no-sudo. `tests/macos.py`
-does the same in Lume VMs. `tests/nasprobe.py` is the one test that talks to
-something real.
 
 The user runs these. Do not. `tests/render-matrix.sh` is the exception: it is
 read-only, runs no script and touches no `$HOME`.

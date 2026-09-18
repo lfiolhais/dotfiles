@@ -23,6 +23,17 @@ the text scripts print — which is usually the larger half and the less reviewe
 Read the project's writing rules if it has any, since they are the standard
 several reviewers will measure against.
 
+While inventorying, note two things the reviewers need pointed out rather than
+left to chance. First, which documents form a parallel set — one per host, per
+service, per environment — because symmetry is judged pair-wise across files
+and a reviewer reading one file at a time never sees it. Second, every external
+dependency the system runs on — an account at a third-party service, an API
+credential, email that something else sends — because the check that matters is
+not whether each is documented somewhere but whether the entry-point document
+names them all as prerequisites. The same applies to the target machines
+themselves: a repository whose output is a configured machine needs a
+documented path from blank hardware to the state its first run assumes.
+
 Then establish ground truth on the things you will have to adjudicate later:
 what the commands actually are, what the counts actually are, what the file
 layout actually is. Reviewers will disagree with each other and with the
@@ -185,7 +196,14 @@ the corpus as it was.
 The usual shape of the fix:
 
 - The human document gets a front door — what this is, prerequisites as
-  commands, the first command in full, and what it changes irreversibly.
+  commands, the first command in full, and what it changes irreversibly. The
+  prerequisites include every external-service account the system depends on
+  and, where the output is a configured machine, how the machine reaches the
+  state the first run assumes — facts that usually already exist deep in a
+  reference section and only need surfacing, not writing.
+- Parallel documents are reshaped to the same skeleton, and each section one
+  has that the other cannot gets a sentence in the shorter file saying why it
+  does not apply there.
 - Procedures a person needs move out of agent material into the human document.
 - Agent material shrinks to what an agent needs *in addition*, and cites the
   human document rather than restating it. Duplication is removed, not
