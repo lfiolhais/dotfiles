@@ -2,8 +2,11 @@
 -- `<leader>dd` map to the dashboard, and the autocommands that route the read
 -- and write of an item buffer and of a new ticket's draft, and attach an item
 -- buffer's keymaps. Every other `<leader>d` key belongs to one kind of buffer
--- and is set on it, by commands.attach() and commands.attach_dash(). Every body here requires its module on the first use, so this
--- file loads nothing. The configuration's init.lua carries
+-- and is set on it, by commands.attach(), commands.attach_dash() and, on the
+-- buffers of a review's diff, commands.attach_review(); the autocommands that
+-- key a review are made when `:Docket review` first opens one, since until
+-- then there is no review to key. Every body here requires its module on the
+-- first use, so this file loads nothing. The configuration's init.lua carries
 -- `require('docket').setup{}` alone, which loads init, config and highlight
 -- at startup: the options and the highlight groups. The read path, the
 -- adapters and every client load at the first command that needs them.
@@ -18,7 +21,7 @@ vim.api.nvim_create_user_command("Docket", function(command)
 end, {
   nargs = "*",
   bang = true,
-  desc = "Docket: the dashboard, an item, login [<backend>], review <id>, create [<project>]; ! forces a re-login",
+  desc = "Docket: the dashboard, an item, login [<backend>], review <id> or <verb>, create [<project>]; ! forces a re-login, or a review submit",
   complete = function(lead, line)
     return require("docket.commands").complete(lead, line)
   end,

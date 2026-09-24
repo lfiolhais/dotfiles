@@ -6,8 +6,8 @@
 -- region compare, the adapter contract, the in-flight join, the cache, the
 -- Jira, GitLab and GitHub adapters, the login flow, the item buffer's marks
 -- and its write path, completion, the dashboard, the commands -- a
--- transition, an assignment and a new ticket's draft among them -- the help
--- tags, the health report and the plugin file.
+-- transition, an assignment and a new ticket's draft among them -- the review
+-- mode, the help tags, the health report and the plugin file.
 --
 -- No git runs, no client is called, no tmux window opens: every process call
 -- goes through spawn, and the tests that reach one replace spawn.run or
@@ -20,9 +20,11 @@
 -- an item buffer's lines, which the editor runs through `sh` with `sort` and
 -- `sed`, both POSIX. The
 -- editor actions exercised are the tabs the launcher opens away from tmux, the
--- item and dashboard buffers, a new ticket's draft, and the scratch buffers
--- the item buffer's marks are tested in, all of which nvim -l can create. A
--- picker is vim.ui.select replaced for the test.
+-- item and dashboard buffers, a new ticket's draft, the scratch buffers the
+-- item buffer's marks are tested in, and a review's tab, file and compose
+-- floats, all of which nvim -l can create. diffview.nvim is two user commands
+-- declared by the review tests, and its view a table put in package.loaded.
+-- A picker is vim.ui.select replaced for the test.
 --
 -- Runs under nvim, the interpreter that loads these modules:
 --
@@ -57,6 +59,7 @@ local jira = require("docket.adapters.jira")
 local list = require("docket.list")
 local render = require("docket.render")
 local repo = require("docket.repo")
+local review = require("docket.review")
 local row = require("docket.row")
 local spawn = require("docket.spawn")
 
@@ -4163,17 +4166,25 @@ test("commands: the launcher's warning is printed beside the path, never dropped
   eq(level, vim.log.levels.WARN)
 end)
 
-test("commands: the review mode reports that it is not built, and a malformed argument list is refused", function()
+test("commands: :Docket review opens the review mode on the merge request's adapter, and a malformed argument list is refused", function()
+  -- The review mode is built, and `:Docket review !4` is the command the
+  -- launcher's editor window runs for R, so it reaches review.open() with the
+  -- adapter the identifier names. No adapter is handed down: review.open()
+  -- makes the state check itself, after the check that diffview is there.
+  local opened, saved_open = {}, review.open
+  review.open = function(source, id, adapter)
+    opened[#opened + 1] = { source = source, id = id, adapter = adapter ~= nil }
+  end
   local notices, restore = stub_notify()
   commands.run({ fargs = { "review", "!4" }, bang = false })
   commands.run({ fargs = { "PROJ-1", "PROJ-2" }, bang = false })
   commands.run({ fargs = { "lower-1" }, bang = false })
   restore()
-  eq(notices[1].message, commands.NOT_BUILT.review)
-  eq(notices[1].level, vim.log.levels.WARN)
-  eq(notices[2].message:find("one identifier", 1, true) ~= nil, true, notices[2].message)
-  eq(notices[3].level, vim.log.levels.ERROR)
-  eq(#notices, 3)
+  review.open = saved_open
+  eq(opened, { { source = "glab", id = "!4", adapter = false } })
+  eq(notices[1].message:find("one identifier", 1, true) ~= nil, true, notices[1].message)
+  eq(notices[2].level, vim.log.levels.ERROR)
+  eq(#notices, 2)
 end)
 
 test("commands: an item on a backend not signed in names the login command", function()
@@ -10503,6 +10514,3177 @@ test("plugin: :e on a draft's name fills it, :w on it goes to the create, and :e
   eq(after_failure, sent, "and a refused create leaves it to correct")
   eq(modified, true)
   eq(notices[#notices], { message = "docket-new://jira: acli exited 1\nError: issuetype is required", level = vim.log.levels.ERROR })
+end)
+
+-- phase 7: the review mode
+
+-- The file the review tests comment on is the one the GitLab fixtures'
+-- discussions sit in, twenty lines long, in a worktree of its own on disk:
+-- locate() finds a buffer's file by resolving its path under the worktree.
+-- The worktree is returned resolved, as review.lua holds it.
+local REVIEW_FILE = "lua/docket/env.lua"
+
+local function review_worktree()
+  local dir = vim.fn.tempname()
+  vim.fn.mkdir(dir .. "/lua/docket", "p")
+  local lines = {}
+  for index = 1, 20 do
+    lines[index] = ("line %d"):format(index)
+  end
+  vim.fn.writefile(lines, dir .. "/" .. REVIEW_FILE)
+  return vim.uv.fs_realpath(dir)
+end
+
+-- git and glab's state check as review.lua meets them through spawn.wait:
+-- the worktree is on !482's source branch at its head, its merge base with
+-- the target is !482's base, it holds no uncommitted change, and a directory
+-- outside it is in no worktree. glab is signed in. `answers` replaces any git
+-- answer, keyed by the words after `git`.
+local function review_wait(worktree, answers)
+  answers = answers or {}
+  local fixed = {
+    ["rev-parse HEAD"] = DIFF_REFS.head_sha .. "\n",
+    ["rev-parse --abbrev-ref HEAD"] = merge_request().source_branch .. "\n",
+    ["merge-base origin/main HEAD"] = DIFF_REFS.base_sha .. "\n",
+    ["status --porcelain --untracked-files=no"] = "",
+    ["diff --quiet HEAD -- " .. REVIEW_FILE] = "",
+    -- One hunk that shows every line of the file on both sides.
+    ["diff -U3 --no-color " .. DIFF_REFS.base_sha .. " HEAD -- " .. REVIEW_FILE] = table.concat({
+      "diff --git a/" .. REVIEW_FILE .. " b/" .. REVIEW_FILE,
+      "--- a/" .. REVIEW_FILE,
+      "+++ b/" .. REVIEW_FILE,
+      "@@ -1,20 +1,20 @@",
+      "",
+    }, "\n"),
+  }
+  return stub_wait(function(argv, opts)
+    if argv[1] == "glab" and argv[2] == "auth" then
+      return done(argv, "✓ Logged in to gitlab.example.test as me\n")
+    end
+    if argv[1] ~= "git" then
+      return failed(argv, 1, "unexpected: " .. table.concat(argv, " "))
+    end
+    local asked = table.concat(argv, " ", 2)
+    if answers[asked] then
+      return answers[asked](argv, opts)
+    end
+    if asked == "rev-parse --show-toplevel" then
+      local cwd = vim.uv.fs_realpath(opts.cwd) or opts.cwd
+      if cwd == worktree or cwd:sub(1, #worktree + 1) == worktree .. "/" then
+        return done(argv, worktree .. "\n")
+      end
+      return failed(argv, 128, "fatal: not a git repository (or any of the parent directories): .git\n")
+    end
+    if fixed[asked] then
+      return done(argv, fixed[asked])
+    end
+    return failed(argv, 1, "unexpected: " .. table.concat(argv, " "))
+  end)
+end
+
+-- diffview.nvim as review.lua meets it: `:DiffviewOpen` records its
+-- arguments and opens a tab showing the worktree's file, which is what
+-- `--imply-local` makes of the new side, and `:DiffviewClose` closes the tab
+-- it runs in. With `tab` false it opens nothing, as diffview does for a range
+-- it cannot read. review_case() deletes both commands.
+local function stub_diffview(worktree, opts)
+  opts = opts or {}
+  local opened = {}
+  vim.api.nvim_create_user_command("DiffviewOpen", function(command)
+    opened[#opened + 1] = command.fargs
+    if opts.tab ~= false then
+      vim.cmd.tabnew()
+      vim.cmd.edit(vim.fn.fnameescape(worktree .. "/" .. REVIEW_FILE))
+    end
+  end, { nargs = "*" })
+  vim.api.nvim_create_user_command("DiffviewClose", function()
+    vim.cmd.tabclose()
+  end, {})
+  return opened
+end
+
+-- An adapter carrying every call a review makes and nothing else, each one
+-- answered by stub_calls from a libuv timer -- the fast event a client's
+-- answer lands in -- with what `answers` returns for it, or held for the test
+-- to release. A call `answers` does not name raises.
+local function review_adapter(answers)
+  local adapter = {
+    capabilities = vim.deepcopy(review.NEEDS),
+    url = function()
+      return merge_request().web_url
+    end,
+  }
+  for _, name in ipairs(review.NEEDS) do
+    adapter[name] = function()
+      error("the test gave " .. name .. " no answer")
+    end
+  end
+  local calls = stub_calls(adapter, answers)
+  return adapter, calls
+end
+
+-- !482 as its read answers it, with no discussion, and every write
+-- succeeding; `overrides` replace any of the calls.
+local function review_answers(overrides)
+  return vim.tbl_extend("force", {
+    diff = function()
+      return { source = merge_request().source_branch, target = "main", refs = vim.deepcopy(DIFF_REFS) }
+    end,
+    threads = function()
+      return {}
+    end,
+    line_comment = function()
+      return true
+    end,
+    thread_resolve = function()
+      return true
+    end,
+    submit = function()
+      return true
+    end,
+  }, overrides or {})
+end
+
+-- A discussion as threads() answers one, on `line` of REVIEW_FILE's new
+-- side: a resolvable thread, not resolved, of one note. `fields` replace any
+-- of that, `position` whole.
+local function review_thread(id, line, fields)
+  return vim.tbl_extend("force", {
+    id = id,
+    individual = false,
+    resolvable = true,
+    resolved = false,
+    position = { new_path = REVIEW_FILE, old_path = REVIEW_FILE, new_line = line },
+    notes = { { author = { id = "ana", name = "Ana" }, body = ("On %s."):format(id) } },
+  }, fields or {})
+end
+
+-- !482's review in the worktree as load() leaves it, with no diff open: the
+-- worktree on the source branch at the merge request's head and base.
+local function read_review(worktree)
+  local r = review.start("glab", "!482", worktree)
+  r.head, r.base, r.branch = DIFF_REFS.head_sha, DIFF_REFS.base_sha, merge_request().source_branch
+  r.source_branch, r.target, r.refs = merge_request().source_branch, "main", vim.deepcopy(DIFF_REFS)
+  return r
+end
+
+-- What review.lua gives every adapter call in place of !482: the reference
+-- naming the worktree.
+local function review_ref(worktree)
+  return { id = "!482", cwd = worktree }
+end
+
+-- Opens !482's review from inside the worktree and waits for the report or
+-- the refusal that ends the open, which `notices` collects. With no adapter,
+-- review.open() asks auth.ready() for one, as the command does.
+local function open_review(worktree, adapter, notices)
+  vim.cmd.cd(vim.fn.fnameescape(worktree))
+  local before = #notices
+  local r = review.open("glab", "!482", adapter)
+  vim.wait(2000, function()
+    return #notices > before
+  end)
+  return r
+end
+
+-- Sends a review and waits for what it reports, as `{ ok, message }`.
+local function send_and_wait(r, adapter, verdict)
+  local reported
+  review.send(r, adapter, verdict, function(ok, message)
+    reported = { ok, message }
+  end)
+  vim.wait(2000, function()
+    return reported ~= nil
+  end)
+  return reported
+end
+
+-- What the review draws in a buffer: each mark's 0-based row, and its
+-- virtual lines as the text they show.
+local function review_drawn(buf)
+  local space = vim.api.nvim_create_namespace("docket/review")
+  local found = {}
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, space, 0, -1, { details = true })) do
+    local lines = {}
+    for _, chunks in ipairs(mark[4].virt_lines or {}) do
+      lines[#lines + 1] = table.concat(vim.tbl_map(function(chunk)
+        return chunk[1]
+      end, chunks))
+    end
+    found[#found + 1] = { row = mark[2], lines = lines }
+  end
+  return found
+end
+
+-- Writes `lines` into the compose buffer in the current window with `:w`,
+-- and waits for the buffer to go, which it does once what was written is
+-- held or sent.
+local function compose_write(lines)
+  local buf = vim.api.nvim_get_current_buf()
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.cmd.write()
+  vim.wait(1000, function()
+    return not vim.api.nvim_buf_is_valid(buf)
+  end)
+  return buf
+end
+
+-- The review's keys as a buffer has them: each key's description where the
+-- buffer maps it, false where it does not.
+local function review_keys_on(buf)
+  return vim.api.nvim_buf_call(buf, function()
+    return vim.tbl_map(function(key)
+      local map = vim.fn.maparg(key.lhs, "n", false, true)
+      return map.buffer == 1 and map.desc or false
+    end, commands.REVIEW_KEYS)
+  end)
+end
+
+local PLUGIN = root .. "/dot_local/share/private_nvim/private_site/pack/docket/start/docket/plugin/docket.lua"
+
+-- Runs a review test in a worktree of its own, and puts the editor back
+-- whatever the test did, failing or not: every function a review test
+-- replaces, the working directory, the tabs and buffers the test left, the
+-- diffview commands and view, the plugin's command, and every review of the
+-- worktree, discarded. A review test that fails would otherwise leave its
+-- tab current and its review answering review.current() for the next one.
+local function review_case(body)
+  local saved = {
+    { auth, "ready" },
+    { review, "open" },
+    { review, "comment" },
+    { review, "reply" },
+    { review, "resolve" },
+    { review, "submit" },
+    { review, "abandon" },
+    { list, "row_at" },
+    { list, "state" },
+    { gh, "item" },
+    { vim, "notify" },
+    { vim.ui, "select" },
+    { vim.api, "nvim_echo" },
+    { vim.cmd, "redraw" },
+    { vim.env, "TMUX" },
+  }
+  for _, entry in ipairs(saved) do
+    entry[3] = entry[1][entry[2]]
+  end
+  local cwd = vim.fn.getcwd()
+  local tabs = {}
+  for _, tab in ipairs(vim.api.nvim_list_tabpages()) do
+    tabs[tab] = true
+  end
+  local worktree = review_worktree()
+  local ok, err = pcall(body, worktree)
+  -- A client answer still on its timer, and what it schedules, land here,
+  -- in this test, rather than in the next one's notices.
+  vim.wait(20)
+  for _, entry in ipairs(saved) do
+    entry[1][entry[2]] = entry[3]
+  end
+  package.loaded["diffview.lib"] = nil
+  for _, id in ipairs({ "!482", "!4" }) do
+    local left = review.get(worktree, id)
+    if left then
+      review.discard(left)
+    end
+  end
+  for _, tab in ipairs(vim.api.nvim_list_tabpages()) do
+    if not tabs[tab] and #vim.api.nvim_list_tabpages() > 1 then
+      vim.cmd.tabclose(vim.api.nvim_tabpage_get_number(tab))
+    end
+  end
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    local name = vim.api.nvim_buf_get_name(buf)
+    local real = vim.uv.fs_realpath(name) or name
+    if name:sub(1, #review.SCHEME) == review.SCHEME or real:sub(1, #worktree + 1) == worktree .. "/" then
+      vim.api.nvim_buf_delete(buf, { force = true })
+    end
+  end
+  pcall(vim.api.nvim_del_user_command, "DiffviewOpen")
+  pcall(vim.api.nvim_del_user_command, "DiffviewClose")
+  if vim.g.loaded_docket then
+    pcall(vim.api.nvim_del_user_command, "Docket")
+    vim.g.loaded_docket = nil
+  end
+  vim.cmd.cd(vim.fn.fnameescape(cwd))
+  if not ok then
+    error(err, 0)
+  end
+end
+
+test("review: the module loads inside a fast event, making no call there that the editor refuses", function()
+  local saved = package.loaded["docket.review"]
+  package.loaded["docket.review"] = nil
+  local loaded
+  local timer = vim.uv.new_timer()
+  timer:start(0, 0, function()
+    timer:close()
+    loaded = { pcall(require, "docket.review") }
+  end)
+  vim.wait(2000, function()
+    return loaded ~= nil
+  end)
+  package.loaded["docket.review"] = saved
+  eq(loaded[1], true, tostring(loaded[2]))
+  eq(type(loaded[2].open), "function")
+end)
+
+test("review: a machine without diffview is told so in one line, from the command as well, and nothing runs or raises", function()
+  review_case(function(worktree)
+    eq(vim.fn.exists(":DiffviewOpen"), 0, "no diffview in this editor")
+    local adapter, calls = review_adapter(review_answers())
+    local notices = stub_notify()
+    vim.cmd.cd(vim.fn.fnameescape(worktree))
+    -- spawn raises between tests, so a check that reached git or glab would
+    -- raise here, and the command's pcall would say so.
+    local opened = review.open("glab", "!482", adapter)
+    local ran, raised = pcall(commands.run, { fargs = { "review", "!482" }, bang = false })
+    eq(opened, nil)
+    eq({ ran, raised }, { true, nil })
+    eq(notices, {
+      { message = review.NO_DIFFVIEW, level = vim.log.levels.WARN },
+      { message = review.NO_DIFFVIEW, level = vim.log.levels.WARN },
+    })
+    eq(review.NO_DIFFVIEW:find("\n", 1, true), nil, "one line")
+    eq(calls, {})
+    eq(review.get(worktree, "!482"), nil, "no review is made")
+  end)
+end)
+
+test("review: an adapter missing a call the review makes is refused naming the call, before git or the client runs", function()
+  review_case(function(worktree)
+    stub_diffview(worktree)
+    local adapter, calls = review_adapter(review_answers())
+    adapter.capabilities = vim.tbl_filter(function(name)
+      return name ~= "submit"
+    end, adapter.capabilities)
+    local notices = stub_notify()
+    vim.cmd.cd(vim.fn.fnameescape(worktree))
+    eq(review.open("glab", "!482", adapter), nil)
+    eq(notices, { { message = "!482: glab has no review mode; it does not implement submit", level = vim.log.levels.ERROR } })
+    eq(calls, {})
+  end)
+end)
+
+test("review: open diffs origin/<target>...HEAD in a tab of its own and reports its discussions and how many are on lines", function()
+  review_case(function(worktree)
+    review_wait(worktree)
+    local opened = stub_diffview(worktree)
+    local general = review_thread("general", 1, { individual = true })
+    general.position = nil
+    local adapter, calls = review_adapter(review_answers({
+      threads = function()
+        return { review_thread("t1", 12), general }
+      end,
+    }))
+    local notices = stub_notify()
+    local before = vim.api.nvim_get_current_tabpage()
+    local r = open_review(worktree, adapter, notices)
+    eq(opened, { { "origin/main...HEAD", "--imply-local" } })
+    eq(r.tab ~= nil and r.tab ~= before, true, "a tab of its own")
+    eq(vim.api.nvim_get_current_tabpage(), r.tab, "and it is the current one")
+    eq(review.current(), r)
+    eq(
+      { r.root, r.head, r.base, r.branch, r.source_branch, r.target },
+      { worktree, DIFF_REFS.head_sha, DIFF_REFS.base_sha, "feature/acli.bump", "feature/acli.bump", "main" }
+    )
+    eq(r.refs, DIFF_REFS)
+    eq(names(calls), { "diff", "threads" })
+    eq(notices, {
+      {
+        message = "!482: 2 discussion(s), 1 on lines of the diff; 0 comment(s) held. :Docket review comment holds one at the cursor, and :Docket review submit sends them.",
+        level = vim.log.levels.INFO,
+      },
+    })
+  end)
+end)
+
+test("review: open refuses a worktree on another branch, a target with no merge base here, and a diffview that opened no tab", function()
+  review_case(function(worktree)
+    local adapter = review_adapter(review_answers())
+    local notices = stub_notify()
+    local function attempt(answers, diffview)
+      local previous = review.get(worktree, "!482")
+      if previous then
+        review.discard(previous)
+      end
+      review_wait(worktree, answers)
+      local opened = stub_diffview(worktree, diffview)
+      return open_review(worktree, adapter, notices), opened
+    end
+    local on_other, other_opened = attempt({
+      ["rev-parse --abbrev-ref HEAD"] = function(argv)
+        return done(argv, "PROJ-1-other\n")
+      end,
+    })
+    local no_base, base_opened = attempt({
+      ["merge-base origin/main HEAD"] = function(argv)
+        return failed(argv, 128, "fatal: Not a valid object name origin/main\n")
+      end,
+    })
+    local no_tab, tab_opened = attempt({}, { tab = false })
+    eq({ #other_opened, #base_opened, #tab_opened }, { 0, 0, 1 }, "diffview is asked only once the worktree holds the merge request's change")
+    eq(notices, {
+      {
+        message = ("!482: %s is on PROJ-1-other and the merge request's source branch is feature/acli.bump, so origin/main...HEAD would not be its change. R on the dashboard builds its worktree."):format(worktree),
+        level = vim.log.levels.ERROR,
+      },
+      {
+        message = ("!482: origin/main has no merge base with HEAD here. Fetch it and open the review again:\n  git -C %s fetch origin main\n  :Docket review !482\ngit exited 128\nfatal: Not a valid object name origin/main\n"):format(worktree),
+        level = vim.log.levels.ERROR,
+      },
+      {
+        message = "!482: diffview opened no tab for origin/main...HEAD; :messages holds its reason. The held comments are kept.",
+        level = vim.log.levels.ERROR,
+      },
+    })
+    eq({ on_other.tab, no_base.tab, no_tab.tab }, {}, "none of them has a tab")
+  end)
+end)
+
+test("review: open on a worktree behind the merge request's head still opens, and warns with the command that brings it level", function()
+  review_case(function(worktree)
+    review_wait(worktree, {
+      ["rev-parse HEAD"] = function(argv)
+        return done(argv, ("d"):rep(40) .. "\n")
+      end,
+    })
+    local opened = stub_diffview(worktree)
+    local notices = stub_notify()
+    local r = open_review(worktree, (review_adapter(review_answers())), notices)
+    eq(#opened, 1)
+    eq(r.tab, vim.api.nvim_get_current_tabpage())
+    eq(#notices, 1)
+    eq(notices[1].level, vim.log.levels.WARN)
+    eq(vim.split(notices[1].message, "\n"), {
+      "!482: 0 discussion(s), 0 on lines of the diff; 0 comment(s) held. :Docket review comment holds one at the cursor, and :Docket review submit sends them.",
+      "!482: the worktree is at dddddddd and the merge request's head is cccccccc, so a line numbered here is not the line a comment would land on. Bring the worktree to the head and open the review again:",
+      ("  git -C %s pull --ff-only origin feature/acli.bump"):format(worktree),
+      "  :Docket review !482",
+    })
+  end)
+end)
+
+test("review: marks draw a discussion on the side its position names, a held comment on its own side, and a held reply under its thread", function()
+  local new = { path = REVIEW_FILE, old_path = REVIEW_FILE, side = review.NEW }
+  local old = { path = REVIEW_FILE, old_path = REVIEW_FILE, side = review.OLD }
+  local threads = {
+    review_thread("added", 3),
+    review_thread("removed", nil, { position = { old_path = REVIEW_FILE, old_line = 7 } }),
+    review_thread("kept", 9, { position = { new_path = REVIEW_FILE, new_line = 9, old_path = REVIEW_FILE, old_line = 8 } }),
+    review_thread("elsewhere", 3, { position = { new_path = "lua/docket/list.lua", new_line = 3 } }),
+    review_thread("placeless", 3, { position = { position_type = "text" } }),
+  }
+  local held = {
+    { position = { file = REVIEW_FILE, line = 5 }, text = "New side." },
+    { position = { file = REVIEW_FILE, old_line = 6 }, text = "Old side." },
+    { position = { file = "lua/docket/list.lua", line = 5 }, text = "Another file." },
+    { position = { thread = "kept" }, text = "A reply." },
+  }
+  local function placed(marks)
+    return vim.tbl_map(function(mark)
+      return {
+        mark.line,
+        vim.tbl_map(function(chunks)
+          return table.concat(vim.tbl_map(function(chunk)
+            return chunk[1]
+          end, chunks))
+        end, mark.lines),
+      }
+    end, marks)
+  end
+  local bar = review.BAR
+  eq(placed(review.marks(threads, held, new)), {
+    { 3, { bar .. " Ana  unresolved", bar .. "   On added." } },
+    { 9, { bar .. " Ana  unresolved", bar .. "   On kept.", bar .. " reply, not sent", bar .. "   A reply." } },
+    { 5, { bar .. " comment, not sent", bar .. "   New side." } },
+  }, "a line the change kept is drawn on the new side alone, and the reply has no mark of its own")
+  eq(placed(review.marks(threads, held, old)), {
+    { 7, { bar .. " Ana  unresolved", bar .. "   On removed." } },
+    { 6, { bar .. " comment, not sent", bar .. "   Old side." } },
+  })
+end)
+
+test("review: locate answers a worktree file as the new side, asks diffview's view for either side, and answers nothing for any other buffer", function()
+  review_case(function(worktree)
+    local r = review.start("glab", "!482", worktree)
+    r.tab = vim.api.nvim_get_current_tabpage()
+    local file = vim.fn.bufadd(worktree .. "/" .. REVIEW_FILE)
+    vim.fn.bufload(file)
+    local outside_path = vim.fn.tempname()
+    vim.fn.writefile({ "x" }, outside_path)
+    local outside = vim.fn.bufadd(outside_path)
+    vim.fn.bufload(outside)
+    local panel = vim.api.nvim_create_buf(false, true)
+    local old_side = vim.api.nvim_create_buf(false, true)
+    local by_file = { review.locate(r, file), review.locate(r, outside), review.locate(r, panel) }
+    local view = {
+      tabpage = r.tab,
+      cur_entry = { path = REVIEW_FILE, oldpath = "lua/docket/launch.lua" },
+      cur_layout = { a = { file = { bufnr = old_side } }, b = { file = { bufnr = file } } },
+    }
+    package.loaded["diffview.lib"] = {
+      get_current_view = function()
+        return view
+      end,
+    }
+    local renamed = { review.locate(r, old_side), review.locate(r, file) }
+    -- Another file of the worktree, open in a split beside the diff.
+    vim.fn.writefile({ "y" }, worktree .. "/lua/docket/other.lua")
+    local beside = vim.fn.bufadd(worktree .. "/lua/docket/other.lua")
+    vim.fn.bufload(beside)
+    local split = review.locate(r, beside)
+    vim.api.nvim_buf_delete(beside, { force = true })
+    view.cur_entry.oldpath = nil
+    local unrenamed = review.locate(r, old_side)
+    view.tabpage = -1
+    local other_tab = { review.locate(r, old_side), review.locate(r, file) }
+    package.loaded["diffview.lib"] = {
+      get_current_view = function()
+        error("diffview changed its insides")
+      end,
+    }
+    local raising = { review.locate(r, old_side), review.locate(r, file) }
+    package.loaded["diffview.lib"] = nil
+    vim.api.nvim_buf_delete(outside, { force = true })
+    vim.api.nvim_buf_delete(panel, { force = true })
+    vim.api.nvim_buf_delete(old_side, { force = true })
+    local new_side = { path = REVIEW_FILE, side = review.NEW, local_file = true }
+    eq(by_file, { new_side }, "a file outside the worktree and a scratch buffer are no side")
+    eq(renamed, {
+      { path = REVIEW_FILE, old_path = "lua/docket/launch.lua", side = review.OLD, local_file = false },
+      { path = REVIEW_FILE, old_path = "lua/docket/launch.lua", side = review.NEW, local_file = true },
+    })
+    eq(unrenamed, { path = REVIEW_FILE, old_path = REVIEW_FILE, side = review.OLD, local_file = false })
+    eq(split, nil, "a file of the worktree that the view of this tab shows on neither side is no side")
+    eq(other_tab, { nil, new_side }, "a view of another tab is passed over, and the file route answers")
+    eq(raising, { nil, new_side }, "and so is a view that raises")
+  end)
+end)
+
+test("review: hold adds, replaces and drops the comment at a place, and refuses a line the worktree cannot place", function()
+  review_case(function(worktree)
+    local r = review.start("glab", "!482", worktree)
+    local at4 = { file = REVIEW_FILE, line = 4 }
+    local unread = { review.hold(r, at4, "Early.") }
+    r.head, r.base, r.refs = DIFF_REFS.head_sha, DIFF_REFS.base_sha, vim.deepcopy(DIFF_REFS)
+    local first = { review.hold(r, at4, "First.") }
+    local second = { review.hold(r, at4, "Second.") }
+    local replaced = vim.deepcopy(r.held)
+    local dropped = { review.hold(r, at4, "") }
+    local none = { review.hold(r, at4, "") }
+    -- Behind the head: a new-side line is refused and an old-side line is not.
+    r.head = ("d"):rep(40)
+    local behind = { review.hold(r, at4, "Behind.") }
+    local old_behind = { review.hold(r, { file = REVIEW_FILE, old_line = 4 }, "Old side.") }
+    -- Another merge base: the old side is refused and the new side is not.
+    r.head, r.base = DIFF_REFS.head_sha, ("e"):rep(40)
+    local other_base = { review.hold(r, { file = REVIEW_FILE, old_line = 5 }, "Old side again.") }
+    local new_other_base = { review.hold(r, { file = REVIEW_FILE, line = 6 }, "New side.") }
+    r.refs = nil
+    local reply = { review.hold(r, { thread = "t1" }, "A reply.") }
+    eq(unread, { false, "!482: the merge request has not been read; :Docket review !482 reads it" })
+    eq(first, { true, "!482: held at lua/docket/env.lua:4; 1 held, and :Docket review submit sends them" })
+    eq(second, { true, "!482: replaced the comment held at lua/docket/env.lua:4; 1 held" })
+    eq(replaced, { { position = at4, text = "Second.", head = DIFF_REFS.head_sha, base = DIFF_REFS.base_sha } })
+    eq(dropped, { true, "!482: dropped the comment held at lua/docket/env.lua:4; 0 held" })
+    eq(none, { true, "!482: nothing is held at lua/docket/env.lua:4" })
+    eq(behind[1], false)
+    eq(behind[2]:find("!482: the worktree is at dddddddd and the merge request's head is cccccccc", 1, true), 1, behind[2])
+    eq(old_behind[1], true)
+    eq(other_base[1], false)
+    eq(other_base[2]:find("!482: the diff here starts from eeeeeeee and the merge request's starts from aaaaaaaa", 1, true), 1, other_base[2])
+    eq(new_other_base[1], true)
+    eq(reply[1], true, "a reply is placed by its thread, so it is taken with nothing read")
+    eq(vim.tbl_map(function(entry)
+      return entry.position
+    end, r.held), { { file = REVIEW_FILE, old_line = 4 }, { file = REVIEW_FILE, line = 6 }, { thread = "t1" } })
+  end)
+end)
+
+test("review: submit posts each held comment in the order held, then applies the verdict, and nothing is held after", function()
+  review_case(function(worktree)
+    local adapter, calls = review_adapter(review_answers())
+    local r = read_review(worktree)
+    review.hold(r, { file = REVIEW_FILE, line = 9 }, "Held first.")
+    review.hold(r, { file = REVIEW_FILE, old_line = 2 }, "On the old side.")
+    review.hold(r, { thread = "t1" }, "A reply.")
+    local reported = send_and_wait(r, adapter, { approve = true, summary = "Looks right." })
+    eq(names(calls), { "diff", "line_comment", "line_comment", "line_comment", "submit", "submit" })
+    eq(vim.tbl_map(function(call)
+      return call.args
+    end, vim.list_slice(calls, 2)), {
+      { review_ref(worktree), { file = REVIEW_FILE, line = 9 }, "Held first." },
+      { review_ref(worktree), { file = REVIEW_FILE, old_line = 2 }, "On the old side." },
+      { review_ref(worktree), { thread = "t1" }, "A reply." },
+      { review_ref(worktree), { summary = "Looks right." } },
+      { review_ref(worktree), { approve = true, head = DIFF_REFS.head_sha } },
+    }, "the summary, then the approval of the head the review was opened at")
+    eq(r.held, {})
+    eq(reported, { true, "!482: posted 3 comment(s), posted the summary, approved" })
+  end)
+end)
+
+test("review: a failure part-way stops the batch, keeps the comment that failed and those after it, reports glab's own words, and a second submit sends only those", function()
+  review_case(function(worktree)
+    local creates = 0
+    local calls = stub_run_fast(function(argv, opts)
+      if argv[3] == "note" and argv[4] == "create" then
+        creates = creates + 1
+        if creates == 2 then
+          return failed(argv, 1, "ERROR: 403 Forbidden\n")
+        end
+      end
+      return glab_answer()(argv, opts)
+    end)
+    local r = read_review(worktree)
+    for _, line in ipairs({ 3, 5, 7 }) do
+      review.hold(r, { file = REVIEW_FILE, line = line }, ("At %d."):format(line))
+    end
+    local first = send_and_wait(r, glab, { approve = true })
+    local after_first = #calls
+    local still_held = vim.tbl_map(function(entry)
+      return entry.position.line
+    end, r.held)
+    local second = send_and_wait(r, glab, { approve = true })
+    local function writes(from, to)
+      local found = {}
+      for _, call in ipairs(vim.list_slice(calls, from, to)) do
+        if call.argv[4] == "create" or call.argv[3] == "approve" then
+          found[#found + 1] = { table.concat(call.argv, " "), call.opts.stdin }
+        end
+      end
+      return found
+    end
+    local create = "glab mr note create 482 --file lua/docket/env.lua --line "
+    eq(first, {
+      false,
+      ("!482: 1 of 3 held comment(s) posted. The one at lua/docket/env.lua:5 failed, and it and the 1 held after it are still held; no verdict was applied. :Docket review submit sends what is still held. A failure that came after the merge request took the comment -- a timeout, typically -- would post it twice, so check %s first.\nglab exited 1\nERROR: 403 Forbidden\n"):format(
+        merge_request().web_url
+      ),
+    })
+    eq(writes(1, after_first), { { create .. "3", "At 3.\n" }, { create .. "5", "At 5.\n" } }, "nothing after the failure, and no approval")
+    eq(still_held, { 5, 7 })
+    eq(second, { true, "!482: posted 2 comment(s), approved" })
+    eq(writes(after_first + 1, #calls), {
+      { create .. "5", "At 5.\n" },
+      { create .. "7", "At 7.\n" },
+      { "glab mr approve 482 --sha " .. DIFF_REFS.head_sha },
+    })
+    eq(r.held, {})
+  end)
+end)
+
+test("review: nothing is sent when the merge request has moved since a comment was held, and the bang posts it anyway", function()
+  review_case(function(worktree)
+    local moved = vim.tbl_extend("force", DIFF_REFS, { head_sha = ("d"):rep(40) })
+    local adapter, calls = review_adapter(review_answers({
+      diff = function()
+        return { source = merge_request().source_branch, target = "main", refs = moved }
+      end,
+    }))
+    local r = read_review(worktree)
+    review.hold(r, { file = REVIEW_FILE, line = 5 }, "Here.")
+    local refused = send_and_wait(r, adapter, { approve = true })
+    local asked = names(calls)
+    local held = #r.held
+    local forced = send_and_wait(r, adapter, { approve = true, force = true })
+    eq(asked, { "diff" })
+    eq(refused[1], false)
+    eq(refused[2]:find("its head is now dddddddd", 1, true) ~= nil, true, refused[2])
+    eq(refused[2]:find(review.VERBS.force, 1, true) ~= nil, true, refused[2])
+    eq(vim.split(refused[2], "\n")[2], "  lua/docket/env.lua:5", "the comment is named")
+    eq(held, 1)
+    eq(names(calls), { "diff", "line_comment", "submit" }, "the bang posts without reading the merge request again")
+    eq(forced, { true, "!482: posted 1 comment(s), approved" })
+  end)
+end)
+
+test("review: replies alone or a verdict alone post without reading the merge request again, nothing held and no verdict sends nothing, and a failed re-read sends nothing", function()
+  review_case(function(worktree)
+    local r = read_review(worktree)
+    local replies, reply_calls = review_adapter(review_answers())
+    review.hold(r, { thread = "t1" }, "Agreed.")
+    local replied = send_and_wait(r, replies, {})
+    local verdict_only, verdict_calls = review_adapter(review_answers())
+    local approved = send_and_wait(r, verdict_only, { approve = true })
+    local idle, idle_calls = review_adapter(review_answers())
+    local nothing = send_and_wait(r, idle, {})
+    local broken, broken_calls = review_adapter(review_answers({
+      diff = function()
+        return nil, "glab exited 1\nERROR: 500 Internal Server Error"
+      end,
+    }))
+    review.hold(r, { file = REVIEW_FILE, line = 5 }, "Here.")
+    local unread = send_and_wait(r, broken, { approve = true })
+    eq(names(reply_calls), { "line_comment" }, "no verdict makes no submit call")
+    eq(reply_calls[1].args, { review_ref(worktree), { thread = "t1" }, "Agreed." })
+    eq(replied, { true, "!482: posted 1 comment(s)" })
+    eq(names(verdict_calls), { "submit" })
+    eq(approved, { true, "!482: approved" })
+    eq(idle_calls, {})
+    eq(nothing, { false, "!482: nothing is held and no verdict was given, so nothing was sent" })
+    eq(names(broken_calls), { "diff" })
+    eq(unread, {
+      false,
+      "!482: nothing was sent, because the merge request could not be read again to check the held lines still match it\nglab exited 1\nERROR: 500 Internal Server Error",
+    })
+    eq(#r.held, 1)
+  end)
+end)
+
+test("review: while a submit is in flight a second submit, a hold and a discard are each refused, and the first ends as it began", function()
+  review_case(function(worktree)
+    local adapter, calls = review_adapter(review_answers({ line_comment = HOLD }))
+    local r = read_review(worktree)
+    review.hold(r, { file = REVIEW_FILE, line = 5 }, "Here.")
+    local first
+    review.send(r, adapter, { approve = true }, function(ok, message)
+      first = { ok, message }
+    end)
+    vim.wait(1000, function()
+      return #calls == 2
+    end)
+    local second
+    review.send(r, adapter, {}, function(ok, message)
+      second = { ok, message }
+    end)
+    local held = { review.hold(r, { file = REVIEW_FILE, line = 6 }, "Another.") }
+    local dropped = { review.hold(r, { file = REVIEW_FILE, line = 5 }, "") }
+    local discarded = { review.discard(r) }
+    calls[2].release(true)
+    vim.wait(1000, function()
+      return first ~= nil
+    end)
+    eq(second, { false, "!482: a submit is already in flight; its report comes when it ends" })
+    eq(held, { false, "!482: a submit is in flight; nothing is held or dropped until it reports" })
+    eq(dropped, held)
+    eq(discarded, { false, "!482: a submit is in flight; nothing is discarded until it reports" })
+    eq(review.get(worktree, "!482"), r)
+    eq(names(calls), { "diff", "line_comment", "submit" })
+    eq(first, { true, "!482: posted 1 comment(s), approved" })
+  end)
+end)
+
+test("review: resolve_thread refuses a thread GitLab does not let be resolved or one resolved already, and marks one resolved only when the client says so", function()
+  review_case(function(worktree)
+    local adapter, calls = review_adapter(review_answers({
+      thread_resolve = function(_, thread)
+        if thread == "fails" then
+          return false, "glab exited 1\nERROR: 403 Forbidden"
+        end
+        return true
+      end,
+    }))
+    local r = read_review(worktree)
+    local threads = {
+      fixed = review_thread("fixed", 3, { resolvable = false }),
+      done = review_thread("done", 4, { resolved = true }),
+      open = review_thread("open", 5),
+      fails = review_thread("fails", 6),
+    }
+    local answers = {}
+    for _, name in ipairs({ "fixed", "done", "open", "fails" }) do
+      review.resolve_thread(r, adapter, threads[name], function(ok, message)
+        answers[name] = { ok, message }
+      end)
+    end
+    vim.wait(1000, function()
+      return answers.open ~= nil and answers.fails ~= nil
+    end)
+    eq(answers.fixed, { false, "!482: the thread fixed cannot be resolved" })
+    eq(answers.done, { false, "!482: the thread done is resolved already" })
+    eq(answers.open, { true, "!482: resolved the thread open" })
+    eq(answers.fails, { false, "!482: the thread fails was not resolved\nglab exited 1\nERROR: 403 Forbidden" })
+    eq(vim.tbl_map(function(call)
+      return call.args[2]
+    end, calls), { "open", "fails" }, "no call for either refusal")
+    eq({ threads.open.resolved, threads.fails.resolved }, { true, false })
+  end)
+end)
+
+test("review: resolve at the cursor is offered only on a thread GitLab lets be resolved and that is not resolved yet", function()
+  review_case(function(worktree)
+    review_wait(worktree)
+    stub_diffview(worktree)
+    local adapter, calls = review_adapter(review_answers({
+      threads = function()
+        return {
+          review_thread("open", 12),
+          review_thread("fixed", 15, { resolvable = false }),
+          review_thread("done", 18, { resolved = true }),
+        }
+      end,
+    }))
+    auth.ready = function()
+      return adapter
+    end
+    local notices = stub_notify()
+    local r = open_review(worktree, adapter, notices)
+    local function resolve_at(line)
+      vim.api.nvim_win_set_cursor(0, { line, 0 })
+      local before = #notices
+      review.resolve()
+      vim.wait(1000, function()
+        return #notices > before
+      end)
+      return notices[#notices]
+    end
+    local at_fixed = resolve_at(15)
+    local at_done = resolve_at(18)
+    local at_none = resolve_at(10)
+    local at_open = resolve_at(12)
+    local refusal = "!482: the threads at this line are resolved already, or GitLab does not let them be"
+    eq(at_fixed, { message = refusal, level = vim.log.levels.WARN })
+    eq(at_done, { message = refusal, level = vim.log.levels.WARN })
+    eq(at_none, { message = "!482: no thread is drawn at this line", level = vim.log.levels.WARN })
+    eq(at_open, { message = "!482: resolved the thread open", level = vim.log.levels.INFO })
+    eq(names(calls), { "diff", "threads", "thread_resolve" })
+    eq(calls[3].args, { review_ref(worktree), "open" })
+    eq(r.threads[1].resolved, true)
+  end)
+end)
+
+test("review: decorate draws in the review's namespace, puts a line past the end on the last line, and draws only while the review's tab is current", function()
+  review_case(function(worktree)
+    review_wait(worktree)
+    stub_diffview(worktree)
+    local adapter = review_adapter(review_answers({
+      threads = function()
+        return { review_thread("near", 3), review_thread("far", 99) }
+      end,
+    }))
+    local notices = stub_notify()
+    local before = vim.api.nvim_get_current_tabpage()
+    local r = open_review(worktree, adapter, notices)
+    local file = vim.api.nvim_get_current_buf()
+    local function rows()
+      return vim.tbl_map(function(mark)
+        return { mark.row, mark.lines[#mark.lines] }
+      end, review_drawn(file))
+    end
+    local bar = review.BAR
+    local opened = rows()
+    vim.api.nvim_set_current_tabpage(before)
+    review.hold(r, { file = REVIEW_FILE, line = 7 }, "Held away.")
+    review.decorate(r)
+    local away = rows()
+    vim.api.nvim_set_current_tabpage(r.tab)
+    review.decorate(r)
+    local back = rows()
+    eq(opened, { { 2, bar .. "   On near." }, { 19, bar .. "   On far." } })
+    eq(away, opened, "nothing is drawn from another tab")
+    eq(back, { { 2, bar .. "   On near." }, { 6, bar .. "   Held away." }, { 19, bar .. "   On far." } })
+  end)
+end)
+
+test("review: comment at the cursor opens a float to write it in, and :w there holds it, closes the float, and sends nothing", function()
+  review_case(function(worktree)
+    review_wait(worktree)
+    stub_diffview(worktree)
+    local adapter, calls = review_adapter(review_answers())
+    local notices = stub_notify()
+    local r = open_review(worktree, adapter, notices)
+    local diff_win = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_cursor(0, { 5, 0 })
+    review.comment()
+    local compose = vim.api.nvim_get_current_buf()
+    local shape = {
+      name = vim.api.nvim_buf_get_name(compose),
+      buftype = vim.bo[compose].buftype,
+      filetype = vim.bo[compose].filetype,
+      float = vim.api.nvim_win_get_config(0).relative ~= "",
+      lines = vim.api.nvim_buf_get_lines(compose, 0, -1, false),
+    }
+    compose_write({ "", "Needs a test.", "" })
+    local back = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_cursor(0, { 5, 0 })
+    review.comment()
+    local again = vim.api.nvim_get_current_buf()
+    local prefilled = { vim.api.nvim_buf_get_lines(again, 0, -1, false), vim.bo[again].modified }
+    eq(shape, { name = "docket-review://" .. worktree .. "/!482/lua/docket/env.lua:5", buftype = "acwrite", filetype = "markdown", float = true, lines = { "" } })
+    eq(vim.api.nvim_buf_is_valid(compose), false, "the buffer is wiped once the comment is held")
+    eq(back, diff_win, "and the cursor is back on the diff")
+    eq(r.held, { { position = { file = REVIEW_FILE, line = 5 }, text = "Needs a test.", head = DIFF_REFS.head_sha, base = DIFF_REFS.base_sha } })
+    eq(notices[#notices], { message = "!482: held at lua/docket/env.lua:5; 1 held, and :Docket review submit sends them", level = vim.log.levels.INFO })
+    eq(prefilled, { { "Needs a test." }, false }, "commenting at the same line again starts from what is held")
+    eq(names(calls), { "diff", "threads" }, "holding sends nothing")
+  end)
+end)
+
+test("review: comment refuses a line whose buffer has unsaved changes or whose file differs from HEAD, and opens nothing to write in", function()
+  review_case(function(worktree)
+    local differs = false
+    review_wait(worktree, {
+      ["diff --quiet HEAD -- " .. REVIEW_FILE] = function(argv)
+        if differs then
+          return failed(argv, 1, "")
+        end
+        return done(argv, "")
+      end,
+    })
+    stub_diffview(worktree)
+    local notices = stub_notify()
+    open_review(worktree, (review_adapter(review_answers())), notices)
+    local file = vim.api.nvim_get_current_buf()
+    vim.api.nvim_buf_set_lines(file, 0, 1, false, { "typed, not saved" })
+    vim.api.nvim_win_set_cursor(0, { 5, 0 })
+    review.comment()
+    local unsaved = notices[#notices]
+    vim.cmd("edit!")
+    differs = true
+    vim.api.nvim_win_set_cursor(0, { 5, 0 })
+    review.comment()
+    local changed = notices[#notices]
+    eq(unsaved, {
+      message = "!482: lua/docket/env.lua has unsaved changes, so its lines are not the merge request's; :e! discards them",
+      level = vim.log.levels.ERROR,
+    })
+    eq(changed, {
+      message = ("!482: lua/docket/env.lua differs from HEAD in the worktree, so its lines are not the merge request's; git -C %s stash sets the change aside"):format(worktree),
+      level = vim.log.levels.ERROR,
+    })
+    eq(buffer.named(review.SCHEME .. "!482/lua/docket/env.lua:5"), nil, "no buffer to write it in")
+    eq(vim.api.nvim_get_current_buf(), file)
+  end)
+end)
+
+test("review: a review with two line comments is submitted as one batch: held at :w, nothing sent until submit, then each comment and the approval", function()
+  review_case(function(worktree)
+    vim.g.loaded_docket = nil
+    dofile(PLUGIN)
+    review_wait(worktree)
+    local calls = stub_run_fast(glab_answer())
+    stub_diffview(worktree)
+    local notices = stub_notify()
+    vim.cmd.cd(vim.fn.fnameescape(worktree))
+    vim.cmd("Docket review !482")
+    vim.wait(2000, function()
+      return review.current() ~= nil
+    end)
+    local r = review.current()
+    local file = vim.api.nvim_get_current_buf()
+    vim.wait(1000, function()
+      return review_keys_on(file)[1] ~= false
+    end)
+    local key = vim.api.nvim_replace_termcodes("<leader>dc", true, false, true)
+    for _, case in ipairs({ { 3, "First." }, { 7, "Second." } }) do
+      vim.api.nvim_win_set_cursor(0, { case[1], 0 })
+      vim.api.nvim_feedkeys(key, "x", false)
+      compose_write({ case[2] })
+    end
+    local read = #calls
+    local held = vim.tbl_map(function(entry)
+      return { entry.position.line, entry.text }
+    end, r.held)
+    -- The read after the submit replaces the discussions once it lands.
+    local threads = r.threads
+    vim.cmd("Docket review submit approve")
+    vim.wait(2000, function()
+      return r.threads ~= threads
+    end)
+    local function sent(from)
+      return vim.tbl_map(function(call)
+        return { table.concat(call.argv, " "), call.opts.stdin }
+      end, vim.list_slice(calls, from))
+    end
+    local view = { "glab mr view 482 -F json" }
+    local api = { "glab api projects/:id/merge_requests/482" }
+    local list_notes = { "glab mr note list 482 -F json" }
+    local create = "glab mr note create 482 --file lua/docket/env.lua --line "
+    eq(held, { { 3, "First." }, { 7, "Second." } })
+    eq(vim.list_slice(sent(1), 1, read), { view, api, list_notes }, "holding sends nothing")
+    eq(sent(read + 1), {
+      view,
+      api,
+      { create .. "3", "First.\n" },
+      { create .. "7", "Second.\n" },
+      { "glab mr approve 482 --sha " .. DIFF_REFS.head_sha },
+      view,
+      api,
+      list_notes,
+    }, "the merge request is read again first, and after, for what was posted")
+    eq(r.held, {})
+    eq(vim.tbl_contains(vim.tbl_map(function(notice)
+      return notice.message
+    end, notices), "!482: posted 2 comment(s), approved"), true, vim.inspect(notices))
+  end)
+end)
+
+test("review: an abandoned review sends nothing, drops what it held and its keys, and a read that lands after is refused", function()
+  review_case(function(worktree)
+    vim.g.loaded_docket = nil
+    dofile(PLUGIN)
+    review_wait(worktree)
+    local calls = stub_run_fast(glab_answer())
+    stub_diffview(worktree)
+    local notices = stub_notify()
+    vim.cmd.cd(vim.fn.fnameescape(worktree))
+    vim.cmd("Docket review !482")
+    vim.wait(2000, function()
+      return review.current() ~= nil
+    end)
+    local r = review.current()
+    local tab, file = r.tab, vim.api.nvim_get_current_buf()
+    vim.wait(1000, function()
+      return review_keys_on(file)[1] ~= false
+    end)
+    review.hold(r, { file = REVIEW_FILE, line = 3 }, "First.")
+    review.hold(r, { thread = string.rep("2", 40) }, "Agreed.")
+    vim.cmd("Docket review abandon")
+    local abandoned = notices[#notices]
+    local keys_after = review_keys_on(file)
+    vim.cmd("Docket review submit")
+    local after = notices[#notices]
+    vim.wait(50)
+    local none = vim.tbl_map(function()
+      return false
+    end, commands.REVIEW_KEYS)
+    eq(abandoned, { message = "!482: abandoned; 2 held comment(s) discarded and nothing sent", level = vim.log.levels.INFO })
+    eq(review.get(worktree, "!482"), nil)
+    eq(r.held, {})
+    eq(vim.api.nvim_tabpage_is_valid(tab), false, "the diff is closed")
+    eq(keys_after, none, "and its keys are off the worktree's file")
+    eq(after, { message = "no review in this tab; :Docket review <id> opens one", level = vim.log.levels.ERROR })
+    eq(vim.tbl_map(function(call)
+      return table.concat(call.argv, " ")
+    end, calls), { "glab mr view 482 -F json", "glab api projects/:id/merge_requests/482", "glab mr note list 482 -F json" }, "the read that opened it, and nothing after")
+
+    -- A read in flight when a review is abandoned is refused when it lands.
+    local late = review.start("glab", "!482", worktree)
+    local adapter, adapter_calls = review_adapter(review_answers({ diff = HOLD }))
+    local answered
+    review.load(late, adapter, function(ok, err)
+      answered = { ok, err }
+    end)
+    review.discard(late)
+    adapter_calls[1].release({ source = merge_request().source_branch, target = "main", refs = vim.deepcopy(DIFF_REFS) })
+    vim.wait(1000, function()
+      return answered ~= nil
+    end)
+    eq(answered, { false, "the review was abandoned while the merge request was being read; nothing of it is kept" })
+    eq({ late.refs, late.threads }, { nil, {} })
+  end)
+end)
+
+test("review: submit from a tab in another worktree or in no repository is refused before any call, and a summary is written in a buffer whose empty :w sends nothing", function()
+  review_case(function(worktree)
+    local other = review_worktree()
+    review_wait(worktree, {
+      ["rev-parse --show-toplevel"] = function(argv, opts)
+        local cwd = vim.uv.fs_realpath(opts.cwd) or opts.cwd
+        for _, top in ipairs({ worktree, other }) do
+          if cwd == top then
+            return done(argv, top .. "\n")
+          end
+        end
+        return failed(argv, 128, "fatal: not a git repository (or any of the parent directories): .git\n")
+      end,
+    })
+    stub_diffview(worktree)
+    local adapter, calls = review_adapter(review_answers())
+    local readied = 0
+    auth.ready = function()
+      readied = readied + 1
+      return adapter
+    end
+    local notices = stub_notify()
+    local r = open_review(worktree, adapter, notices)
+    review.hold(r, { file = REVIEW_FILE, line = 5 }, "Here.")
+    vim.cmd.tcd(vim.fn.fnameescape(other))
+    review.submit({ approve = true })
+    local elsewhere = notices[#notices]
+    local nowhere = vim.fn.tempname()
+    vim.fn.mkdir(nowhere, "p")
+    nowhere = vim.uv.fs_realpath(nowhere)
+    vim.cmd.tcd(vim.fn.fnameescape(nowhere))
+    review.submit({ approve = true })
+    local outside = notices[#notices]
+    vim.cmd.tcd(vim.fn.fnameescape(worktree))
+    local asked = names(calls)
+    review.submit({ approve = true, summary = true })
+    local summary = vim.api.nvim_get_current_buf()
+    local summary_name = vim.api.nvim_buf_get_name(summary)
+    vim.cmd.write()
+    local empty = notices[#notices]
+    local after_empty = { names(calls), readied, vim.api.nvim_buf_is_valid(summary) }
+    -- The read after the submit replaces the discussions once it lands.
+    local threads = r.threads
+    compose_write({ "Ship it." })
+    vim.wait(1000, function()
+      return r.threads ~= threads
+    end)
+    eq(elsewhere, {
+      message = ("!482: this tab is in %s, not in %s, where the review was opened; :tcd %s and run it again"):format(other, worktree, worktree),
+      level = vim.log.levels.ERROR,
+    })
+    eq(outside, {
+      message = ("!482: %s is in no repository, so glab's state check there is not about the host !482 is on; :tcd %s and run it again\ngit exited 128\nfatal: not a git repository (or any of the parent directories): .git\n"):format(
+        nowhere,
+        worktree
+      ),
+      level = vim.log.levels.ERROR,
+    })
+    eq(asked, { "diff", "threads" }, "refused before the state check or any call")
+    eq(summary_name, "docket-review://" .. worktree .. "/!482/summary")
+    eq(empty, {
+      message = "!482: the summary is empty, so nothing was sent; :Docket review submit approve sends the held comments without one",
+      level = vim.log.levels.WARN,
+    }, "the command named is the one asked for, less the summary")
+    eq(after_empty, { { "diff", "threads" }, 0, true })
+    eq(names(calls), { "diff", "threads", "diff", "line_comment", "submit", "submit", "diff", "threads" }, "and after the submit the merge request is read again")
+    eq({ calls[5].args, calls[6].args }, {
+      { review_ref(worktree), { summary = "Ship it." } },
+      { review_ref(worktree), { approve = true, head = DIFF_REFS.head_sha } },
+    })
+    eq(vim.api.nvim_buf_is_valid(summary), false)
+    eq(readied, 1)
+  end)
+end)
+
+test("review: reply is offered on a thread and not on a standalone comment, which individual_note decides", function()
+  review_case(function(worktree)
+    review_wait(worktree)
+    -- A thread of one note and a standalone comment, both on lines: a
+    -- note count would call the thread standalone as well.
+    local thread = {
+      id = string.rep("2", 40),
+      individual_note = false,
+      notes = { gl_note(3, gl_user("ana", "Ana"), "Why here?", { type = "DiffNote", resolvable = true, resolved = false, position = gl_position(12) }) },
+    }
+    local standalone = {
+      id = string.rep("4", 40),
+      individual_note = true,
+      notes = { gl_note(7, gl_user("ana", "Ana"), "A remark on this line.", { type = "DiffNote", position = gl_position(15) }) },
+    }
+    stub_run_fast(function(argv, opts)
+      if argv[3] == "note" and argv[4] == "list" then
+        return done(argv, { thread, standalone })
+      end
+      return glab_answer()(argv, opts)
+    end)
+    stub_diffview(worktree)
+    local notices = stub_notify()
+    local r = open_review(worktree, nil, notices)
+    local file = vim.api.nvim_get_current_buf()
+    vim.api.nvim_win_set_cursor(0, { 15, 0 })
+    review.reply()
+    local refused = { notices[#notices], vim.api.nvim_get_current_buf() }
+    vim.api.nvim_win_set_cursor(0, { 12, 0 })
+    review.reply()
+    local compose_name = vim.api.nvim_buf_get_name(0)
+    compose_write({ "Agreed." })
+    eq(vim.tbl_map(function(t)
+      return { t.id, t.individual }
+    end, r.threads), { { string.rep("2", 40), false }, { string.rep("4", 40), true } })
+    eq(refused, { { message = "!482: no thread at this line takes a reply", level = vim.log.levels.WARN }, file })
+    eq(compose_name, "docket-review://" .. worktree .. "/!482/reply/22222222")
+    eq(r.held, { { position = { thread = string.rep("2", 40) }, text = "Agreed.", head = DIFF_REFS.head_sha, base = DIFF_REFS.base_sha } })
+  end)
+end)
+
+test("review: the notes GitLab writes itself are drawn nowhere and counted nowhere", function()
+  review_case(function(worktree)
+    review_wait(worktree)
+    stub_run_fast(glab_answer())
+    stub_diffview(worktree)
+    local notices = stub_notify()
+    -- discussions() holds one discussion of a system note alone, and a diff
+    -- thread with a system note after its two notes.
+    local r = open_review(worktree, nil, notices)
+    local bodies = {}
+    for _, thread in ipairs(r.threads) do
+      for _, note in ipairs(thread.notes) do
+        bodies[#bodies + 1] = note.body
+      end
+    end
+    local bar = review.BAR
+    eq(notices[1].message:find("!482: 3 discussion(s), 1 on lines of the diff;", 1, true), 1, notices[1].message)
+    eq(bodies, { "Repros on staging.", "Why here?", "Because the window sits in it.", "Squash before merging?" })
+    eq(review_drawn(vim.api.nvim_get_current_buf()), {
+      { row = 11, lines = { bar .. " Ana  unresolved", bar .. "   Why here?", bar .. " Me Myself", bar .. "   Because the window sits in it." } },
+    })
+  end)
+end)
+
+test("commands: :Docket review's verbs reach the review mode, the bang forces a submit, and a malformed review is refused", function()
+  review_case(function()
+    local ran = {}
+    for _, verb in ipairs(commands.REVIEW_VERBS) do
+      review[verb] = function(verdict)
+        ran[#ran + 1] = { verb, verdict }
+      end
+    end
+    review.open = function(source, id)
+      ran[#ran + 1] = { "open", source, id }
+    end
+    local handed = stub_calls(gh, {
+      item = function()
+        return nil, nil
+      end,
+    })
+    local waited = stub_acli({ gh = true })
+    local notices = stub_notify()
+    local function run(bang, ...)
+      commands.run({ fargs = { "review", ... }, bang = bang })
+    end
+    run(false, "comment")
+    run(false, "reply")
+    run(false, "resolve")
+    run(false, "abandon")
+    run(false, "submit")
+    run(true, "submit", "approve", "summary")
+    run(false)
+    run(false, "!4", "!5")
+    run(false, "comment", "now")
+    run(false, "submit", "later")
+    run(false, "PROJ-142")
+    run(false, "#12")
+    vim.wait(1000, function()
+      return #handed > 0
+    end)
+    eq(ran, {
+      { "comment" },
+      { "reply" },
+      { "resolve" },
+      { "abandon" },
+      { "submit", { force = false } },
+      { "submit", { force = true, approve = true, summary = true } },
+    })
+    eq(notices, vim.tbl_map(function(message)
+      return { message = message, level = vim.log.levels.ERROR }
+    end, {
+      "review takes a merge request such as !482, or one of comment, reply, resolve, submit, abandon",
+      "review takes one merge request; got !4 !5",
+      "review comment takes nothing more; got now",
+      "review submit takes approve and summary; got later",
+      "PROJ-142: jira has no review mode; it does not implement diff",
+    }))
+    eq(vim.tbl_map(function(call)
+      return call.argv[1]
+    end, waited), { "gh" }, "acli is not asked about a ticket the review mode cannot take; gh is, for the pull request")
+    eq(handed[1].args, { "#12" }, "a pull request goes to octo.nvim, as :Docket #12 sends it")
+  end)
+end)
+
+test("commands: completion offers the review's verbs after review, the verdict's words after submit, and nothing after an identifier", function()
+  eq(commands.complete("", "Docket review "), commands.REVIEW_VERBS)
+  eq(commands.complete("s", "Docket review s"), { "submit" })
+  eq(commands.complete("", "Docket! review submit "), commands.SUBMIT_WORDS)
+  eq(commands.complete("s", "Docket review submit approve s"), { "summary" })
+  eq(commands.complete("", "Docket review !482 "), {})
+  eq(commands.complete("", "Docket review comment "), {})
+end)
+
+test("commands: a review's keys are set on the buffers that show its diff and on no other, and come off when its tab closes", function()
+  review_case(function(worktree)
+    review_wait(worktree)
+    stub_run_fast(glab_answer())
+    stub_diffview(worktree)
+    stub_notify()
+    vim.cmd.cd(vim.fn.fnameescape(worktree))
+    local r = commands.review_open("!482")
+    vim.wait(2000, function()
+      return r.tab ~= nil
+    end)
+    local file = vim.api.nvim_get_current_buf()
+    -- A window in the review's tab that shows no side of the diff.
+    vim.cmd("belowright new")
+    local other = vim.api.nvim_get_current_buf()
+    local descriptions = vim.tbl_map(function(key)
+      return key.desc
+    end, commands.REVIEW_KEYS)
+    local none = vim.tbl_map(function()
+      return false
+    end, commands.REVIEW_KEYS)
+    vim.wait(1000, function()
+      return vim.deep_equal(review_keys_on(file), descriptions)
+    end)
+    -- The keying the new window's BufWinEnter scheduled runs here.
+    vim.wait(50)
+    local on_file, on_other = review_keys_on(file), review_keys_on(other)
+    local global = vim.tbl_filter(function(map)
+      return vim.tbl_contains(descriptions, map.desc)
+    end, vim.api.nvim_get_keymap("n"))
+    vim.cmd.tabclose()
+    local after = review_keys_on(file)
+    vim.api.nvim_buf_delete(other, { force = true })
+    eq(on_file, descriptions)
+    eq(on_other, none)
+    eq(global, {}, "none is global")
+    eq(after, none, "the worktree's file keeps none of them once the review's tab is gone")
+  end)
+end)
+
+test("commands: R on a merge request row lands in the review mode, in the tab the launcher opens away from tmux and through the command its tmux window runs", function()
+  review_case(function(worktree)
+    vim.g.loaded_docket = nil
+    dofile(PLUGIN)
+    local branch = merge_request().source_branch
+    list.row_at = function()
+      return { source = "glab", id = "!482", branch = branch }, {}
+    end
+    list.state = function()
+      return { root = "/w/repo", binding = { kind = "projects", projects = { "PROJ" } } }
+    end
+    vim.api.nvim_echo = function() end
+    vim.cmd.redraw = function() end
+    local opened = {}
+    review.open = function(source, id)
+      opened[#opened + 1] = { source = source, id = id, cwd = vim.uv.fs_realpath(vim.fn.getcwd()) }
+    end
+    local tmux = {}
+    stub_wait(function(argv)
+      if argv[1] == "git" and argv[2] == "worktree" then
+        return done(argv, ("worktree /w/repo/.bare\nbare\n\nworktree %s\nbranch refs/heads/%s\n\n"):format(worktree, branch))
+      end
+      if argv[1] == "tmux" then
+        tmux[#tmux + 1] = argv
+        return done(argv, "")
+      end
+      return failed(argv, 1, "unexpected: " .. table.concat(argv, " "))
+    end)
+    local notices = stub_notify()
+    vim.env.TMUX = nil
+    commands.review_row(0)
+    local away = vim.deepcopy(opened)
+    vim.env.TMUX = "/tmp/tmux-1/default,1,0"
+    commands.review_row(0)
+    -- The editor window's `nvim -c <command>` runs that command once the
+    -- plugin has declared `:Docket`, which is what running it here does.
+    local window = tmux[1]
+    vim.cmd(window[#window])
+    eq(away, { { source = "glab", id = "!482", cwd = worktree } }, "the tab at the worktree opens the review")
+    eq(notices[1].level, vim.log.levels.INFO, "and the launcher reports no warning: " .. notices[1].message)
+    eq(vim.list_slice(window, #window - 2), { "nvim", "-c", "Docket review !482" })
+    eq({ opened[2].source, opened[2].id }, { "glab", "!482" }, "the tmux window's command opens it too")
+  end)
+end)
+
+-- An open review of !482 in its own tab, from open_review(), with every
+-- state check answered by `adapter`.
+local function opened_review(worktree, answers, notices)
+  review_wait(worktree, answers)
+  stub_diffview(worktree)
+  local adapter, calls = review_adapter(review_answers())
+  auth.ready = function()
+    return adapter
+  end
+  local r = open_review(worktree, adapter, notices)
+  return r, adapter, calls
+end
+
+-- The messages at one level, in order.
+local function at_level(notices, level)
+  local found = {}
+  for _, notice in ipairs(notices) do
+    if notice.level == level then
+      found[#found + 1] = notice.message
+    end
+  end
+  return found
+end
+
+test("review: a review abandoned while the read after its submit runs reports the abandon and no failed read", function()
+  review_case(function(worktree)
+    local notices = stub_notify()
+    local r, adapter = opened_review(worktree, nil, notices)
+    review.hold(r, { thread = "t1" }, "Agreed.")
+    local held_read
+    adapter.diff = function(_, on_done)
+      held_read = on_done
+    end
+    review.submit({})
+    vim.wait(1000, function()
+      return held_read ~= nil
+    end)
+    review.abandon()
+    held_read({ source = merge_request().source_branch, target = "main", refs = vim.deepcopy(DIFF_REFS) })
+    vim.wait(100)
+    eq(held_read ~= nil, true, "the submit read the merge request again")
+    eq(at_level(notices, vim.log.levels.WARN), {})
+    eq(at_level(notices, vim.log.levels.INFO), {
+      "!482: 0 discussion(s), 0 on lines of the diff; 0 comment(s) held. :Docket review comment holds one at the cursor, and :Docket review submit sends them.",
+      "!482: posted 1 comment(s)",
+      "!482: abandoned; 0 held comment(s) discarded and nothing sent",
+    })
+  end)
+end)
+
+test("review: a summary posted before its approval failed closes its buffer and names the approval alone, so no :w posts it twice", function()
+  review_case(function(worktree)
+    local notices = stub_notify()
+    local r, adapter, calls = opened_review(worktree, nil, notices)
+    local submits = {}
+    adapter.submit = function(ref, verdict, on_done)
+      submits[#submits + 1] = { ref = ref, verdict = verdict }
+      vim.schedule(function()
+        if verdict.approve then
+          return on_done(false, "glab exited 1\nERROR: 401 Unauthorized")
+        end
+        on_done(true)
+      end)
+    end
+    review.submit({ approve = true, summary = true })
+    local summary = vim.api.nvim_get_current_buf()
+    compose_write({ "Ship it." })
+    vim.wait(1000, function()
+      return #at_level(notices, vim.log.levels.ERROR) > 0 and #calls >= 4
+    end)
+    eq(vim.tbl_map(function(call)
+      return call.verdict
+    end, submits), { { summary = "Ship it." }, { approve = true, head = DIFF_REFS.head_sha } })
+    eq(vim.api.nvim_buf_is_valid(summary), false, "the summary's buffer is gone, so no :w posts it again")
+    eq(at_level(notices, vim.log.levels.ERROR), {
+      "!482: the summary posted; the approval was not. :Docket review submit approve approves alone\nglab exited 1\nERROR: 401 Unauthorized",
+    })
+    eq(names(calls), { "diff", "threads", "diff", "threads" }, "the merge request is read again for the summary")
+    eq(r.held, {})
+  end)
+end)
+
+test("review: the summary's window says :w submits the review, a comment's that :w keeps it, and an empty summary names the command asked for", function()
+  review_case(function(worktree)
+    local notices = stub_notify()
+    opened_review(worktree, nil, notices)
+    review.submit({ force = true, approve = true, summary = true })
+    local summary_title = vim.api.nvim_win_get_config(0).title
+    vim.cmd.write()
+    local empty = notices[#notices]
+    vim.cmd("close")
+    vim.api.nvim_win_set_cursor(0, { 5, 0 })
+    review.comment()
+    local comment_title = vim.api.nvim_win_get_config(0).title
+    eq(summary_title, { { " !482/summary  :w submits the review " } })
+    eq(comment_title, { { " !482/lua/docket/env.lua:5  :w keeps it " } })
+    eq(empty, {
+      message = "!482: the summary is empty, so nothing was sent; :Docket! review submit approve sends the held comments without one",
+      level = vim.log.levels.WARN,
+    })
+  end)
+end)
+
+test("review: a draft closed with :q is there at the next comment on that line, and one discarded with :q! reopens with the held text", function()
+  review_case(function(worktree)
+    local notices = stub_notify()
+    local r = opened_review(worktree, nil, notices)
+    local file_win = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_cursor(0, { 5, 0 })
+    review.comment()
+    compose_write({ "Held." })
+    vim.api.nvim_set_current_win(file_win)
+    review.comment()
+    local compose = vim.api.nvim_get_current_buf()
+    vim.api.nvim_buf_set_lines(compose, 0, -1, false, { "Draft." })
+    vim.cmd("q")
+    vim.api.nvim_set_current_win(file_win)
+    review.comment()
+    local kept = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+    vim.cmd("q!")
+    vim.api.nvim_set_current_win(file_win)
+    review.comment()
+    local reopened = { vim.api.nvim_buf_get_lines(0, 0, -1, false), vim.bo.modified }
+    vim.cmd.write()
+    eq(kept, { "Draft." })
+    eq(reopened, { { "Held." }, false }, "the held comment's text, not an empty buffer")
+    eq(vim.tbl_map(function(entry)
+      return entry.text
+    end, r.held), { "Held." }, "and its :w keeps it rather than dropping it")
+  end)
+end)
+
+test("review: the reviews of one merge request number in two worktrees draft their summaries in two buffers", function()
+  review_case(function(worktree)
+    local other = review_worktree()
+    local here = review.start("glab", "!482", worktree)
+    local there = review.start("glab", "!482", other)
+    local first = review.compose(here, { kind = "summary" }, nil)
+    vim.api.nvim_buf_set_lines(first, 0, -1, false, { "Summary for the first." })
+    vim.cmd("q")
+    local second = review.compose(there, { kind = "summary" }, nil)
+    local shown = vim.api.nvim_buf_get_lines(second, 0, -1, false)
+    vim.cmd("q")
+    review.discard(here)
+    local after = { vim.api.nvim_buf_is_valid(first), vim.api.nvim_buf_is_valid(second) }
+    review.discard(there)
+    eq(first ~= second, true, "two buffers")
+    eq(shown, { "" }, "the second shows none of the first's draft")
+    eq(after, { false, true }, "abandoning one leaves the other's")
+  end)
+end)
+
+test("review: comment on diffview's old side holds an old-side position, and a line outside the diff's hunks is refused on either side", function()
+  review_case(function(worktree)
+    local notices = stub_notify()
+    local hunk = table.concat({ "diff --git a/x b/x", "@@ -10,2 +11,3 @@ function M.run()", " kept", "+added", " kept", "" }, "\n")
+    local r, _, calls = opened_review(worktree, {
+      ["diff -U3 --no-color " .. DIFF_REFS.base_sha .. " HEAD -- " .. REVIEW_FILE] = function(argv)
+        return done(argv, hunk)
+      end,
+    }, notices)
+    local file = vim.api.nvim_get_current_buf()
+    local file_win = vim.api.nvim_get_current_win()
+    vim.cmd("leftabove vnew")
+    local old_side = vim.api.nvim_get_current_buf()
+    vim.api.nvim_buf_set_lines(old_side, 0, -1, false, vim.fn["repeat"]({ "old" }, 20))
+    vim.bo[old_side].buftype = "nofile"
+    local old_win = vim.api.nvim_get_current_win()
+    package.loaded["diffview.lib"] = {
+      get_current_view = function()
+        return {
+          tabpage = r.tab,
+          cur_entry = { path = REVIEW_FILE },
+          cur_layout = { a = { file = { bufnr = old_side } }, b = { file = { bufnr = file } } },
+        }
+      end,
+    }
+    vim.api.nvim_win_set_cursor(old_win, { 11, 0 })
+    review.comment()
+    compose_write({ "Why was this removed?" })
+    vim.api.nvim_set_current_win(old_win)
+    vim.api.nvim_win_set_cursor(old_win, { 12, 0 })
+    review.comment()
+    local old_outside = { notices[#notices], vim.api.nvim_get_current_buf() }
+    vim.api.nvim_set_current_win(file_win)
+    vim.api.nvim_win_set_cursor(file_win, { 13, 0 })
+    review.comment()
+    compose_write({ "Inside." })
+    vim.api.nvim_set_current_win(file_win)
+    vim.api.nvim_win_set_cursor(file_win, { 14, 0 })
+    review.comment()
+    local new_outside = { notices[#notices], vim.api.nvim_get_current_buf() }
+    eq(vim.tbl_map(function(entry)
+      return entry.position
+    end, r.held), { { file = REVIEW_FILE, old_line = 11 }, { file = REVIEW_FILE, line = 13 } })
+    eq(old_outside, {
+      {
+        message = "!482: line 12 of " .. REVIEW_FILE .. " on the old side is not in the merge request's diff, and glab refuses a comment on a line the diff does not show; comment on a changed line or one within 3 lines of it",
+        level = vim.log.levels.ERROR,
+      },
+      old_side,
+    })
+    eq(new_outside, {
+      {
+        message = "!482: line 14 of " .. REVIEW_FILE .. " is not in the merge request's diff, and glab refuses a comment on a line the diff does not show; comment on a changed line or one within 3 lines of it",
+        level = vim.log.levels.ERROR,
+      },
+      file,
+    })
+    eq(names(calls), { "diff", "threads" }, "holding sends nothing")
+  end)
+end)
+
+test("review: a held old-side comment is not sent when the merge base has moved, and the check reads the merge request for it", function()
+  review_case(function(worktree)
+    local moved = vim.tbl_extend("force", DIFF_REFS, { base_sha = ("e"):rep(40) })
+    local adapter, calls = review_adapter(review_answers({
+      diff = function()
+        return { source = merge_request().source_branch, target = "main", refs = moved }
+      end,
+    }))
+    local r = read_review(worktree)
+    review.hold(r, { file = REVIEW_FILE, old_line = 2 }, "Gone.")
+    local refused = send_and_wait(r, adapter, {})
+    eq(names(calls), { "diff" })
+    eq(refused[1], false)
+    eq(#r.held, 1)
+  end)
+end)
+
+test("review: a discussion placed on another version of the diff is drawn at no line and counted apart", function()
+  review_case(function(worktree)
+    local current = review_thread("t1", 4, { position = { new_path = REVIEW_FILE, new_line = 4, head_sha = DIFF_REFS.head_sha } })
+    local outdated = review_thread("t2", 6, { position = { new_path = REVIEW_FILE, new_line = 6, head_sha = ("9"):rep(40) } })
+    local loc = { path = REVIEW_FILE, side = review.NEW, head = DIFF_REFS.head_sha }
+    eq(vim.tbl_map(function(mark)
+      return mark.line
+    end, review.marks({ current, outdated }, {}, loc)), { 4 })
+    eq(review.threads_at({ threads = { current, outdated } }, loc, 6), {}, "so it is offered for no reply or resolve")
+    local notices = stub_notify()
+    review_wait(worktree)
+    stub_diffview(worktree)
+    local adapter = review_adapter(review_answers({
+      threads = function()
+        return { current, outdated }
+      end,
+    }))
+    open_review(worktree, adapter, notices)
+    eq(notices[#notices].message:match("^[^;]+"), "!482: 2 discussion(s), 1 on lines of the diff, 1 on another version of it")
+  end)
+end)
+
+test("commands: taking a review's keys off leaves a buffer's own maps, abandoning takes them off when the diff keeps its tab, and closing the tab does whatever order its autocommands run in", function()
+  review_case(function(worktree)
+    review_wait(worktree)
+    stub_run_fast(glab_answer())
+    stub_diffview(worktree)
+    stub_notify()
+    local none = vim.tbl_map(function()
+      return false
+    end, commands.REVIEW_KEYS)
+    -- review.lua's own TabClosed clears the review's tab before commands.lua's
+    -- runs when it was made first, which is not the order in a fresh editor.
+    -- It is taken out while the tab closes and put back after.
+    local theirs = vim.api.nvim_get_autocmds({ group = "docket/review", event = "TabClosed" })
+    vim.api.nvim_clear_autocmds({ group = "docket/review", event = "TabClosed" })
+    local ok, err = pcall(function()
+      vim.cmd.cd(vim.fn.fnameescape(worktree))
+      local r = commands.review_open("!482")
+      vim.wait(2000, function()
+        return r.tab ~= nil
+      end)
+      local file = vim.api.nvim_get_current_buf()
+      vim.keymap.set("n", "<leader>dq", "<Nop>", { buffer = file, desc = "a map of the buffer's own" })
+      vim.wait(1000, function()
+        return review_keys_on(file)[1] ~= false
+      end)
+      vim.cmd.tabclose()
+      local own = vim.api.nvim_buf_call(file, function()
+        return vim.fn.maparg("<leader>dq", "n", false, true).desc
+      end)
+      eq(review_keys_on(file), none, "the review's keys are off once its tab closes")
+      eq(own, "a map of the buffer's own", "and the buffer's own map is not")
+      pcall(vim.keymap.del, "n", "<leader>dq", { buffer = file })
+      review.discard(r)
+
+      -- A diff that `:DiffviewClose` leaves open keeps its tab.
+      vim.api.nvim_create_user_command("DiffviewClose", function() end, { force = true })
+      r = commands.review_open("!482")
+      vim.wait(2000, function()
+        return r.tab ~= nil
+      end)
+      file = vim.api.nvim_get_current_buf()
+      vim.wait(1000, function()
+        return review_keys_on(file)[1] ~= false
+      end)
+      local tab = r.tab
+      commands.review_verb("abandon", {}, false)
+      eq(vim.api.nvim_tabpage_is_valid(tab), true, "the diff kept its tab")
+      eq(review_keys_on(file), none, "abandoning takes the keys off a diff whose tab stays")
+    end)
+    for _, autocmd in ipairs(theirs) do
+      vim.api.nvim_create_autocmd("TabClosed", { group = "docket/review", callback = autocmd.callback })
+    end
+    assert(ok, err)
+  end)
+end)
+
+-- one merge request number in two clones ------------------------------------------------
+
+-- The editor as two clones of one project see it: `vim.fn.getcwd()` answers
+-- whichever clone `enter` last named, and entering runs glab's state check
+-- there, as every mode's entry does. spawn.run records each glab call with
+-- the directory it ran in and holds it until `answer` hands it a payload.
+-- `body` runs under pcall, so the editor is put back whatever it raised.
+local function two_clones(body)
+  glab.forget()
+  local cwd, saved_getcwd = "/w/a", vim.fn.getcwd
+  vim.fn.getcwd = function()
+    return cwd
+  end
+  local _, restore_wait = stub_wait(function(argv)
+    return done(argv, "")
+  end)
+  local pending, ran, saved_run = {}, {}, spawn.run
+  spawn.run = function(argv, opts, on_done)
+    local call = { argv = argv, cwd = opts and opts.cwd, on_done = on_done }
+    pending[#pending + 1] = call
+    ran[#ran + 1] = call
+  end
+  local clones = {
+    enter = function(dir)
+      cwd = dir
+      glab.auth_status()
+    end,
+    answer = function(payload)
+      local call = table.remove(pending, 1)
+      call.on_done(done(call.argv, payload))
+      return call
+    end,
+    pending = pending,
+    ran = ran,
+  }
+  local ok, err = pcall(body, clones)
+  spawn.run = saved_run
+  vim.fn.getcwd = saved_getcwd
+  restore_wait()
+  glab.forget()
+  assert(ok, err)
+end
+
+-- Each call as `glab <verb words>` beside the directory it ran in.
+local function where_ran(calls)
+  return vim.tbl_map(function(call)
+    return { table.concat(call.argv, " ", 1, math.min(#call.argv, 5)), call.cwd }
+  end, calls)
+end
+
+test("review: every call a submit, a read and a resolve make runs in the review's worktree, whatever clone a state check names meanwhile", function()
+  two_clones(function(clones)
+    clones.enter("/w/a")
+    local r = review.start("glab", "!482", "/w/a")
+    r.held = {
+      { position = { thread = ("1"):rep(40) }, text = "One." },
+      { position = { thread = ("2"):rep(40) }, text = "Two." },
+      { position = { thread = ("3"):rep(40) }, text = "Three." },
+    }
+    local reported
+    review.send(r, glab, { approve = true, summary = "Done." }, function(ok, message)
+      reported = { ok, message }
+    end)
+    -- A tab in the other clone runs the state check before each answer.
+    while #clones.pending > 0 do
+      clones.enter("/w/b")
+      clones.answer("")
+    end
+    eq(reported and reported[1], true, reported and reported[2])
+    eq(where_ran(clones.ran), {
+      { "glab mr note create 482", "/w/a" },
+      { "glab mr note create 482", "/w/a" },
+      { "glab mr note create 482", "/w/a" },
+      { "glab mr note create 482", "/w/a" },
+      { "glab mr approve 482", "/w/a" },
+    })
+
+    for index = #clones.ran, 1, -1 do
+      clones.ran[index] = nil
+    end
+    clones.enter("/w/a")
+    local loaded
+    review.load(r, glab, function(ok, err)
+      loaded = { ok, err }
+    end)
+    clones.enter("/w/b")
+    clones.answer(merge_request())
+    clones.enter("/w/b")
+    clones.answer(vim.tbl_extend("force", merge_request(), { diff_refs = DIFF_REFS }))
+    clones.enter("/w/b")
+    clones.answer(discussions())
+    eq(loaded, { true }, "the read answered")
+    clones.enter("/w/b")
+    review.resolve_thread(r, glab, { id = ("2"):rep(40), resolvable = true, resolved = false }, function() end)
+    clones.answer("")
+    eq(where_ran(clones.ran), {
+      { "glab mr view 482 -F", "/w/a" },
+      { "glab api projects/:id/merge_requests/482", "/w/a" },
+      { "glab mr note list 482", "/w/a" },
+      { "glab mr note resolve 482", "/w/a" },
+    })
+    review.discard(r)
+  end)
+end)
+
+test("buffer: an item buffer's saves, state changes and assignments, and the reads around them, go to the clone it was opened in; opening it from another clone moves it there", function()
+  -- Both clones are of one project, so the two opens name one buffer.
+  local restore_clone = stub_clone(nil, "git@gitlab.example.test:acme/payments.git")
+  two_clones(function(clones)
+    local previous = buffer.named(buffer.name("glab", "!482", "acme/payments"))
+    if previous then
+      vim.api.nvim_buf_delete(previous, { force = true })
+    end
+    local _, restore_notify = stub_notify()
+    -- The last action a merge request offers, Close, and nobody to assign.
+    local _, restore_select = stub_select(function(items)
+      for _, choice in ipairs(items) do
+        if choice.who == adapters.NOBODY then
+          return choice
+        end
+      end
+      return items[#items]
+    end)
+    -- Answers every call as glab_answer() would, in the order they come,
+    -- until the editor has nothing left to schedule.
+    local function drain()
+      for _ = 1, 50 do
+        if #clones.pending > 0 then
+          local call = clones.pending[1]
+          local stdout = glab_answer()(call.argv, {}).stdout
+          clones.answer(vim.json.decode(stdout ~= "" and stdout or '""'))
+        end
+        vim.wait(5)
+      end
+    end
+    local ok, err = pcall(function()
+      clones.enter("/w/a")
+      local buf = buffer.open("glab", "!482", nil, glab)
+      drain()
+      clones.enter("/w/b")
+      local from = #clones.ran + 1
+      buffer.compose(buf)
+      local row = vim.api.nvim_buf_line_count(buf) - 1
+      vim.api.nvim_buf_set_text(buf, row, 0, row, 0, { "Posted from the first clone." })
+      buffer.write(buf)
+      drain()
+      local body = vim.fn.search("Digests come from the tap.", "nw")
+      vim.api.nvim_buf_set_text(buf, body - 1, 0, body - 1, 0, { "Edited. " })
+      buffer.write(buf)
+      drain()
+      commands.transition(buf)
+      drain()
+      commands.assign(buf)
+      drain()
+      local ran = where_ran(vim.list_slice(clones.ran, from))
+      local verbs = vim.tbl_map(function(entry)
+        return entry[1]
+      end, ran)
+      for _, verb in ipairs({ "glab mr note create 482", "glab mr update 482 --description-file", "glab mr close 482", "glab mr update 482 --unassign" }) do
+        eq(vim.tbl_contains(verbs, verb), true, verb .. " ran: " .. vim.inspect(verbs))
+      end
+      for _, entry in ipairs(ran) do
+        eq(entry[2], "/w/a", entry[1])
+      end
+
+      clones.enter("/w/b")
+      from = #clones.ran + 1
+      buffer.open("glab", "!482", nil, glab)
+      drain()
+      local reopened = where_ran(vim.list_slice(clones.ran, from))
+      eq(#reopened > 0, true, "the open read the merge request")
+      for _, entry in ipairs(reopened) do
+        eq(entry[2], "/w/b", entry[1])
+      end
+      from = #clones.ran + 1
+      commands.transition(buf)
+      drain()
+      eq(where_ran(vim.list_slice(clones.ran, from))[1], { "glab mr view 482 -F", "/w/b" }, "later calls follow the open")
+      vim.api.nvim_buf_delete(buf, { force = true })
+    end)
+    restore_select()
+    restore_notify()
+    restore_clone()
+    assert(ok, err)
+  end)
+end)
+
+-- The address of a project's !482, as its `web_url` carries it.
+local function address(project)
+  return ("https://gitlab.example.test/%s/-/merge_requests/482"):format(project)
+end
+
+test("buffer: !482 opened from clones of two projects is two buffers, :e in one reads it from its own clone, and a read that cannot tell the project is refused", function()
+  vim.g.loaded_docket = nil
+  dofile(PLUGIN)
+  -- /w/a and /w/c are clones of one project, /w/b of another, and anywhere
+  -- else is no clone.
+  local origins = {
+    ["/w/a"] = "git@gitlab.example.test:acme/payments.git",
+    ["/w/b"] = "git@gitlab.example.test:acme/other.git",
+    ["/w/c"] = "https://gitlab.example.test/acme/payments.git",
+  }
+  local saved = { root = repo.root, remote_url = repo.remote_url }
+  repo.root = function(cwd)
+    if origins[cwd] then
+      return { root = cwd, bare = false }
+    end
+    return nil, "fatal: not a git repository"
+  end
+  repo.remote_url = function(dir)
+    return origins[dir]
+  end
+  local ok, err = pcall(two_clones, function(clones)
+    for _, project in ipairs({ "acme/payments", "acme/other" }) do
+      local previous = buffer.named(buffer.name("glab", "!482", project))
+      if previous then
+        vim.api.nvim_buf_delete(previous, { force = true })
+      end
+    end
+    local notices, restore_notify = stub_notify()
+    -- Answers every call as glab_answer() would, with the address of the
+    -- project the call's clone is of, until none is left.
+    local function drain()
+      for _ = 1, 50 do
+        if #clones.pending > 0 then
+          local call = clones.pending[1]
+          local web_url = address(call.cwd == "/w/b" and "acme/other" or "acme/payments")
+          local stdout = glab_answer({ web_url = web_url })(call.argv, {}).stdout
+          clones.answer(vim.json.decode(stdout ~= "" and stdout or '""'))
+        end
+        vim.wait(5)
+      end
+    end
+    local inner_ok, inner_err = pcall(function()
+      clones.enter("/w/a")
+      local first = buffer.open("glab", "!482")
+      drain()
+      clones.enter("/w/b")
+      local second = buffer.open("glab", "!482")
+      drain()
+      eq(
+        { vim.api.nvim_buf_get_name(first), vim.api.nvim_buf_get_name(second) },
+        { "docket://glab/acme/payments/!482", "docket://glab/acme/other/!482" },
+        "two buffers, each named for its project"
+      )
+      eq({ vim.b[first].docket.project, vim.b[second].docket.project }, { "acme/payments", "acme/other" })
+
+      -- gx opens the address the buffer's own read answered. The adapter
+      -- keeps one address per number, the last read's, which is the other
+      -- project's for the first buffer.
+      eq(glab.url({ id = "!482" }), address("acme/other"), "the adapter alone answers the last read's address")
+      local opened, saved_open = {}, vim.ui.open
+      vim.ui.open = function(url)
+        opened[#opened + 1] = url
+        return nil, nil
+      end
+      commands.browse(first)
+      commands.browse(second)
+      vim.ui.open = saved_open
+      eq(opened, { address("acme/payments"), address("acme/other") }, "each buffer opens its own project's merge request")
+
+      -- :e in the first, from a tab in the other project's clone.
+      vim.api.nvim_set_current_buf(first)
+      local from = #clones.ran + 1
+      vim.cmd("edit")
+      drain()
+      local reread = where_ran(vim.list_slice(clones.ran, from))
+      eq(#reread > 0, true, ":e read the merge request")
+      for _, entry in ipairs(reread) do
+        eq(entry[2], "/w/a", entry[1])
+      end
+      eq(vim.api.nvim_buf_get_lines(first, 1, 2, false), { "# Bump the pinned acli" })
+
+      -- With no reference to go by, a read from another project's clone is
+      -- refused, and one from a clone of the buffer's project goes ahead.
+      vim.b[first].docket = nil
+      from = #clones.ran + 1
+      local shown = #notices
+      vim.cmd("edit")
+      vim.wait(50)
+      eq(#clones.ran, from - 1, "nothing ran")
+      eq(vim.list_slice(notices, shown + 1), {
+        {
+          message = "docket://glab/acme/payments/!482: the editor is in a clone of acme/other, whose !482 is another; :e reads this one from a clone of acme/payments",
+          level = vim.log.levels.ERROR,
+        },
+      })
+      clones.enter("/w/c")
+      vim.cmd("edit")
+      eq(where_ran({ clones.pending[1] }), { { "glab mr view 482 -F", "/w/c" } }, "read in the clone the editor is in")
+      drain()
+      eq(vim.b[first].docket.ref.cwd, "/w/c")
+
+      -- A name that carries no project.
+      local bare = vim.api.nvim_create_buf(false, false)
+      vim.api.nvim_buf_set_name(bare, "docket://glab/!482")
+      local read
+      from = #clones.ran + 1
+      buffer.read(bare, function(read_ok, message)
+        read = { read_ok, message }
+      end)
+      eq(read, {
+        false,
+        "docket://glab/!482 names no project, and glab numbers its items within one; :Docket !482 opens it from a clone of its project",
+      })
+      eq(#clones.ran, from - 1, "nothing ran")
+      vim.api.nvim_buf_delete(bare, { force = true })
+
+      -- Outside any clone nothing opens, and the message says what to do
+      -- before git's own words, which end in a newline.
+      clones.enter("/elsewhere")
+      local outside
+      eq(buffer.open("glab", "!482", function(open_ok, message)
+        outside = { open_ok, message }
+      end), nil)
+      eq(outside, {
+        false,
+        "!482: glab numbers its items within a project, and the editor's directory names none; :tcd into a clone of the project and run :Docket !482 again\nfatal: not a git repository",
+      })
+      eq(#clones.ran, from - 1, "nothing ran")
+
+      -- The same for :e with no reference to go by, in the same shape.
+      vim.b[first].docket = nil
+      vim.api.nvim_set_current_buf(first)
+      shown = #notices
+      vim.cmd("edit")
+      vim.wait(50)
+      eq(#clones.ran, from - 1, "nothing ran")
+      eq(vim.list_slice(notices, shown + 1), {
+        {
+          message = "docket://glab/acme/payments/!482: :e reads it only from a clone of acme/payments, and the editor's directory names no project; :tcd into a clone of acme/payments and :e again\nfatal: not a git repository",
+          level = vim.log.levels.ERROR,
+        },
+      })
+      vim.api.nvim_buf_delete(first, { force = true })
+      vim.api.nvim_buf_delete(second, { force = true })
+    end)
+    restore_notify()
+    assert(inner_ok, inner_err)
+  end)
+  repo.root, repo.remote_url = saved.root, saved.remote_url
+  assert(ok, err)
+end)
+
+test("glab: an item carries the project its address names, subgroups included, and none for an address of another shape", function()
+  eq(glab.project_of(address("acme/payments")), "acme/payments")
+  eq(glab.project_of(address("acme/sub/deeper/payments")), "acme/sub/deeper/payments", "a subgroup's slashes stay in the path")
+  eq(glab.project_of("http://gitlab.example.test:8080/acme/payments/-/merge_requests/7#note_3"), "acme/payments", "a port and a fragment are not the path")
+  eq(glab.project_of("https://gitlab.example.test/acme/payments/merge_requests/482"), nil, "an address without the /-/ is not read")
+  eq(glab.project_of("https://gitlab.example.test/acme/payments"), nil)
+  eq(glab.project_of("https://gitlab.example.test/-/merge_requests/482"), nil, "nor one with no path before it")
+  eq(glab.project_of("https://gitlab.example.test//-/merge_requests/482"), nil, "nor one whose path is empty")
+  eq(glab.project_of(vim.NIL), nil, "a payload with `web_url` null")
+  eq(glab.project_of(nil), nil, "or without one")
+
+  glab.forget()
+  local read = {}
+  for _, web_url in ipairs({ address("acme/sub/payments"), "https://gitlab.example.test/acme/payments/merge_requests/482" }) do
+    local _, restore_run = stub_glab({ web_url = web_url })
+    glab.item("!482", function(it, err)
+      read[#read + 1] = { it and it.project, err, it and it.url }
+    end)
+    restore_run()
+  end
+  eq(read, {
+    { "acme/sub/payments", nil, address("acme/sub/payments") },
+    { nil, nil, "https://gitlab.example.test/acme/payments/merge_requests/482" },
+  }, "the item carries the project where the address names one, and the address itself either way")
+end)
+
+test("buffer: an answer naming another project than the name is refused with nothing filled; one naming the name's project, in either case, or none, fills", function()
+  -- Each directory is a clone whose origin names the project the name is
+  -- read off; glab's answer names whatever the test hands it.
+  local origins = {
+    ["/w/fork"] = "git@gitlab.example.test:me/payments.git",
+    ["/w/a"] = "git@gitlab.example.test:acme/payments.git",
+    ["/w/sub"] = "git@gitlab.example.test:acme/sub/payments.git",
+    ["/w/cased"] = "git@gitlab.example.test:Acme/Payments.git",
+  }
+  local saved = { root = repo.root, remote_url = repo.remote_url }
+  repo.root = function(cwd)
+    if origins[cwd] then
+      return { root = cwd, bare = false }
+    end
+    return nil, "fatal: not a git repository"
+  end
+  repo.remote_url = function(dir)
+    return origins[dir]
+  end
+  local ok, err = pcall(two_clones, function(clones)
+    for _, project in ipairs({ "me/payments", "acme/payments", "acme/sub/payments", "Acme/Payments" }) do
+      local previous = buffer.named(buffer.name("glab", "!482", project))
+      if previous then
+        vim.api.nvim_buf_delete(previous, { force = true })
+      end
+    end
+    local notices, restore_notify = stub_notify()
+    -- Answers every call as glab_answer() would, the view with `web_url`,
+    -- until none is left.
+    local function drain(web_url)
+      for _ = 1, 50 do
+        if #clones.pending > 0 then
+          local call = clones.pending[1]
+          local stdout = glab_answer({ web_url = web_url })(call.argv, {}).stdout
+          clones.answer(vim.json.decode(stdout ~= "" and stdout or '""'))
+        end
+        vim.wait(5)
+      end
+    end
+    -- :Docket !482 from `dir`, with glab answering the merge request at
+    -- `web_url`: the buffer, and what the read reported. Every buffer made
+    -- is deleted once the test is over, whether it passed or not: one left
+    -- behind under `Acme/Payments` would stop a later test naming a buffer
+    -- `acme/payments`: with 'fileignorecase' set, its default on macOS, the
+    -- editor compares buffer names without case, and naming the second
+    -- raises E95.
+    local made = {}
+    local function opened_from(dir, web_url)
+      clones.enter(dir)
+      local reported
+      local buf = buffer.open("glab", "!482", function(read_ok, message)
+        reported = { read_ok, message }
+      end)
+      made[#made + 1] = buf
+      drain(web_url)
+      return buf, reported
+    end
+    local inner_ok, inner_err = pcall(function()
+      -- From a fork, glab answers the upstream project's !482. The refusal
+      -- carries both remedies, since it cannot tell a fork from a clone
+      -- whose origin spells this one project another way: the https URL it
+      -- names is the answer's host with the answered path.
+      local refusal = "docket://glab/me/payments/!482: glab answered !482 of acme/payments, and the name, read off origin, says me/payments, so nothing is filled; :Docket !482 from a clone whose origin is acme/payments opens that one under its own name"
+        .. "; where origin spells this project another way -- an ssh URL without the instance's path prefix, or the path the project had before a move or a rename -- git remote set-url origin https://gitlab.example.test/acme/payments.git makes the two agree"
+      local fork, reported = opened_from("/w/fork", address("acme/payments"))
+      eq(vim.api.nvim_buf_get_name(fork), "docket://glab/me/payments/!482", "the name is origin's project")
+      eq(reported, { false, refusal })
+      eq(vim.api.nvim_buf_get_lines(fork, 0, -1, false), { "" }, "nothing is filled")
+      eq(vim.b[fork].docket, nil)
+      eq(notices, { { message = refusal, level = vim.log.levels.ERROR } })
+      eq(vim.api.nvim_get_current_buf(), fork, "the empty buffer is what is on screen")
+
+      -- The answer names the name's project.
+      local same
+      same, reported = opened_from("/w/a", address("acme/payments"))
+      eq(vim.api.nvim_buf_get_name(same), "docket://glab/acme/payments/!482")
+      eq(reported, { true })
+      eq(vim.api.nvim_buf_get_lines(same, 1, 2, false), { "# Bump the pinned acli" })
+      eq(vim.b[same].docket.project, "acme/payments")
+
+      -- A subgroup's path, in both.
+      local sub
+      sub, reported = opened_from("/w/sub", address("acme/sub/payments"))
+      eq(vim.api.nvim_buf_get_name(sub), "docket://glab/acme/sub/payments/!482")
+      eq(reported, { true })
+      eq(vim.b[sub].docket.project, "acme/sub/payments")
+
+      -- Origin spells the path in another case than the instance does. The
+      -- buffer of the other spelling goes first, or naming this one raises
+      -- E95.
+      vim.api.nvim_buf_delete(same, { force = true })
+      local cased
+      cased, reported = opened_from("/w/cased", address("acme/payments"))
+      eq(vim.api.nvim_buf_get_name(cased), "docket://glab/Acme/Payments/!482")
+      eq(reported, { true }, "one project, so the case does not refuse it")
+      eq(vim.b[cased].docket.url, address("acme/payments"))
+
+      -- And the other way about: origin lower-case, the instance's spelling
+      -- mixed. The compare lowers both sides, and one side alone would
+      -- refuse this read.
+      vim.api.nvim_buf_delete(cased, { force = true })
+      local instance_cased
+      instance_cased, reported = opened_from("/w/a", address("Acme/Payments"))
+      eq(vim.api.nvim_buf_get_name(instance_cased), "docket://glab/acme/payments/!482")
+      eq(reported, { true }, "one project, whichever side spells it in capitals")
+      eq(vim.b[instance_cased].docket.url, address("Acme/Payments"))
+
+      -- The path alone is compared, so the same path on another host -- a
+      -- mirror glab read through another remote -- fills the buffer, and
+      -- the address kept is the other host's.
+      local mirrored
+      mirrored, reported = opened_from("/w/a", "https://gitlab.com/acme/payments/-/merge_requests/482")
+      eq(mirrored, instance_cased, "the same buffer")
+      eq(reported, { true })
+      eq(vim.b[mirrored].docket.url, "https://gitlab.com/acme/payments/-/merge_requests/482")
+
+      -- An address of another shape names no project and is compared with
+      -- nothing: from the fork, where an address that could be read was
+      -- refused above, the read fills the buffer left empty there.
+      local unread
+      unread, reported = opened_from("/w/fork", "https://gitlab.example.test/acme/payments/merge_requests/482")
+      eq(unread, fork, "the same buffer")
+      eq(reported, { true })
+      eq(vim.api.nvim_buf_get_lines(fork, 1, 2, false), { "# Bump the pinned acli" })
+      eq(vim.b[fork].docket.url, "https://gitlab.example.test/acme/payments/merge_requests/482")
+      eq(#notices, 1, "the refusal above is the only notice")
+
+      -- The `:e` path refuses the same answer: a name typed by hand in the
+      -- fork's clone passes the check that the editor is in a clone of the
+      -- name's project, and the answer is then held against the name.
+      vim.api.nvim_buf_delete(fork, { force = true })
+      local typed = vim.api.nvim_create_buf(false, false)
+      vim.api.nvim_buf_set_name(typed, "docket://glab/me/payments/!482")
+      made[#made + 1] = typed
+      clones.enter("/w/fork")
+      reported = nil
+      buffer.read(typed, function(read_ok, message)
+        reported = { read_ok, message }
+      end)
+      drain(address("acme/payments"))
+      eq(reported, { false, refusal })
+      eq(vim.api.nvim_buf_get_lines(typed, 0, -1, false), { "" }, "nothing is filled")
+      eq(vim.b[typed].docket, nil)
+      eq(#notices, 2, "and the refusal is reported")
+    end)
+    restore_notify()
+    for _, buf in ipairs(made) do
+      if vim.api.nvim_buf_is_valid(buf) then
+        vim.api.nvim_buf_delete(buf, { force = true })
+      end
+    end
+    assert(inner_ok, inner_err)
+  end)
+  repo.root, repo.remote_url = saved.root, saved.remote_url
+  assert(ok, err)
+end)
+
+test("commands: <CR> on a dash row opens the item from the clone the dash shows, after the tab's directory has moved to another clone or out of any", function()
+  jira.forget()
+  glab.forget()
+  local _, restore_cache = scratch_cache()
+  -- /w/a and /w/b are clones of two projects; anywhere else is no clone.
+  local origins = {
+    ["/w/a"] = "git@gitlab.example.test:acme/payments.git",
+    ["/w/b"] = "git@gitlab.example.test:acme/other.git",
+  }
+  local saved = { root = repo.root, remote_url = repo.remote_url, binding = repo.binding, getcwd = vim.fn.getcwd }
+  repo.root = function(cwd)
+    if origins[cwd] then
+      return { root = cwd, bare = false }
+    end
+    return nil, "fatal: not a git repository"
+  end
+  repo.remote_url = function(dir)
+    return origins[dir]
+  end
+  -- The binding is read for the tickets alone, and the last pass has it
+  -- unreadable: an open reads no binding, so <CR> on a merge request still
+  -- opens it, where `w` refuses with the reason.
+  local bound = true
+  repo.binding = function()
+    if bound then
+      return { kind = "projects", projects = { "PAY" } }
+    end
+    return nil, "fatal: bad config line 3 in file .git/config"
+  end
+  local cwd = "/w/a"
+  vim.fn.getcwd = function()
+    return cwd
+  end
+  -- The dash checks the state through spawn.run, and <CR> through
+  -- spawn.wait, as :Docket <id> does. Each clone's !482 has its own address,
+  -- so an item read in the wrong clone is refused, its answer naming the
+  -- other project.
+  local waits, restore_wait = stub_acli({ signed_in = true, glab = true })
+  local runs, restore_run = stub_run(checked({ signed_in = true, glab = true }, function(argv, opts)
+    if argv[1] == "glab" then
+      return glab_answer({ web_url = address(opts.cwd == "/w/b" and "acme/other" or "acme/payments") })(argv, opts)
+    end
+    if argv[4] == "view" then
+      return done(argv, view_payload())
+    end
+    return done(argv, { dash_row("PAY-3", "To Do", "Three") })
+  end))
+  local notices, restore_notify = stub_notify()
+  local previous = buffer.named(buffer.name("glab", "!482", "acme/payments"))
+  if previous then
+    vim.api.nvim_buf_delete(previous, { force = true })
+  end
+  local ok, err = pcall(function()
+    for _, pass in ipairs({ { "/w/b", true }, { "/elsewhere", true }, { "/w/b", false } }) do
+      local moved_to
+      moved_to, bound = pass[1], pass[2]
+      cwd = "/w/a"
+      local dash = commands.dash()
+      eq(settled(dash), true, "every section answered")
+      eq(list.state(dash).binding ~= nil, bound, "the binding is as this pass has it")
+      local lnum
+      for index, line in ipairs(lines_of(dash)) do
+        if line:find("!482", 1, true) then
+          lnum = index
+        end
+      end
+      eq(lnum ~= nil, true, "the dash shows !482: " .. table.concat(lines_of(dash), "\n"))
+      vim.api.nvim_win_set_cursor(0, { lnum, 0 })
+      -- :cd in the dash's tab, between opening it and pressing <CR>.
+      cwd = moved_to
+      local from_run, from_wait = #runs + 1, #waits + 1
+      commands.open_row(dash)
+      vim.wait(1000, function()
+        return vim.b[vim.api.nvim_get_current_buf()].docket ~= nil
+      end)
+      local opened = vim.api.nvim_get_current_buf()
+      eq(vim.api.nvim_buf_get_name(opened), "docket://glab/acme/payments/!482", "from " .. moved_to)
+      eq(vim.b[opened].docket ~= nil, true, "the item was read: " .. vim.inspect(notices))
+      eq(vim.b[opened].docket.url, address("acme/payments"), "the dash's clone's merge request")
+      eq(vim.b[opened].docket.ref.cwd, "/w/a", "later calls stay in that clone")
+      local checks = vim.list_slice(waits, from_wait)
+      eq(#checks, 1, "one state check, blocking")
+      eq({ checks[1].argv, checks[1].opts.cwd }, { { "glab", "auth", "status" }, "/w/a" }, "run in the dash's clone")
+      local reads = vim.list_slice(runs, from_run)
+      eq(#reads > 0, true, "the item was read")
+      for _, call in ipairs(reads) do
+        eq({ call.argv[1], call.opts.cwd }, { "glab", "/w/a" }, table.concat(call.argv, " "))
+      end
+      eq(notices, {}, "from " .. moved_to)
+      vim.api.nvim_buf_delete(opened, { force = true })
+    end
+  end)
+  restore_notify()
+  restore_run()
+  restore_wait()
+  restore_cache()
+  repo.root, repo.remote_url, repo.binding, vim.fn.getcwd = saved.root, saved.remote_url, saved.binding, saved.getcwd
+  glab.forget()
+  assert(ok, err)
+end)
+
+test("buffer: open() given a clone reads there with or without an adapter, :e makes its state check in the clone the buffer's reference names, and a clone whose origin names no project is named in the refusal", function()
+  vim.g.loaded_docket = nil
+  dofile(PLUGIN)
+  glab.forget()
+  -- /w/a and /w/b are clones of two GitLab projects, /w/gh of a GitHub
+  -- repository, and /w/none a clone whose origin names no project.
+  local origins = {
+    ["/w/a"] = "git@gitlab.example.test:acme/payments.git",
+    ["/w/b"] = "git@gitlab.example.test:acme/other.git",
+    ["/w/gh"] = "git@github.com:acme/payments.git",
+    ["/w/none"] = "https://gitlab.example.test/",
+  }
+  local saved = { root = repo.root, remote_url = repo.remote_url, getcwd = vim.fn.getcwd }
+  repo.root = function(cwd)
+    if origins[cwd] then
+      return { root = cwd, bare = false }
+    end
+    return nil, "fatal: not a git repository"
+  end
+  repo.remote_url = function(dir)
+    return origins[dir]
+  end
+  local cwd = "/w/b"
+  vim.fn.getcwd = function()
+    return cwd
+  end
+  -- glab's verdict follows the host the directory's remote names: signed in
+  -- to the GitLab instance, and to nothing in the GitHub clone.
+  local waits, restore_wait = stub_wait(function(argv, opts)
+    if opts.cwd == "/w/gh" then
+      return failed(argv, 1, "x gitlab.example.test: no token")
+    end
+    return done(argv, "✓ Logged in to gitlab.example.test as me\n")
+  end)
+  local runs, restore_run = stub_run(function(argv, opts)
+    return glab_answer({ web_url = address(opts.cwd == "/w/b" and "acme/other" or "acme/payments") })(argv, opts)
+  end)
+  local notices, restore_notify = stub_notify()
+  local previous = buffer.named(buffer.name("glab", "!482", "acme/payments"))
+  if previous then
+    vim.api.nvim_buf_delete(previous, { force = true })
+  end
+  -- Each call as `glab <verb>` beside the directory it ran in, from `from`.
+  local function ran_from(calls, from)
+    return vim.tbl_map(function(call)
+      return { table.concat(call.argv, " ", 1, math.min(#call.argv, 3)), call.opts.cwd }
+    end, vim.list_slice(calls, from))
+  end
+  local ok, err = pcall(function()
+    -- No adapter: the state check is made here, in the clone given, and the
+    -- reads follow it rather than the editor's directory.
+    local reported
+    local buf = buffer.open("glab", "!482", function(read_ok, message)
+      reported = { read_ok, message }
+    end, nil, "/w/a")
+    eq(vim.api.nvim_buf_get_name(buf), "docket://glab/acme/payments/!482")
+    vim.wait(1000, function()
+      return reported ~= nil
+    end)
+    eq(reported, { true })
+    eq(ran_from(waits, 1), { { "glab auth status", "/w/a" } }, "the check ran in the clone given")
+    eq(#runs > 0, true)
+    for _, call in ipairs(ran_from(runs, 1)) do
+      eq(call[2], "/w/a", call[1])
+    end
+    eq(vim.b[buf].docket.url, address("acme/payments"), "that clone's merge request")
+    eq(vim.b[buf].docket.ref.cwd, "/w/a")
+
+    -- :e from a tab in the GitHub clone, where glab is signed in to nothing:
+    -- the check runs in the clone the reference names, so the read succeeds.
+    cwd = "/w/gh"
+    vim.api.nvim_set_current_buf(buf)
+    local from_wait, from_run = #waits + 1, #runs + 1
+    vim.cmd("edit")
+    vim.wait(1000, function()
+      return vim.b[buf].docket ~= nil
+    end)
+    eq(ran_from(waits, from_wait), { { "glab auth status", "/w/a" } }, "the check ran where the read did")
+    local reread = ran_from(runs, from_run)
+    eq(#reread > 0, true, ":e read the merge request")
+    for _, call in ipairs(reread) do
+      eq(call[2], "/w/a", call[1])
+    end
+    eq(vim.api.nvim_buf_get_lines(buf, 1, 2, false), { "# Bump the pinned acli" })
+    eq(notices, {}, "nothing was refused")
+
+    -- A clone given whose origin names no project: the refusal names that
+    -- clone and not the editor's directory, which was never read, and
+    -- nothing runs.
+    cwd = "/w/b"
+    from_wait, from_run = #waits + 1, #runs + 1
+    local refused
+    eq(
+      buffer.open("glab", "!482", function(open_ok, message)
+        refused = { open_ok, message }
+      end, glab, "/w/none"),
+      nil
+    )
+    eq(refused, {
+      false,
+      "!482: glab numbers its items within a project, and /w/none, the clone it is opened from, names none; :Docket !482 from a clone of the project opens it\norigin is https://gitlab.example.test/, which names no project",
+    })
+    eq(notices, { { message = refused[2], level = vim.log.levels.ERROR } })
+    eq({ #waits, #runs }, { from_wait - 1, from_run - 1 }, "nothing ran")
+    vim.api.nvim_buf_delete(buf, { force = true })
+  end)
+  restore_notify()
+  restore_run()
+  restore_wait()
+  repo.root, repo.remote_url, vim.fn.getcwd = saved.root, saved.remote_url, saved.getcwd
+  glab.forget()
+  assert(ok, err)
+end)
+
+test("commands: <CR> on a pull request row makes its state check in the dash's clone and hands octo.nvim the row's address", function()
+  jira.forget()
+  gh.forget()
+  local _, restore_cache = scratch_cache()
+  local saved = { root = repo.root, remote_url = repo.remote_url, binding = repo.binding, getcwd = vim.fn.getcwd }
+  repo.root = function(cwd)
+    if cwd == "/w/gh" or cwd == "/w/other" then
+      return { root = cwd, bare = false }
+    end
+    return nil, "fatal: not a git repository"
+  end
+  repo.remote_url = function(dir)
+    return dir == "/w/gh" and "git@github.com:acme/payments.git" or "git@github.com:acme/other.git"
+  end
+  repo.binding = function()
+    return { kind = "projects", projects = { "PAY" } }
+  end
+  local cwd = "/w/gh"
+  vim.fn.getcwd = function()
+    return cwd
+  end
+  local waits, restore_wait = stub_acli({ signed_in = true, gh = true })
+  -- Two rows: one on github.com and one on an Enterprise instance, each
+  -- handed over by the address it carries, host and all.
+  local _, restore_run = stub_run(checked({ signed_in = true, gh = true }, function(argv)
+    if argv[1] == "gh" then
+      return done(argv, {
+        pull_request(),
+        pull_request({
+          number = 7,
+          title = "Pin the runner",
+          headRefName = "pin-runner",
+          url = "https://ghe.example.test/acme/payments/pull/7",
+        }),
+      })
+    end
+    return done(argv, { dash_row("PAY-3", "To Do", "Three") })
+  end))
+  -- octo.nvim stands in as its command alone, recording what it is handed
+  -- and the directory the editor is in when it is.
+  local handed = {}
+  vim.api.nvim_create_user_command("Octo", function(command)
+    handed[#handed + 1] = { command.args, vim.fn.getcwd() }
+  end, { nargs = "*" })
+  local notices, restore_notify = stub_notify()
+  local ok, err = pcall(function()
+    for _, case in ipairs({
+      { "#12", "https://github.com/acme/payments/pull/12" },
+      { "#7", "https://ghe.example.test/acme/payments/pull/7" },
+    }) do
+      cwd = "/w/gh"
+      local dash = commands.dash()
+      eq(settled(dash), true, "every section answered")
+      local lnum
+      for index = 1, vim.api.nvim_buf_line_count(dash) do
+        local r = list.row_at(dash, index)
+        if r and r.id == case[1] then
+          lnum = index
+        end
+      end
+      eq(lnum ~= nil, true, "the dash shows " .. case[1] .. ": " .. table.concat(lines_of(dash), "\n"))
+      vim.api.nvim_win_set_cursor(0, { lnum, 0 })
+      -- :cd in the dash's tab into another repository's clone, then <CR>.
+      cwd = "/w/other"
+      local from_wait, from_handed = #waits + 1, #handed + 1
+      commands.open_row(dash)
+      vim.wait(1000, function()
+        return #handed >= from_handed
+      end)
+      local checks = vim.list_slice(waits, from_wait)
+      eq(#checks, 1, "one state check, blocking")
+      -- The host the rows taught the adapter follows the verb, so the verb
+      -- alone is compared.
+      eq({ vim.list_slice(checks[1].argv, 1, 3), checks[1].opts.cwd }, { { "gh", "auth", "status" }, "/w/gh" }, "run in the dash's clone")
+      -- The row's address names its repository and host, so the command is
+      -- handed that and not the number, whatever the tab's directory: the
+      -- dash's clone reaches the check and nothing after it.
+      eq(vim.list_slice(handed, from_handed), { { case[2], "/w/other" } }, case[1])
+      eq(notices, {})
+      eq(buffer.named("docket://gh/" .. case[1]), nil, "no item buffer is made")
+    end
+  end)
+  vim.api.nvim_del_user_command("Octo")
+  restore_notify()
+  restore_run()
+  restore_wait()
+  restore_cache()
+  repo.root, repo.remote_url, repo.binding, vim.fn.getcwd = saved.root, saved.remote_url, saved.binding, saved.getcwd
+  gh.forget()
+  assert(ok, err)
+end)
+
+test("gh and jira: project_of reads owner/repo off a pull request's address and nothing off a ticket's, and same_project drops case", function()
+  eq(gh.project_of("https://github.com/acme/payments/pull/12"), "acme/payments")
+  eq(gh.project_of("https://ghe.example.test/acme/payments/pull/12/files"), "acme/payments", "whatever the host, and whatever follows the number")
+  eq(gh.project_of("http://github.com/acme/payments/pull/12"), "acme/payments")
+  eq(gh.project_of("https://github.com/acme/payments/issues/12"), nil, "an issue's address is not read")
+  eq(gh.project_of("https://github.com/acme/payments/pull/new/topic"), nil, "a pull path with no number is not read")
+  eq(gh.project_of("https://github.com/acme/payments"), nil)
+  eq(gh.project_of("https://github.com/acme/pull/12"), nil, "one path part is no repository")
+  eq(gh.project_of("https://github.com/acme/sub/payments/pull/12"), nil, "nor are three")
+  eq(gh.project_of(nil), nil)
+  eq(gh.project_of(12), nil)
+  eq(jira.project_of("https://example.atlassian.net/browse/PAY-1"), nil, "a key names its project itself")
+  eq(jira.project_of(nil), nil)
+  eq(repo.same_project("Acme/Payments", "acme/payments"), true)
+  eq(repo.same_project("acme/payments", "acme/payments"), true)
+  eq(repo.same_project("acme/payments", "acme/other"), false)
+  eq(repo.same_project("acme/payments", "prefix/acme/payments"), false, "a path prefix is another path")
+end)
+
+test("commands: a dash row of another project than the dash's clone is refused by <CR>, w and R, against the dash's clone and before the launcher's own checks, with the set-url remedy; a pull request row of another repository opens in octo.nvim by its address; a row of the clone's project in another case, one with no address, a ticket, a clone naming no project, and a fork's clone whose upstream lists the row are not refused; a clone whose origin spells the rows' project another way is", function()
+  jira.forget()
+  glab.forget()
+  gh.forget()
+  local _, restore_cache = scratch_cache()
+  -- /w/b is a clone of acme/other on GitLab, and /w/pay one of acme/payments;
+  -- /w/none a clone whose origin names no project; /w/ssh a clone of
+  -- acme/other by its ssh URL on an instance served under /gitlab, which its
+  -- web addresses carry and the ssh URL does not; and /w/fork a clone of a
+  -- GitHub fork, with acme/payments as `upstream` beside origin.
+  local origins = {
+    ["/w/b"] = "git@gitlab.example.test:acme/other.git",
+    ["/w/pay"] = "git@gitlab.example.test:acme/payments.git",
+    ["/w/none"] = "https://gitlab.example.test/",
+    ["/w/ssh"] = "git@gitlab.example.test:acme/other.git",
+    ["/w/fork"] = "git@github.com:me/payments.git",
+  }
+  local upstreams = {
+    ["/w/fork"] = "https://github.com/acme/payments.git",
+  }
+  local saved = {
+    root = repo.root,
+    remote_url = repo.remote_url,
+    remotes = repo.remotes,
+    binding = repo.binding,
+    getcwd = vim.fn.getcwd,
+    launch = env.launch,
+    echo = vim.api.nvim_echo,
+  }
+  repo.root = function(cwd)
+    if origins[cwd] then
+      return { root = cwd, bare = false }
+    end
+    return nil, "fatal: not a git repository"
+  end
+  repo.remote_url = function(dir)
+    return origins[dir]
+  end
+  repo.remotes = function(dir)
+    local listed = { { name = "origin", url = origins[dir] } }
+    if upstreams[dir] then
+      listed[#listed + 1] = { name = "upstream", url = upstreams[dir] }
+    end
+    return listed
+  end
+  local binding, binding_err = { kind = "projects", projects = { "PAY" } }, nil
+  repo.binding = function()
+    return binding, binding_err
+  end
+  local cwd = "/w/b"
+  vim.fn.getcwd = function()
+    return cwd
+  end
+  -- The launcher records what it is asked for and goes no further; the
+  -- progress line drawn before it is silenced.
+  local launched = {}
+  env.launch = function(opts)
+    launched[#launched + 1] = opts
+    return nil, "launched no further"
+  end
+  vim.api.nvim_echo = function() end
+  -- Beside a ticket section and the clone's own reviews, sections that run
+  -- in every clone: another project's merge requests by -R, the clone's own
+  -- project by -R in the case the instance spells it, another repository's
+  -- pull requests by --repo, and a group's, whose rows carry no address.
+  config.configure({
+    sections = {
+      { title = "All open tickets", adapter = "jira", query = "<projects> AND statusCategory != Done ORDER BY updated DESC" },
+      {
+        title = "Review requested",
+        adapter = "review",
+        query = { glab = { "mr", "list", "--reviewer=@me" }, gh = { "pr", "list", "--search", "review-requested:@me" } },
+      },
+      { title = "Payments", adapter = "glab", query = { "mr", "list", "-R", "acme/payments", "--reviewer=@me" } },
+      { title = "Other, as the instance spells it", adapter = "glab", query = { "mr", "list", "-R", "Acme/Other" } },
+      { title = "Tools", adapter = "gh", query = { "pr", "list", "--repo", "acme/tools" } },
+      { title = "The group", adapter = "glab", query = { "mr", "list", "--group", "acme" } },
+    },
+  })
+  local function mr_url(project, iid)
+    return ("https://gitlab.example.test/%s/-/merge_requests/%d"):format(project, iid)
+  end
+  -- A merge request whose address names `project`, or, with none, one whose
+  -- list left it without an address, as JSON null decodes; with no `branch`,
+  -- one the list left without a source branch.
+  local function mr_at(iid, project, branch)
+    local payload = merge_request({ iid = iid, title = ("Change %d"):format(iid), source_branch = branch })
+    payload.source_branch = branch
+    payload.web_url = project and mr_url(project, iid) or nil
+    payload.references = { short = "!" .. iid, full = (project or "acme/other") .. "!" .. iid }
+    return payload
+  end
+  -- A merge request from a fork, on a branch of the name origin also has:
+  -- the two project ids glab marks one with.
+  local function from_fork(iid, project, branch)
+    local payload = mr_at(iid, project, branch)
+    payload.source_project_id, payload.target_project_id = 91, 77
+    return payload
+  end
+  local views = {
+    ["482"] = mr_at(482, "acme/payments", "feature/acli.bump"),
+    ["483"] = mr_at(483, "acme/payments", nil),
+    ["484"] = from_fork(484, "acme/payments", "main"),
+    ["11"] = mr_at(11, "Acme/Other", "spelt-so"),
+    ["5"] = mr_at(5, "acme/other", "unaddressed"),
+    ["7"] = mr_at(7, "acme/other", "drop-flag"),
+    prefixed = mr_at(7, "gitlab/acme/other", "drop-flag"),
+  }
+  local waits, restore_wait = stub_acli({ signed_in = true, glab = true, gh = true })
+  local runs, restore_run = stub_run(checked({ signed_in = true, glab = true, gh = true }, function(argv, opts)
+    if argv[1] == "gh" then
+      if has(argv, "acme/tools") then
+        return done(argv, {
+          pull_request({ number = 7, title = "Pin the runner", headRefName = "pin-runner", url = "https://github.com/acme/tools/pull/7" }),
+        })
+      end
+      -- The fork's clone, where gh lists upstream's pull requests: the
+      -- fixture's #12 of acme/payments, the clone's own pull request from
+      -- me/payments, which gh marks as from a fork.
+      return done(argv, { pull_request({ isCrossRepository = true }) })
+    end
+    if argv[1] == "glab" and argv[2] == "mr" and argv[3] == "list" then
+      if has(argv, "acme/payments") then
+        return done(argv, { views["482"], views["483"], views["484"] })
+      elseif has(argv, "Acme/Other") then
+        return done(argv, { views["11"] })
+      elseif has(argv, "--group") then
+        return done(argv, { mr_at(5, nil, "unaddressed"), from_fork(6, nil, "main") })
+      elseif opts.cwd == "/w/ssh" then
+        return done(argv, { views.prefixed })
+      end
+      return done(argv, { views["7"] })
+    end
+    if argv[1] == "glab" and argv[2] == "mr" and argv[3] == "view" then
+      return done(argv, views[argv[4]])
+    end
+    if argv[1] == "glab" then
+      return glab_answer()(argv, opts)
+    end
+    if argv[4] == "view" then
+      return done(argv, view_payload())
+    end
+    return done(argv, { dash_row("PAY-3", "To Do", "Three") })
+  end))
+  -- octo.nvim stands in as its command alone, as the test above has it.
+  local handed = {}
+  vim.api.nvim_create_user_command("Octo", function(command)
+    handed[#handed + 1] = command.args
+  end, { nargs = "*" })
+  local notices, restore_notify = stub_notify()
+  for _, name in ipairs({ "docket://glab/acme/other/!482", "docket://glab/acme/payments/!482" }) do
+    local previous = buffer.named(name)
+    if previous then
+      vim.api.nvim_buf_delete(previous, { force = true })
+    end
+  end
+  local ERROR = vim.log.levels.ERROR
+  local ok, err = pcall(function()
+    local function cursor_on(dash, source, id)
+      for index = 1, vim.api.nvim_buf_line_count(dash) do
+        local r = list.row_at(dash, index)
+        if r and r.source == source and r.id == id then
+          vim.api.nvim_win_set_cursor(0, { index, 0 })
+          return dash
+        end
+      end
+      error(("the dash shows no %s row %s:\n%s"):format(source, id, table.concat(lines_of(dash), "\n")))
+    end
+    local function dash_at(source, id)
+      local dash = commands.dash()
+      eq(settled(dash), true, "every section answered")
+      return cursor_on(dash, source, id)
+    end
+    -- What the dash's own opens leave: the buffer on screen once its read
+    -- has landed.
+    local function opened()
+      vim.wait(1000, function()
+        return vim.b[vim.api.nvim_get_current_buf()].docket ~= nil
+      end)
+      return vim.api.nvim_get_current_buf()
+    end
+
+    -- Every refusal ends with the remedy for a clone whose origin spells the
+    -- row's project another way than the address does, as the item buffer's
+    -- refusal of an answer naming another project does: the compare cannot
+    -- tell the two apart.
+    local function remedy(site, project)
+      return ("; where origin spells this project another way -- an ssh URL without the instance's path prefix, or the path the project had before a move or a rename -- git remote set-url origin %s/%s.git makes the two agree"):format(
+        site,
+        project
+      )
+    end
+    local function refused(id, theirs, ours, site)
+      return {
+        {
+          message = ("%s is %s's, and the dash's clone is of %s, whose %s is another; :Docket %s from a clone of %s opens it%s"):format(
+            id,
+            theirs,
+            ours,
+            id,
+            id,
+            theirs,
+            remedy(site, theirs)
+          ),
+          level = ERROR,
+        },
+        {
+          message = ("%s is %s's, and the dash's clone is of %s, where a branch of its name is another's code; w in the dash of a clone of %s builds it%s"):format(
+            id,
+            theirs,
+            ours,
+            theirs,
+            remedy(site, theirs)
+          ),
+          level = ERROR,
+        },
+        {
+          message = ("%s is %s's, and the dash's clone is of %s, where a branch of its name is another's code; R in the dash of a clone of %s reviews it%s"):format(
+            id,
+            theirs,
+            ours,
+            theirs,
+            remedy(site, theirs)
+          ),
+          level = ERROR,
+        },
+      }
+    end
+    local GITLAB, GITHUB = "https://gitlab.example.test", "https://github.com"
+
+    -- The other project's merge request: every key refuses it, nothing is
+    -- read, no state check is made and nothing is built.
+    local dash = dash_at("glab", "!482")
+    local from_run, from_wait = #runs + 1, #waits + 1
+    commands.open_row(dash)
+    commands.work_row(dash)
+    commands.review_row(dash)
+    eq(vim.api.nvim_get_current_buf(), dash, "nothing opened")
+    eq({ #runs, #waits }, { from_run - 1, from_wait - 1 }, "nothing ran")
+    eq(launched, {})
+    local payments = refused("!482", "acme/payments", "acme/other", GITLAB)
+    eq(notices, payments)
+    eq(buffer.named("docket://glab/acme/other/!482"), nil)
+    eq(buffer.named("docket://glab/acme/payments/!482"), nil)
+
+    -- The tab's directory moved into a clone of the row's own project: the
+    -- compare is against the dash's clone, so w and R refuse as before.
+    cwd = "/w/pay"
+    local shown = #notices
+    commands.work_row(dash)
+    commands.review_row(dash)
+    eq(vim.list_slice(notices, shown + 1), { payments[2], payments[3] }, "the same two refusals")
+    eq(launched, {})
+    cwd = "/w/b"
+
+    -- The other project's merge request with no branch: foreign() answers
+    -- before the branch check, so the refusal names the project and not
+    -- `carries no branch`.
+    cursor_on(dash, "glab", "!483")
+    shown = #notices
+    commands.work_row(dash)
+    commands.review_row(dash)
+    local unbranched = refused("!483", "acme/payments", "acme/other", GITLAB)
+    eq(vim.list_slice(notices, shown + 1), { unbranched[2], unbranched[3] })
+    eq(launched, {})
+
+    -- The other repository's pull request: w and R refuse it, and <CR> opens
+    -- it in octo.nvim as that repository's, by the address the row carries.
+    cursor_on(dash, "gh", "#7")
+    shown = #notices
+    commands.work_row(dash)
+    commands.review_row(dash)
+    local tools = refused("#7", "acme/tools", "acme/other", GITHUB)
+    eq(vim.list_slice(notices, shown + 1), { tools[2], tools[3] })
+    eq(launched, {})
+    shown = #notices
+    commands.open_row(dash)
+    vim.wait(1000, function()
+      return #handed > 0
+    end)
+    eq(handed, { "https://github.com/acme/tools/pull/7" }, "the address, not the number alone")
+    eq(#notices, shown, "nothing refused")
+    eq(vim.api.nvim_get_current_buf(), dash, "the stand-in opens nothing, so the dash stays")
+
+    -- The clone's own project, spelt as the instance does: one project, so
+    -- w builds it and <CR> reads it in the clone.
+    dash = dash_at("glab", "!11")
+    shown = #notices
+    commands.work_row(dash)
+    eq(launched, { { root = "/w/b", binding = binding, branch = "spelt-so" } })
+    eq(vim.list_slice(notices, shown + 1), { { message = "launched no further", level = ERROR } }, "the launcher's own refusal, and no other")
+    shown = #notices
+    commands.open_row(dash)
+    local buf = opened()
+    eq(vim.api.nvim_buf_get_name(buf), "docket://glab/acme/other/!11")
+    eq(vim.b[buf].docket.url, mr_url("Acme/Other", 11))
+    eq(vim.b[buf].docket.ref.cwd, "/w/b")
+    eq(#notices, shown, "nothing refused")
+    vim.api.nvim_buf_delete(buf, { force = true })
+
+    -- A row with no address names no project, so it is compared with
+    -- nothing and opens as the clone's.
+    dash = dash_at("glab", "!5")
+    commands.open_row(dash)
+    buf = opened()
+    eq(vim.api.nvim_buf_get_name(buf), "docket://glab/acme/other/!5")
+    eq(vim.b[buf].docket.url, mr_url("acme/other", 5))
+    eq(#notices, shown, "nothing refused")
+    vim.api.nvim_buf_delete(buf, { force = true })
+
+    -- A row with no address that its list marks as from a fork: nothing says
+    -- whose the row is, so w and R refuse it as from a fork, before the
+    -- launcher.
+    local forked = function(id, branch)
+      return {
+        message = ("%s comes from a fork, so origin's %s is not its branch and no worktree is made for it"):format(id, branch),
+        level = ERROR,
+      }
+    end
+    dash = dash_at("glab", "!6")
+    shown = #notices
+    local built = #launched
+    commands.work_row(dash)
+    commands.review_row(dash)
+    eq(vim.list_slice(notices, shown + 1), { forked("!6", "main"), forked("!6", "main") })
+    eq(#launched, built)
+
+    -- A ticket names its project in its key, and w builds it; R refuses it
+    -- as a ticket, which is its own reason.
+    dash = dash_at("jira", "PAY-3")
+    shown = #notices
+    commands.work_row(dash)
+    commands.review_row(dash)
+    eq(launched[#launched], { root = "/w/b", binding = binding, key = "PAY-3", summary = "Three" })
+    eq(vim.list_slice(notices, shown + 1), {
+      { message = "launched no further", level = ERROR },
+      { message = "PAY-3 is a ticket; R starts a review on a merge request", level = ERROR },
+    })
+
+    -- A dash in a clone whose origin names no project holds nothing against
+    -- a row: <CR> goes on to the open, which refuses for its own reason, and
+    -- w to the launcher.
+    cwd = "/w/none"
+    dash = dash_at("glab", "!482")
+    shown = #notices
+    commands.open_row(dash)
+    eq(vim.api.nvim_get_current_buf(), dash, "nothing opened")
+    eq(#notices, shown + 1)
+    eq(
+      notices[#notices].message:find(
+        "!482: glab numbers its items within a project, and /w/none, the clone it is opened from, names none; :Docket !482 from a clone of the project opens it",
+        1,
+        true
+      ),
+      1,
+      notices[#notices].message
+    )
+    commands.work_row(dash)
+    eq(launched[#launched], { root = "/w/none", binding = binding, branch = "feature/acli.bump" })
+    -- A row from a fork there: nothing says the clone is a fork of the row's
+    -- project, so w and R refuse it as from a fork.
+    cursor_on(dash, "glab", "!484")
+    shown = #notices
+    built = #launched
+    commands.work_row(dash)
+    commands.review_row(dash)
+    eq(vim.list_slice(notices, shown + 1), { forked("!484", "main"), forked("!484", "main") })
+    eq(#launched, built)
+
+    -- A clone by the ssh URL of an instance served under a path prefix: the
+    -- rows' addresses carry the prefix and origin does not, so the clone's
+    -- own rows are refused, nothing is read or built, and each refusal ends
+    -- with the set-url that makes the two agree.
+    cwd = "/w/ssh"
+    dash = dash_at("glab", "!7")
+    shown = #notices
+    built = #launched
+    from_run, from_wait = #runs + 1, #waits + 1
+    commands.open_row(dash)
+    commands.work_row(dash)
+    commands.review_row(dash)
+    eq(vim.api.nvim_get_current_buf(), dash, "nothing opened")
+    eq({ #runs, #waits }, { from_run - 1, from_wait - 1 }, "nothing ran")
+    eq(#launched, built)
+    eq(vim.list_slice(notices, shown + 1), refused("!7", "gitlab/acme/other", "acme/other", GITLAB))
+
+    -- A fork's clone on GitHub, with acme/payments as upstream: gh lists
+    -- upstream's pull requests there, and upstream is one of the clone's
+    -- remotes, so w and R take the row's branch to the launcher, marked as
+    -- from a fork though it is -- origin is the fork its branch lives in; a
+    -- row of a project no remote names, acme/tools by --repo, is refused as
+    -- anywhere, naming origin's project as the clone's.
+    cwd = "/w/fork"
+    dash = dash_at("gh", "#12")
+    eq(list.row_at(dash, vim.api.nvim_win_get_cursor(0)[1]).fork, true, "#12 reaches the dash marked")
+    shown = #notices
+    built = #launched
+    commands.work_row(dash)
+    commands.review_row(dash)
+    eq(vim.list_slice(launched, built + 1), {
+      { root = "/w/fork", binding = binding, branch = "teardown" },
+      { root = "/w/fork", binding = binding, branch = "teardown", review = "#12" },
+    })
+    eq(vim.list_slice(notices, shown + 1), {
+      { message = "launched no further", level = ERROR },
+      { message = "launched no further", level = ERROR },
+    }, "the launcher's own refusal, and no other")
+    cursor_on(dash, "gh", "#7")
+    shown = #notices
+    built = #launched
+    commands.work_row(dash)
+    eq(vim.list_slice(notices, shown + 1), { refused("#7", "acme/tools", "me/payments", GITHUB)[2] })
+    eq(#launched, built)
+
+    -- A binding that cannot be read is the launcher's refusal, and foreign()
+    -- answers before the launcher: w reports the row's project.
+    cwd = "/w/b"
+    binding, binding_err = nil, "fatal: bad config line 3 in file .git/config"
+    dash = dash_at("glab", "!482")
+    shown = #notices
+    commands.work_row(dash)
+    eq(vim.list_slice(notices, shown + 1), { payments[2] }, "the project's refusal, not the binding's")
+  end)
+  vim.api.nvim_del_user_command("Octo")
+  restore_notify()
+  restore_run()
+  restore_wait()
+  restore_cache()
+  config.configure({})
+  env.launch, vim.api.nvim_echo, vim.fn.getcwd = saved.launch, saved.echo, saved.getcwd
+  repo.root, repo.remote_url, repo.remotes, repo.binding = saved.root, saved.remote_url, saved.remotes, saved.binding
+  jira.forget()
+  glab.forget()
+  gh.forget()
+  assert(ok, err)
+end)
+
+test("commands: w and R refuse a merge request and a pull request from a fork on the rows the adapters built, before the launcher; a row of the clone's own project, and one whose list left the fork fields out, reach the launcher with the row's branch", function()
+  glab.forget()
+  gh.forget()
+  local _, restore_cache = scratch_cache()
+  -- A clone of acme/payments, which every row below is of, so nothing is
+  -- refused as another project's; the launcher records what it is asked for
+  -- and goes no further, and the progress line drawn before it is silenced.
+  local binding = { kind = "projects", projects = { "PAY" } }
+  local restore_clone = stub_clone(binding, "git@gitlab.example.test:acme/payments.git")
+  local saved = { launch = env.launch, echo = vim.api.nvim_echo }
+  local launched = {}
+  env.launch = function(opts)
+    launched[#launched + 1] = opts
+    return nil, "launched no further"
+  end
+  vim.api.nvim_echo = function() end
+  config.configure({
+    sections = {
+      { title = "Merge requests", adapter = "glab", query = { "mr", "list", "--assignee=@me" } },
+      { title = "Pull requests", adapter = "gh", query = { "pr", "list", "--assignee", "@me" } },
+    },
+  })
+  local function pr_url(number)
+    return ("https://github.com/acme/payments/pull/%d"):format(number)
+  end
+  local _, restore_wait = stub_acli({ signed_in = true, glab = true, gh = true })
+  local _, restore_run = stub_run(checked({ signed_in = true, glab = true, gh = true }, function(argv)
+    if argv[1] == "gh" then
+      return done(argv, {
+        pull_request({ headRefName = "main", isCrossRepository = true }),
+        pull_request({ number = 3, title = "Same repository", headRefName = "same", isCrossRepository = false, url = pr_url(3) }),
+        pull_request({ number = 4, title = "Unmarked", headRefName = "patch-1", url = pr_url(4) }),
+      })
+    end
+    return done(argv, {
+      merge_request({ iid = 482, source_branch = "main", source_project_id = 91, target_project_id = 77 }),
+      merge_request({ iid = 7, title = "Drop the flag", source_branch = "drop-flag", source_project_id = 77, target_project_id = 77 }),
+      merge_request({ iid = 9, title = "Unmarked", source_branch = "patch-1" }),
+    })
+  end))
+  local notices, restore_notify = stub_notify()
+  local ERROR = vim.log.levels.ERROR
+  local ok, err = pcall(function()
+    local dash = commands.dash()
+    eq(settled(dash), true, "both sections answered")
+    local function cursor_on(source, id)
+      for index = 1, vim.api.nvim_buf_line_count(dash) do
+        local r = list.row_at(dash, index)
+        if r and r.source == source and r.id == id then
+          vim.api.nvim_win_set_cursor(0, { index, 0 })
+          return r
+        end
+      end
+      error(("the dash shows no %s row %s:\n%s"):format(source, id, table.concat(lines_of(dash), "\n")))
+    end
+    local function refusal(id, branch)
+      return {
+        message = ("%s comes from a fork, so origin's %s is not its branch and no worktree is made for it"):format(id, branch),
+        level = ERROR,
+      }
+    end
+    -- The rows from a fork, each on a branch origin has under the same name:
+    -- w and R refuse, and the launcher is not reached.
+    for _, from in ipairs({ { "glab", "!482" }, { "gh", "#12" } }) do
+      local r = cursor_on(from[1], from[2])
+      eq(r.fork, true, from[2] .. " reaches the dash marked")
+      eq(r.branch, "main")
+      local shown = #notices
+      commands.work_row(dash)
+      commands.review_row(dash)
+      eq(vim.list_slice(notices, shown + 1), { refusal(from[2], "main"), refusal(from[2], "main") }, from[2])
+      eq(launched, {}, "the launcher is not reached for " .. from[2])
+    end
+    -- A row of the clone's own project, and one whose list said nothing
+    -- about a fork: each reaches the launcher with the row's branch, and
+    -- the launcher's own answer is the only notice.
+    for _, same in ipairs({ { "glab", "!7", "drop-flag" }, { "glab", "!9", "patch-1" }, { "gh", "#3", "same" }, { "gh", "#4", "patch-1" } }) do
+      local r = cursor_on(same[1], same[2])
+      eq(r.fork, nil, same[2] .. " is not marked")
+      local shown, built = #notices, #launched
+      commands.work_row(dash)
+      commands.review_row(dash)
+      eq(vim.list_slice(launched, built + 1), {
+        { root = "/w/repo", binding = binding, branch = same[3] },
+        { root = "/w/repo", binding = binding, branch = same[3], review = same[2] },
+      }, same[2])
+      eq(vim.list_slice(notices, shown + 1), {
+        { message = "launched no further", level = ERROR },
+        { message = "launched no further", level = ERROR },
+      }, same[2])
+    end
+  end)
+  restore_notify()
+  restore_run()
+  restore_wait()
+  restore_clone()
+  restore_cache()
+  config.configure({})
+  env.launch, vim.api.nvim_echo = saved.launch, saved.echo
+  glab.forget()
+  gh.forget()
+  assert(ok, err)
+end)
+
+test("buffer: !482 from a clone whose origin spells the path in another case opens the buffer that exists under 'fileignorecase', reads it from that clone, and :e there with nothing read reads it; with the option off it is a second buffer", function()
+  vim.g.loaded_docket = nil
+  dofile(PLUGIN)
+  -- Two clones of one project, whose origins spell its path in two cases.
+  local origins = {
+    ["/w/cased"] = "git@gitlab.example.test:Acme/Payments.git",
+    ["/w/a"] = "git@gitlab.example.test:acme/payments.git",
+  }
+  local saved = { root = repo.root, remote_url = repo.remote_url, fold = vim.o.fileignorecase }
+  repo.root = function(cwd)
+    if origins[cwd] then
+      return { root = cwd, bare = false }
+    end
+    return nil, "fatal: not a git repository"
+  end
+  repo.remote_url = function(dir)
+    return origins[dir]
+  end
+  local ok, err = pcall(two_clones, function(clones)
+    for _, project in ipairs({ "Acme/Payments", "acme/payments" }) do
+      local previous = buffer.named(buffer.name("glab", "!482", project))
+      if previous then
+        vim.api.nvim_buf_delete(previous, { force = true })
+      end
+    end
+    local notices, restore_notify = stub_notify()
+    -- Answers every call as glab_answer() would, the instance spelling the
+    -- path in lower case, until none is left.
+    local function drain()
+      for _ = 1, 50 do
+        if #clones.pending > 0 then
+          local call = clones.pending[1]
+          local stdout = glab_answer({ web_url = address("acme/payments") })(call.argv, {}).stdout
+          clones.answer(vim.json.decode(stdout ~= "" and stdout or '""'))
+        end
+        vim.wait(5)
+      end
+    end
+    -- The reads since `from`, each asserted to have run in `dir`.
+    local function read_from(from, dir)
+      local reads = where_ran(vim.list_slice(clones.ran, from))
+      eq(#reads > 0, true, "the merge request was read")
+      for _, entry in ipairs(reads) do
+        eq(entry[2], dir, entry[1])
+      end
+    end
+    local made = {}
+    local inner_ok, inner_err = pcall(function()
+      vim.o.fileignorecase = true
+      clones.enter("/w/cased")
+      local first = buffer.open("glab", "!482")
+      made[#made + 1] = first
+      drain()
+      eq(vim.api.nvim_buf_get_name(first), "docket://glab/Acme/Payments/!482")
+      eq(vim.b[first].docket.ref.cwd, "/w/cased")
+
+      -- From the clone spelling the path in lower case: the buffer that
+      -- exists, read again from this clone, and not a second buffer, which
+      -- the editor would refuse with E95.
+      clones.enter("/w/a")
+      local from = #clones.ran + 1
+      local reported
+      local second = buffer.open("glab", "!482", function(read_ok, message)
+        reported = { read_ok, message }
+      end)
+      drain()
+      eq(second, first, "the one buffer")
+      eq(reported, { true })
+      eq(vim.api.nvim_get_current_buf(), first)
+      eq(vim.api.nvim_buf_get_name(first), "docket://glab/Acme/Payments/!482", "the name keeps the spelling it was opened under")
+      read_from(from, "/w/a")
+      eq(vim.b[first].docket.ref.cwd, "/w/a", "later calls go to the clone it was opened from last")
+      eq(vim.b[first].docket.url, address("acme/payments"))
+      eq(notices, {})
+      eq(buffer.named("docket://glab/acme/payments/!482"), first, "found under either spelling, as the editor finds it")
+      eq(buffer.named("docket://glab/ACME/PAYMENTS/!482"), first)
+
+      -- :e with nothing read, from the lower-case clone: the two spellings
+      -- are one project, so it reads rather than refusing.
+      vim.b[first].docket = nil
+      from = #clones.ran + 1
+      vim.cmd("edit")
+      drain()
+      read_from(from, "/w/a")
+      eq(vim.b[first].docket.ref.cwd, "/w/a")
+      eq(vim.api.nvim_buf_get_lines(first, 1, 2, false), { "# Bump the pinned acli" })
+      eq(notices, {})
+
+      -- With the option off the editor keeps the two names apart, and so
+      -- does named(): the open from the lower-case clone is a second buffer.
+      vim.o.fileignorecase = false
+      eq(buffer.named("docket://glab/acme/payments/!482"), nil, "the compare is exact, as the editor's is")
+      from = #clones.ran + 1
+      local third = buffer.open("glab", "!482")
+      made[#made + 1] = third
+      drain()
+      eq(third ~= first, true, "a second buffer")
+      eq(vim.api.nvim_buf_get_name(third), "docket://glab/acme/payments/!482")
+      read_from(from, "/w/a")
+      -- And :e with nothing read in the first, still from the lower-case
+      -- clone, reads it: the project compare drops case whatever the option.
+      vim.b[first].docket = nil
+      vim.api.nvim_set_current_buf(first)
+      from = #clones.ran + 1
+      vim.cmd("edit")
+      drain()
+      read_from(from, "/w/a")
+      eq(vim.b[first].docket.ref.cwd, "/w/a")
+      eq(notices, {})
+    end)
+    restore_notify()
+    for _, buf in ipairs(made) do
+      if vim.api.nvim_buf_is_valid(buf) then
+        vim.api.nvim_buf_delete(buf, { force = true })
+      end
+    end
+    assert(inner_ok, inner_err)
+  end)
+  vim.o.fileignorecase = saved.fold
+  repo.root, repo.remote_url = saved.root, saved.remote_url
+  assert(ok, err)
 end)
 
 -- runner -----------------------------------------------------------------------------------

@@ -1,11 +1,12 @@
 -- The user commands and the keymaps: what `:Docket` dispatches to, and what
--- the dashboard and the item buffer bind. Imports adapters, auth, buffer,
--- cache, config, env, list, repo and row; adapters for can(), ME and NOBODY,
--- and cache to drop the rows a transition or an assignment makes stale.
--- plugin/docket.lua declares the command, the `<leader>dd` map and the
--- autocommands and calls in here, so that nothing below is loaded until the
--- first use. The other `<leader>d` keys are set per buffer, by attach() on an
--- item buffer and attach_dash() on the dashboard.
+-- the dashboard, the item buffer and a review's diff bind. Imports adapters,
+-- auth, buffer, cache, config, env, list, repo, review and row; adapters for
+-- can(), ME and NOBODY, and cache to drop the rows a transition or an
+-- assignment makes stale. plugin/docket.lua declares the command, the
+-- `<leader>dd` map and the autocommands and calls in here, so that nothing
+-- below is loaded until the first use. The other `<leader>d` keys are set per
+-- buffer, by attach() on an item buffer, attach_dash() on the dashboard and
+-- attach_review() on each buffer that shows a side of a review's diff.
 --
 -- Every mode asks its adapter for the authentication state before it asks
 -- for anything else -- through auth.ready(), or on the dashboard through
@@ -29,10 +30,20 @@
 -- through the adapter's item_create and puts the item buffer of the new key
 -- where the draft was.
 --
--- The review mode is not part of this build. Its command reports that rather
--- than doing something else; `R` on a merge request row builds the
--- environment and hands the editor window that command, which is how a row
--- reaches the report.
+-- The review mode is review.lua. `:Docket review <id>` opens it, and
+-- `:Docket review <verb>` runs one of its verbs on the review in the current
+-- tab; the bang on `submit` is review.lua's `force`, which posts comments held
+-- against a merge request that has moved since. `R` on a merge request row
+-- builds the environment and hands the editor window `:Docket review <id>`,
+-- which is how a row reaches the review. A pull request goes to octo.nvim, as
+-- `:Docket #12` sends it, since the GitHub adapter names that handoff and
+-- implements no review call.
+--
+-- The review's keys are set on each buffer that shows a side of its diff, and
+-- taken off again when the review's tab closes: the new side is the
+-- worktree's own files, which stay open and are edited after the review. The
+-- autocommands that do both are made at the first review, so an editor that
+-- never opens one never has them.
 --
 -- A pull request never opens in the item buffer: the GitHub adapter names a
 -- `handoff`, and open_item() then calls its item(), which opens octo.nvim.
@@ -64,6 +75,7 @@ local config = require("docket.config")
 local env = require("docket.env")
 local list = require("docket.list")
 local repo = require("docket.repo")
+local review = require("docket.review")
 local row = require("docket.row")
 
 local M = {}
@@ -74,8 +86,24 @@ M.KEY = "^%u[%u%d]+%-%d+$"
 M.MR = "^!(%d+)$"
 M.PR = "^#(%d+)$"
 
-M.NOT_BUILT = {
-  review = "the review mode is not part of this build",
+-- What `:Docket review` takes in place of an identifier, each the review.lua
+-- function of the same name, run on the review in the current tab.
+-- review.VERBS holds the spellings its own messages print.
+M.REVIEW_VERBS = { "comment", "reply", "resolve", "submit", "abandon" }
+
+-- The words `:Docket review submit` takes, each a field of the verdict
+-- review.submit() is given: `approve` approves once the held comments are
+-- posted, and `summary` opens a buffer for a summary comment whose `:w`
+-- submits.
+M.SUBMIT_WORDS = { "approve", "summary" }
+
+-- The keys of a review, set on each buffer that shows a side of its diff.
+-- Abandoning discards every held comment, so it has no key: it is typed out.
+M.REVIEW_KEYS = {
+  { lhs = "<leader>dc", verb = "comment", desc = "Docket: hold a review comment on this line" },
+  { lhs = "<leader>dr", verb = "reply", desc = "Docket: reply to the thread on this line" },
+  { lhs = "<leader>dx", verb = "resolve", desc = "Docket: resolve the thread on this line" },
+  { lhs = "<leader>ds", verb = "submit", desc = "Docket: submit the review" },
 }
 
 -- A Jira project key, which is what `:Docket create` takes: the prefix of a
@@ -1000,6 +1028,196 @@ function M.attach_dash(buf)
   end, vim.tbl_extend("force", opts, { desc = "Docket: review the merge request" }))
 end
 
+--- Runs one of the review's verbs on the review in the current tab.
+---
+--- review.lua reports a tab with no review, or a cursor on no side of its
+--- diff, itself. `submit` takes the words of SUBMIT_WORDS, and `force` is
+--- the bang; every other verb takes nothing more.
+---@param verb string one of REVIEW_VERBS
+---@param words string[] what followed the verb
+---@param force boolean
+function M.review_verb(verb, words, force)
+  if verb ~= "submit" and #words > 0 then
+    return notify(("review %s takes nothing more; got %s"):format(verb, table.concat(words, " ")), vim.log.levels.ERROR)
+  end
+  if verb == "comment" then
+    return review.comment()
+  end
+  if verb == "reply" then
+    return review.reply()
+  end
+  if verb == "resolve" then
+    return review.resolve()
+  end
+  if verb == "abandon" then
+    review.abandon()
+    -- A diff that `:DiffviewClose` left open keeps its tab, and the review
+    -- is gone all the same, so its keys come off here as well as on
+    -- TabClosed.
+    return M.unkey_reviews()
+  end
+  local verdict = { force = force == true }
+  for _, word in ipairs(words) do
+    if not vim.tbl_contains(M.SUBMIT_WORDS, word) then
+      return notify(
+        ("review submit takes %s; got %s"):format(table.concat(M.SUBMIT_WORDS, " and "), word),
+        vim.log.levels.ERROR
+      )
+    end
+    verdict[word] = true
+  end
+  review.submit(verdict)
+end
+
+--- Sets the review's keys on a buffer.
+---@param buf integer
+function M.attach_review(buf)
+  local opts = { buffer = buf, noremap = true, silent = true }
+  for _, key in ipairs(M.REVIEW_KEYS) do
+    vim.keymap.set("n", key.lhs, function()
+      M.review_verb(key.verb, {}, false)
+    end, vim.tbl_extend("force", opts, { desc = key.desc }))
+  end
+end
+
+--- Takes the review's keys off a buffer, and no other map: one is known as
+--- the review's by its description.
+---@param buf integer
+function M.detach_review(buf)
+  local ours = {}
+  for _, key in ipairs(M.REVIEW_KEYS) do
+    ours[key.desc] = true
+  end
+  for _, map in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
+    if ours[map.desc] then
+      vim.api.nvim_buf_del_keymap(buf, "n", map.lhs)
+    end
+  end
+end
+
+-- The buffers carrying the review's keys, each with the review whose tab it
+-- was keyed in.
+local keyed = {}
+
+--- Keys every buffer of the current tab that shows a side of the diff of the
+--- review in it, which review.locate() answers. Nothing when the tab holds
+--- no review.
+function M.key_review_tab()
+  local current = review.current()
+  if not current then
+    return
+  end
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local buf = vim.api.nvim_win_get_buf(win)
+    if review.locate(current, buf) then
+      M.attach_review(buf)
+      keyed[buf] = current
+    end
+  end
+end
+
+--- Takes the keys off every buffer whose review no longer has its tab.
+function M.unkey_reviews()
+  for buf, owner in pairs(keyed) do
+    if not (owner.tab and vim.api.nvim_tabpage_is_valid(owner.tab)) then
+      keyed[buf] = nil
+      if vim.api.nvim_buf_is_valid(buf) then
+        M.detach_review(buf)
+      end
+    end
+  end
+end
+
+local review_group = nil
+
+-- The autocommands that key a review's buffers and unkey them, made once a
+-- review exists. review.open() returns before its diff opens, since the
+-- diff waits on the merge request's read, so they are in place when it
+-- does. A buffer is keyed after the event rather than in it, because
+-- diffview fills its tab's windows before review.lua records the tab as the
+-- review's, and until then nothing answers review.current(). BufWinEnter
+-- covers every file diffview puts in a window, and TabEnter every return to
+-- the tab.
+local function review_autocommands()
+  if review_group ~= nil then
+    return
+  end
+  review_group = vim.api.nvim_create_augroup("docket/review-keys", { clear = true })
+  vim.api.nvim_create_autocmd({ "BufWinEnter", "TabEnter" }, {
+    group = review_group,
+    callback = function()
+      vim.schedule(M.key_review_tab)
+    end,
+  })
+  vim.api.nvim_create_autocmd("TabClosed", {
+    group = review_group,
+    callback = function()
+      M.unkey_reviews()
+    end,
+  })
+end
+
+--- Opens the review of a merge request, through review.open().
+---
+--- The adapter is checked for every call a review makes before anything
+--- runs, so a Jira key is refused without asking acli for its state, which
+--- reaches the network. review.open() makes the state check itself, after
+--- it has checked that diffview.nvim is there.
+---@param id string
+---@return table|nil review
+function M.review_open(id)
+  local source, err = M.source_of(id)
+  if not source then
+    notify(err, vim.log.levels.ERROR)
+    return nil
+  end
+  local adapter
+  adapter, err = adapters.get(source)
+  if not adapter then
+    notify(("%s: %s"):format(id, err), vim.log.levels.ERROR)
+    return nil
+  end
+  if adapter.handoff then
+    open_item(source, id)
+    return nil
+  end
+  for _, capability in ipairs(review.NEEDS) do
+    if not adapters.can(adapter, capability) then
+      notify(("%s: %s has no review mode; it does not implement %s"):format(id, source, capability), vim.log.levels.ERROR)
+      return nil
+    end
+  end
+  local opened = review.open(source, id)
+  if opened then
+    review_autocommands()
+  end
+  return opened
+end
+
+--- `:Docket review <id>`, or `:Docket review <verb>`.
+---@param args string[] the words after `review`
+---@param force boolean the bang
+---@return table|nil review
+function M.review(args, force)
+  local first = args[1]
+  if first == nil then
+    notify(
+      ("review takes a merge request such as !482, or one of %s"):format(table.concat(M.REVIEW_VERBS, ", ")),
+      vim.log.levels.ERROR
+    )
+    return nil
+  end
+  if vim.tbl_contains(M.REVIEW_VERBS, first) then
+    M.review_verb(first, vim.list_slice(args, 2), force)
+    return nil
+  end
+  if #args > 1 then
+    notify(("review takes one merge request; got %s"):format(table.concat(args, " ")), vim.log.levels.ERROR)
+    return nil
+  end
+  return M.review_open(first)
+end
+
 --- Opens the dashboard for the clone the working directory is in.
 ---@return integer|nil buf
 function M.dash()
@@ -1014,7 +1232,7 @@ function M.dash()
 end
 
 --- The `:Docket` command: no argument for the dashboard, `login [<backend>]`,
---- `review <id>`, `create [<project>]`, or one identifier.
+--- `review <id>`, `review <verb>`, `create [<project>]`, or one identifier.
 ---@param command { fargs: string[], bang: boolean }
 function M.run(command)
   local args = command.fargs
@@ -1025,7 +1243,7 @@ function M.run(command)
     return M.login(args[2], command.bang)
   end
   if args[1] == "review" then
-    return notify(M.NOT_BUILT.review, vim.log.levels.WARN)
+    return M.review(vim.list_slice(args, 2), command.bang)
   end
   if args[1] == "create" then
     if #args > 2 then
@@ -1040,7 +1258,9 @@ function M.run(command)
 end
 
 --- Command-line completion for `:Docket`: the subcommands, then the backend
---- names after `login`.
+--- names after `login`, the verbs after `review`, and the verdict's words
+--- after `review submit`. A merge request's identifier is not offered, and
+--- nothing follows one.
 ---@param lead string what has been typed of the current word
 ---@param line string the whole command line
 ---@return string[]
@@ -1048,6 +1268,12 @@ function M.complete(lead, line)
   local candidates
   if line:match("^%s*Docket!?%s+login%s") then
     candidates = row.SOURCES
+  elseif line:match("^%s*Docket!?%s+review%s+submit%s") then
+    candidates = M.SUBMIT_WORDS
+  elseif line:match("^%s*Docket!?%s+review%s+%S*$") then
+    candidates = M.REVIEW_VERBS
+  elseif line:match("^%s*Docket!?%s+review%s") then
+    candidates = {}
   else
     candidates = { "create", "login", "review" }
   end
