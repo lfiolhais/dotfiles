@@ -2,14 +2,14 @@
 """Safety harness for the chezmoi dotfiles.
 
 It renders the source, lints the bootstrap scripts and the rest of the deployed
-shell and awk, parses every fish file, hands the ssh config and the gitconfig
-to the programs that read them, refuses a compiled binary in the source, checks
-that its own hand-maintained lists cover everything deployed, asks Homebrew
-whether it still installs every Brewfile entry, checks the Brewfile against the
-Linux manifest and the target matrix against its template, lints and imports
-this repo's Python under every interpreter on the host, runs the unit-test
-suites, and prints a dry-run diff -- without touching ``$HOME`` and without
-running the ``run_*`` bootstrap scripts.
+shell and awk, parses every fish file and every Lua file, hands the ssh config
+and the gitconfig to the programs that read them, refuses a compiled binary in
+the source, checks that its own hand-maintained lists cover everything
+deployed, asks Homebrew whether it still installs every Brewfile entry, checks
+the Brewfile against the Linux manifest and the target matrix against its
+template, lints and imports this repo's Python under every interpreter on the
+host, runs the unit-test suites, and prints a dry-run diff -- without touching
+``$HOME`` and without running the ``run_*`` bootstrap scripts.
 
 Needs Python 3.11: ``enum.StrEnum`` below, and ``tomllib`` inside the manifest
 reader it imports. That is a higher floor than the 3.9 it holds the deployed
@@ -62,7 +62,7 @@ BREWFILE = REPO / "private_dot_config" / "Brewfile"
 # Maps every Brewfile formula onto its per-distro Linux equivalent.
 MANIFEST = REPO / ".chezmoidata" / "packages.toml"
 # The fields that mean "Linux installs this", for counting: a distro name, or
-# `repo` for gh and starship, which the 01 script installs from their own.
+# `repo` for gh, acli and starship, which the 01 script installs from their own.
 LINUX = TARGETS | {"repo"}
 RUFF_CONFIG = REPO / "tests" / "pyproject.toml"
 # The libraries the deployed commands share. Globbed rather than listed, so
@@ -112,6 +112,31 @@ AWK_FILES = (
 # Deployed Python that ruff would not otherwise find: it lives outside tests/,
 # and the entry points have no .py extension because they are commands.
 DEPLOYED_PYTHON = (*sorted(LIB_PYTHON.glob("*.py")), *DEPLOYED_ENTRY_POINTS, CHEZMOI_PACKAGES)
+# The package's directory, named here so the root below fits the line length.
+DOCKET_PACK = REPO / "dot_local" / "share" / "private_nvim" / "private_site" / "pack"
+# The roots the Lua gate globs, and check_coverage fails on a .lua under none of
+# them, so there is no list of Lua files to keep. The configuration holds
+# init.lua; the docket plugin is a neovim package, which neovim loads from
+# ~/.local/share/nvim/site/pack/*/start/* without it being on the
+# configuration's runtime path.
+LUA_ROOTS = (
+    REPO / "private_dot_config" / "nvim",
+    DOCKET_PACK / "docket" / "start" / "docket",
+)
+# The loader the gate runs, and the interpreter it runs under. nvim rather
+# than luajit: luajit is on a Mac only as neovim's dependency and is in no
+# manifest entry, while nvim is in the manifest for every target and is what
+# loads these files. -u NONE keeps it from loading the configuration it is
+# parsing; -l runs a script and exits with its status.
+LUAGATE = REPO / "tests" / "luagate.lua"
+NVIM_LUA = ("nvim", "-u", "NONE", "-l")
+# The Lua suites, named after the library each exercises, run under nvim
+# because the modules under test call into `vim.*`.
+UNIT_TESTS_LUA = (REPO / "tests" / "docket.lua",)
+# Top-level directories that deploy nothing, skipped by every walk of the
+# source: the checkout's own metadata, the agent's worktrees, ruff's cache,
+# and this harness.
+NOT_DEPLOYED = frozenset({".git", ".claude", ".ruff_cache", "tests"})
 # Target paths that must never be deployed (kept out via .chezmoiignore).
 MUST_NOT_DEPLOY = ("CLAUDE.md", "LICENSE", "key.txt.age", "tests")
 # Deployed shell that `_scripts()` does not find, because it is not named run_*
@@ -141,8 +166,10 @@ BINARY_MAGIC = (
     b"\xbe\xba\xfe\xca",
 )
 # Names no source directory should carry: written by a program, never by hand,
-# and meaningless on the machine they are copied to.
-GENERATED_NAMES = ("dot_DS_Store", ".DS_Store", "dot_vimdid", "fish_variables")
+# and meaningless on the machine they are copied to. `tags` is what neovim's
+# `:helptags` writes beside a help file. The match below is on every path
+# component, so a directory named `tags` fails too.
+GENERATED_NAMES = ("dot_DS_Store", ".DS_Store", "dot_vimdid", "fish_variables", "tags")
 # Exit code a shell uses for "command not found".
 MISSING = 127
 # Exit code timeout(1) uses; reused for a command that outstayed TIMEOUT.
@@ -610,6 +637,30 @@ def _run_suite(tests: Path, interpreters: list[str]) -> Result:
     return Result(Status.OK, f"{tests.stem}: {tally} ({len(interpreters)} interpreter(s))")
 
 
+def check_lua_tests() -> list[Result]:
+    """Run every Lua suite under nvim, the interpreter its modules load in.
+
+    Each suite sets its own module path from its location and replaces spawn
+    wherever a test reaches a process, so no client is called, no git runs and
+    no tmux window opens.
+
+    Returns:
+        One result per suite, or a single warning if the host has no nvim.
+
+    """
+    results: list[Result] = []
+    for tests in UNIT_TESTS_LUA:
+        tested = run(*NVIM_LUA, str(tests))
+        if tested.missing:
+            return [Result(Status.WARN, "lua unit tests skipped (nvim not installed)")]
+        if not tested.ok:
+            results.append(Result(Status.FAIL, f"{tests.stem} unit tests (nvim)", tested.output))
+            continue
+        tally = tested.output.splitlines()[-1] if tested.output else ""
+        results.append(Result(Status.OK, f"{tests.stem}: {tally} (nvim)"))
+    return results
+
+
 def check_unit_tests() -> list[Result]:
     """Run every unit-test suite, the 3.9-clean ones under every interpreter.
 
@@ -694,6 +745,33 @@ def check_awk_files() -> list[Result]:
     return results
 
 
+def check_lua_files() -> Result:
+    """Parse every Lua file under ``LUA_ROOTS`` with the interpreter that loads it.
+
+    ``tests/luagate.lua`` calls ``loadfile`` on each path, which compiles
+    without running, so no module is required and nothing it parses runs. A
+    file that does not parse is reported with the parser's own message. A host
+    without nvim is a warning, as one without awk is for ``check_awk_files``.
+
+    Returns:
+        A failing result with the first parse error, a warning if nvim is not
+        installed, otherwise a passing result with the file count.
+
+    """
+    paths = sorted(path for root in LUA_ROOTS for path in root.rglob("*.lua"))
+    if not paths:
+        roots = ", ".join(str(root.relative_to(REPO)) for root in LUA_ROOTS)
+        return Result(Status.FAIL, "lua", f"no Lua files found under {roots}")
+
+    parsed = run(*NVIM_LUA, str(LUAGATE), *(str(path) for path in paths))
+    if parsed.missing:
+        return Result(Status.WARN, "lua files not parsed (nvim not installed)")
+    if not parsed.ok:
+        return Result(Status.FAIL, "lua syntax", parsed.output)
+
+    return Result(Status.OK, f"lua: {len(paths)} files parse")
+
+
 def _shebang(path: Path) -> str:
     """Read the interpreter a deployed file names on its first line.
 
@@ -734,6 +812,18 @@ def check_coverage() -> Result:
         if path not in known_bin
     ]
 
+    # The Lua gate globs LUA_ROOTS rather than reading a list, so this is the
+    # only place a Lua file outside them is noticed. A Lua file has no shebang,
+    # which is why the shebang walk below never sees one.
+    lua_roots = ", ".join(str(root.relative_to(REPO)) for root in LUA_ROOTS)
+    uncovered += [
+        f"{path.relative_to(REPO)}: Lua outside the roots the Lua gate parses "
+        f"({lua_roots}); move it under one of them"
+        for path in sorted(REPO.rglob("*.lua"))
+        if path.relative_to(REPO).parts[0] not in NOT_DEPLOYED
+        and not any(path.is_relative_to(root) for root in LUA_ROOTS)
+    ]
+
     wants = (
         ("sh", covered_shell, "SHELL_FILES"),
         ("bash", covered_shell, "SHELL_FILES"),
@@ -744,7 +834,7 @@ def check_coverage() -> Result:
         rel = path.relative_to(REPO)
         if not path.is_file() or path.is_symlink() or path in known_bin:
             continue
-        if rel.parts[0] in {".git", ".claude", ".ruff_cache", "tests"}:
+        if rel.parts[0] in NOT_DEPLOYED:
             continue
         shebang = _shebang(path)
         if not shebang:
@@ -933,7 +1023,7 @@ def check_source_is_text() -> Result:
     offenders: list[str] = []
     for path in sorted(REPO.rglob("*")):
         rel = path.relative_to(REPO)
-        if not path.is_file() or rel.parts[0] in {".git", ".claude", ".ruff_cache", "tests"}:
+        if not path.is_file() or rel.parts[0] in NOT_DEPLOYED:
             continue
         if path.name in GENERATED_NAMES or any(part in GENERATED_NAMES for part in rel.parts):
             offenders.append(f"{rel}: written by a program, not by hand")
@@ -1003,6 +1093,7 @@ def main() -> int:
             check_ssh_config(workdir),
             check_gitconfig(workdir),
             *check_awk_files(),
+            check_lua_files(),
             check_source_is_text(),
             check_coverage(),
             check_brewfile(),
@@ -1012,6 +1103,7 @@ def main() -> int:
             check_python(),
             check_python_imports(),
             *check_unit_tests(),
+            *check_lua_tests(),
             check_uv_script(),
         ]
         hard_failure = _report(results)

@@ -1,0 +1,7887 @@
+-- Unit tests for the docket modules: query assembly, the branch and
+-- window-name rules, the launcher and its teardown, the remote-to-adapter
+-- choice, the repository's binding, the worktree listing parser, row
+-- ordering, spawn's failure paths, the document tree's render and serialise,
+-- the item and its regions, the buffer rendering, the highlight groups, the
+-- region compare, the adapter contract, the in-flight join, the cache, the
+-- Jira, GitLab and GitHub adapters, the login flow, the item buffer's marks,
+-- the dashboard, the commands, the help tags, the health report and the
+-- plugin file.
+--
+-- No git runs, no client is called, no tmux window opens: every process call
+-- goes through spawn, and the tests that reach one replace spawn.run or
+-- spawn.wait with a function that records the argument list and answers from
+-- a recorded payload. Between tests both raise, so a test that reaches a
+-- client without replacing them fails rather than running it. The spawn tests
+-- are the exception: they run `sh`, and name a client no machine has. The
+-- editor actions exercised are the tabs the launcher opens away from tmux, the
+-- item and dashboard buffers, and the scratch buffers the item buffer's marks
+-- are tested in, all of which nvim -l can create.
+--
+-- Runs under nvim, the interpreter that loads these modules:
+--
+--   nvim -u NONE -l tests/docket.lua
+--
+-- The module path is set from this file's own location to the package's
+-- `lua/` directory, so it runs by hand from any directory as well as from
+-- tests/check.py.
+
+local here = debug.getinfo(1, "S").source:sub(2)
+local root = vim.uv.fs_realpath(vim.fs.dirname(here) .. "/..")
+local lua = root .. "/dot_local/share/private_nvim/private_site/pack/docket/start/docket/lua"
+package.path = lua .. "/?.lua;" .. lua .. "/?/init.lua;" .. package.path
+
+local adapters = require("docket.adapters")
+local adf = require("docket.adf")
+local auth = require("docket.auth")
+local buffer = require("docket.buffer")
+local cache = require("docket.cache")
+local commands = require("docket.commands")
+local config = require("docket.config")
+local docket = require("docket")
+local diff = require("docket.diff")
+local env = require("docket.env")
+local flight = require("docket.flight")
+local gh = require("docket.adapters.gh")
+local glab = require("docket.adapters.glab")
+local health = require("docket.health")
+local highlight = require("docket.highlight")
+local item = require("docket.item")
+local jira = require("docket.adapters.jira")
+local list = require("docket.list")
+local render = require("docket.render")
+local repo = require("docket.repo")
+local row = require("docket.row")
+local spawn = require("docket.spawn")
+
+-- The guard the header describes: without it, a test that reaches a client
+-- unstubbed runs the real one as the account signed in on this machine. It
+-- raises with the argument list. The spawn tests call the real functions
+-- through these two names.
+local real_run, real_wait = spawn.run, spawn.wait
+local function unstubbed(argv)
+  error("a test reached spawn without a stub: " .. table.concat(argv, " "), 2)
+end
+spawn.run, spawn.wait = unstubbed, unstubbed
+
+-- Every cache read and write in this run lands under a directory of the run's
+-- own. A test that logs in reaches cache.clear(), which unlinks the row files
+-- where the cache directory points; pointing it here keeps the account's own
+-- rows out of it. nvim removes the directory tempname() names when it exits.
+-- The runner points it here again after every test.
+local CACHE_HOME = vim.fn.tempname()
+vim.env.XDG_CACHE_HOME = CACHE_HOME
+config.options.cache_dir = config.cache_dir()
+
+local function eq(actual, expected, label)
+  if not vim.deep_equal(actual, expected) then
+    error(("%s:\n  expected %s\n  got      %s"):format(label or "value", vim.inspect(expected), vim.inspect(actual)), 2)
+  end
+end
+
+local tests = {}
+local function test(name, body)
+  tests[#tests + 1] = { name = name, body = body }
+end
+
+local OPEN = " AND statusCategory != Done ORDER BY updated DESC"
+
+-- query assembly ---------------------------------------------------------------
+
+test("query: one project fills the placeholder", function()
+  local binding = { kind = "projects", projects = { "PROJ" } }
+  eq(repo.jql("<projects>" .. OPEN, binding), "project IN (PROJ)" .. OPEN)
+end)
+
+test("query: several projects are one IN clause", function()
+  local binding = { kind = "projects", projects = { "PAY", "OPS" } }
+  eq(
+    repo.jql("<projects> AND assignee = currentUser()" .. OPEN, binding),
+    "project IN (PAY, OPS) AND assignee = currentUser()" .. OPEN
+  )
+end)
+
+test("query: unbound drops the project clause", function()
+  local binding = { kind = "unbound" }
+  eq(repo.jql("<projects> AND assignee = currentUser()" .. OPEN, binding), "assignee = currentUser()" .. OPEN)
+  eq(repo.jql("assignee = currentUser() AND <projects>", binding), "assignee = currentUser()")
+  eq(repo.jql("<projects> and reporter = currentUser()", binding), "reporter = currentUser()", "JQL keywords are case-insensitive")
+  eq(
+    repo.jql("assignee = currentUser() AND <projects> AND resolution = Unresolved", binding),
+    "assignee = currentUser() AND resolution = Unresolved",
+    "a placeholder inside an AND chain is dropped with its AND"
+  )
+  local query, err = repo.jql("<projects> OR assignee = currentUser()", binding)
+  eq(query, nil, "a placeholder not joined by AND cannot be dropped")
+  eq(err:find("cannot be dropped", 1, true) ~= nil, true, err)
+  local shown = repo.sections(binding, { { title = "T", adapter = "jira", query = "(<projects>) AND b" } }, { adapter = "gh" })
+  eq(shown[1].query, nil)
+  eq(shown[1].reason:find("cannot be dropped", 1, true) ~= nil, true, "the section carries the reason")
+end)
+
+test("query: unbound refuses a template not scoped to the account", function()
+  local query, err = repo.jql("<projects> AND statusCategory != Done ORDER BY updated DESC", { kind = "unbound" })
+  eq(query, nil)
+  eq(err:find("currentUser()", 1, true) ~= nil, true, "the reason names the clause that would have allowed it")
+end)
+
+test("sections: unbound with no account-scoped section shows one section with no query and the reason", function()
+  local configured = { { title = "All open tickets", adapter = "jira", query = "<projects> AND statusCategory != Done" } }
+  local shown = repo.sections({ kind = "unbound" }, configured, { adapter = "glab" })
+  eq(shown[1].adapter, "jira")
+  eq(shown[1].query, nil)
+  eq(shown[1].unbound, true)
+  eq(shown[1].reason:find("currentUser()", 1, true) ~= nil, true)
+end)
+
+test("query: a complete jql is used as given", function()
+  local binding = { kind = "jql", jql = "filter = 12345" }
+  eq(repo.jql("<projects>" .. OPEN, binding), "filter = 12345")
+end)
+
+test("sections: the defaults carry a title, an adapter and a query each", function()
+  for _, section in ipairs(config.defaults.sections) do
+    eq(type(section.title), "string", "title")
+    eq(section.adapter == "jira" or section.adapter == "review", true, section.title .. " adapter")
+    if section.adapter == "jira" then
+      eq(section.query:find(config.PLACEHOLDER, 1, true), 1, section.title .. " placeholder")
+    else
+      eq(type(section.query.glab), "table", section.title .. " glab query")
+      eq(type(section.query.gh), "table", section.title .. " gh query")
+    end
+  end
+end)
+
+test("sections: unbound shows one labelled Jira section with the binding command", function()
+  local shown = repo.sections({ kind = "unbound" }, config.defaults.sections, { adapter = "glab" })
+  local jira = vim.tbl_filter(function(section)
+    return section.adapter == "jira"
+  end, shown)
+  eq(#jira, 1, "one jira section")
+  eq(jira[1].title, "Assigned to me (unbound)")
+  eq(jira[1].query, "assignee = currentUser()" .. OPEN)
+  eq(jira[1].unbound, true)
+  eq(jira[1].reason:find(repo.BIND_COMMAND, 1, true) ~= nil, true, "reason names the binding command")
+  eq(jira[1].reason:find(repo.LIST_COMMAND, 1, true) ~= nil, true, "reason names the listing command")
+end)
+
+test("sections: bound by project shows every section, review ones on the client", function()
+  local shown = repo.sections({ kind = "projects", projects = { "PAY" } }, config.defaults.sections, { adapter = "gh" })
+  eq(#shown, #config.defaults.sections)
+  eq(shown[1].query, "project IN (PAY)" .. OPEN)
+  eq(shown[4].adapter, "gh")
+  eq(shown[4].query, { "pr", "list", "--search", "review-requested:@me" })
+end)
+
+test("sections: ignored shows no Jira section; an unknown remote states its reason", function()
+  local shown = repo.sections({ kind = "ignored" }, config.defaults.sections, { reason = "origin is elsewhere" })
+  eq(#shown, 1)
+  eq(shown[1].adapter, nil)
+  eq(shown[1].reason, "origin is elsewhere")
+end)
+
+test("sections: a complete jql runs in the first Jira section alone", function()
+  -- A review section placed ahead of the Jira ones must not count as the first.
+  local configured = { config.defaults.sections[4], unpack(config.defaults.sections) }
+  local shown = repo.sections({ kind = "jql", jql = "filter = 1" }, configured, { adapter = "glab" })
+  local jira = vim.tbl_filter(function(section)
+    return section.adapter == "jira"
+  end, shown)
+  eq(#jira, 1)
+  eq(jira[1].title, "All open tickets")
+  eq(jira[1].query, "filter = 1")
+end)
+
+test("config: configure replaces the section list whole and merges the rest", function()
+  local options = config.configure({ sections = { { title = "Only", adapter = "jira", query = "<projects>" } }, timeouts = { tmux = 1 } })
+  eq(#options.sections, 1)
+  eq(options.timeouts.tmux, 1)
+  eq(options.timeouts.git, config.defaults.timeouts.git)
+  config.configure({})
+  eq(#config.options.sections, #config.defaults.sections)
+end)
+
+test("config: the cache directory follows XDG_CACHE_HOME, set or empty", function()
+  local saved = vim.env.XDG_CACHE_HOME
+  vim.env.XDG_CACHE_HOME = "/x/cache"
+  eq(config.cache_dir(), "/x/cache/docket")
+  eq(config.configure({}).cache_dir, "/x/cache/docket", "configure takes it from the same function")
+  vim.env.XDG_CACHE_HOME = ""
+  eq(config.cache_dir(), vim.env.HOME .. "/.cache/docket", "empty counts as unset")
+  vim.env.XDG_CACHE_HOME = nil
+  eq(config.cache_dir(), vim.env.HOME .. "/.cache/docket")
+  eq(config.cache_dir():find("/nvim/", 1, true), nil, "never under the editor's own cache")
+  vim.env.XDG_CACHE_HOME = saved
+  config.configure({})
+end)
+
+test("config: with HOME empty as well, the cache is under the passwd entry's home", function()
+  local saved_xdg, saved_home = vim.env.XDG_CACHE_HOME, vim.env.HOME
+  vim.env.XDG_CACHE_HOME, vim.env.HOME = "", ""
+  local dir = config.cache_dir()
+  vim.env.XDG_CACHE_HOME, vim.env.HOME = saved_xdg, saved_home
+  eq(dir, vim.uv.os_get_passwd().homedir .. "/.cache/docket")
+end)
+
+-- the branch rule ----------------------------------------------------------------
+
+test("branch: punctuation collapses to single hyphens", function()
+  eq(env.branch_for("PROJ-142", "Fix: race (in) flush!!"), "PROJ-142-fix-race-in-flush")
+end)
+
+test("branch: a summary that is all punctuation leaves the key alone", function()
+  eq(env.branch_for("PROJ-142", "!!! ??? ..."), "PROJ-142")
+  eq(env.branch_for("PROJ-142", ""), "PROJ-142")
+end)
+
+test("branch: a very long summary is capped with no trailing hyphen", function()
+  local summary = ("retry backoff drops the last attempt when the queue is"):rep(4)
+  local branch = env.branch_for("PROJ-142", summary)
+  eq(#branch <= env.BRANCH_MAX, true, "length")
+  eq(branch:sub(1, 9), "PROJ-142-")
+  eq(branch:sub(-1) ~= "-", true, "no trailing hyphen")
+  eq(branch:find("[^%w%-]"), nil, "alphabet")
+  -- The cap lands just after the run of letters, on the hyphen before `tail`.
+  eq(env.branch_for("PROJ-142", ("a"):rep(50) .. " tail"), "PROJ-142-" .. ("a"):rep(50), "a cut on a hyphen drops it")
+  local long_key = ("K"):rep(70) .. "-1"
+  eq(env.key_of(env.branch_for(long_key, "x")), long_key, "the cap never shortens the key")
+end)
+
+test("branch: the key is read back off a generated branch", function()
+  eq(env.key_of("PROJ-142-fix-race-in-flush"), "PROJ-142")
+  eq(env.key_of("feature/PROJ-142"), nil)
+  eq(env.key_of("main"), nil)
+  eq(env.key_of("PROJ-142abc"), nil, "the key ends at a word boundary")
+  eq(env.key_of("PROJ-142"), "PROJ-142")
+  eq(env.key_of("PROJ-1420-x"), "PROJ-1420")
+  eq(env.key_of("PROJ-142_x"), "PROJ-142")
+end)
+
+-- the window-name rule -----------------------------------------------------------
+
+test("window: slash, dot, colon and space each collapse to one hyphen", function()
+  eq(env.window_name("feature/PAY 1.2:hot fix"), "feature-PAY-1-2-hot-fix")
+  eq(env.window_name("a/./:  b"), "a-b")
+end)
+
+test("window: a branch inside the alphabet is unchanged and never truncated", function()
+  eq(env.window_name("PROJ-142-fix_race"), "PROJ-142-fix_race")
+  local long = ("x"):rep(200)
+  eq(env.window_name(long), long)
+end)
+
+test("window: the editor command carries the review identifier as one argument", function()
+  eq(env.editor_command(nil), { "nvim" })
+  eq(env.editor_command("!482"), { "nvim", "-c", "Docket review !482" })
+end)
+
+test("window: inside tmux every target is an exact name and nothing spawns but tmux", function()
+  local saved_tmux, saved_wait = vim.env.TMUX, spawn.wait
+  local calls = {}
+  vim.env.TMUX = "/tmp/tmux-1/default,1,0"
+  spawn.wait = function(argv)
+    calls[#calls + 1] = argv
+    return { argv = argv, ok = true, code = 0, stdout = "", stderr = "", timed_out = false }
+  end
+  local ok, opened = pcall(env.open_windows, "/w/p", "PROJ-1-x", env.editor_command("!4"))
+  spawn.wait = saved_wait
+  vim.env.TMUX = saved_tmux
+  assert(ok, opened)
+  eq(opened, { how = "tmux", editor = "PROJ-1-x", shell = "PROJ-1-x-sh" })
+  eq(calls, {
+    { "tmux", "new-window", "-S", "-n", "PROJ-1-x", "-c", "/w/p", "nvim", "-c", "Docket review !4" },
+    { "tmux", "new-window", "-S", "-d", "-n", "PROJ-1-x-sh", "-c", "/w/p" },
+    { "tmux", "set-option", "-w", "-t", "=PROJ-1-x", "allow-rename", "off" },
+    { "tmux", "set-option", "-w", "-t", "=PROJ-1-x-sh", "allow-rename", "off" },
+    { "tmux", "select-window", "-t", "=PROJ-1-x" },
+  })
+end)
+
+test("window: away from tmux a tab of this editor opens at the path and runs a review's command, and a tab already there is reused", function()
+  local saved_tmux, saved_wait = vim.env.TMUX, spawn.wait
+  vim.env.TMUX = nil
+  spawn.wait = function()
+    error("nothing is spawned away from tmux")
+  end
+  local path, other = vim.fn.tempname(), vim.fn.tempname()
+  vim.fn.mkdir(path, "p")
+  vim.fn.mkdir(other, "p")
+  local reviewed = {}
+  vim.api.nvim_create_user_command("Docket", function(command)
+    reviewed[#reviewed + 1] = command.args
+  end, { nargs = "*" })
+  local tabs = vim.fn.tabpagenr("$")
+  local ok, opened, err = pcall(env.open_windows, path, "PROJ-1-x", env.editor_command("!4"))
+  local path_tab = vim.api.nvim_get_current_tabpage()
+  local path_cwd = vim.fn.getcwd(-1, 0)
+  local ok_plain, plain, err_plain = pcall(env.open_windows, other, "PROJ-2-y", env.editor_command(nil))
+  local other_tab = vim.api.nvim_get_current_tabpage()
+  local opened_tabs = vim.fn.tabpagenr("$")
+  -- The same review again, from the tab at the other path: the tab at this
+  -- one is switched to, as `new-window -S` finds a window inside tmux.
+  local ok_again, again, err_again = pcall(env.open_windows, path, "PROJ-1-x", env.editor_command("!4"))
+  local again_tab = vim.api.nvim_get_current_tabpage()
+  vim.api.nvim_del_user_command("Docket")
+  spawn.wait = saved_wait
+  vim.env.TMUX = saved_tmux
+  -- The tabs close again, or a later test finds its buffer still shown in a
+  -- tab this one left, and a `bufhidden=wipe` buffer is never hidden.
+  for _, tab in ipairs({ path_tab, other_tab }) do
+    if vim.api.nvim_tabpage_is_valid(tab) and #vim.api.nvim_list_tabpages() > 1 then
+      vim.cmd.tabclose(vim.api.nvim_tabpage_get_number(tab))
+    end
+  end
+  assert(ok, opened)
+  assert(ok_plain, plain)
+  assert(ok_again, again)
+  eq({ err, err_plain, err_again }, {})
+  eq({ opened.how, plain.how, again.how }, { "tab", "tab", "tab" })
+  eq(opened_tabs, tabs + 2, "one tab per path")
+  eq(vim.uv.fs_realpath(path_cwd), vim.uv.fs_realpath(path), "the new tab's working directory is the path")
+  eq(again_tab, path_tab, "a tab already at the path is switched to")
+  eq(reviewed, { "review !4" }, "the review command ran in the tab it opened, once, and not again in the tab reused")
+  eq(again.script, opened.script, "the reused tab still returns the script for printing")
+  eq(opened.script:sub(1, #"tmux new-window -S -n"), "tmux new-window -S -n", "the script is returned for printing")
+  eq(opened.editor, nil, "no window names: nothing was opened in tmux")
+  eq(vim.fn.tabpagenr("$"), tabs, "and the tabs it opened are closed")
+end)
+
+test("window: the pasteable script quotes the path, names both windows, and reads as fish", function()
+  local script = env.tmux_script("/w/my repo/PROJ-1-x", "PROJ-1-x", { "nvim", "-c", "Docket review !4" })
+  local lines = vim.split(script, "\n")
+  eq(lines[1], "tmux new-window -S -n 'PROJ-1-x' -c '/w/my repo/PROJ-1-x' 'nvim' '-c' 'Docket review !4'")
+  eq(lines[2], "tmux new-window -S -d -n 'PROJ-1-x-sh' -c '/w/my repo/PROJ-1-x'")
+  eq(lines[3], "tmux set-option -w -t '=PROJ-1-x' allow-rename off")
+  eq(lines[4], "tmux set-option -w -t '=PROJ-1-x-sh' allow-rename off")
+  eq(lines[#lines], "tmux select-window -t '=PROJ-1-x'")
+  -- Pasted at a fish prompt, which has neither `var=value` nor `$(...)`.
+  for _, line in ipairs(lines) do
+    eq(line:find("$(", 1, true), nil, "no substitution: " .. line)
+    eq(line:find("=$", 1, true), nil, "no assignment: " .. line)
+  end
+end)
+
+-- the remote-to-adapter choice -----------------------------------------------------
+
+test("remote: a GitLab host selects glab", function()
+  eq(repo.adapter_for("git@gitlab.example.com:group/proj.git"), "glab")
+  eq(repo.adapter_for("ssh://git@GitLab.corp:2222/group/proj.git"), "glab")
+end)
+
+test("remote: a GitHub host selects gh", function()
+  eq(repo.adapter_for("https://github.com/owner/repo.git"), "gh")
+  eq(repo.adapter_for("git@github.com:owner/repo.git"), "gh")
+end)
+
+test("remote: anything else selects nothing and says why", function()
+  local adapter, reason = repo.adapter_for("ssh://git@bitbucket.org/team/repo.git")
+  eq(adapter, nil)
+  eq(reason:find("bitbucket.org", 1, true) ~= nil, true, "reason names the host")
+  -- The host alone: no user in front of it and no port behind it, in either
+  -- form of the URL.
+  local elsewhere = "origin is on bitbucket.org, which is neither GitLab nor GitHub, so there are no review sections"
+  eq(select(2, repo.adapter_for("ssh://git@bitbucket.org:7999/team/repo.git")), elsewhere)
+  eq(select(2, repo.adapter_for("git@bitbucket.org:team/repo.git")), elsewhere)
+  adapter, reason = repo.adapter_for("/srv/git/repo.git")
+  eq(adapter, nil)
+  eq(reason:find("names no host", 1, true) ~= nil, true, "a path names no host")
+end)
+
+-- the worktree listing --------------------------------------------------------------
+
+test("worktrees: porcelain pairs each path with its branch, detached with none", function()
+  local porcelain = table.concat({
+    "worktree /w/repo",
+    "HEAD 14a101eb9a31b979dcb033978afd9a713b06f60f",
+    "bare",
+    "",
+    "worktree /w/repo/PROJ-142-fix-race",
+    "HEAD 96b18f5bdb0274141283ef4343de8a823c5002ba",
+    "branch refs/heads/PROJ-142-fix-race",
+    "",
+    "worktree /w/repo/v1.2.0",
+    "HEAD 96b18f5bdb0274141283ef4343de8a823c5002ba",
+    "detached",
+    "",
+  }, "\n")
+  local found = repo.parse_worktrees(porcelain)
+  eq(found, {
+    { path = "/w/repo" },
+    { path = "/w/repo/PROJ-142-fix-race", branch = "PROJ-142-fix-race" },
+    { path = "/w/repo/v1.2.0" },
+  })
+  eq(repo.worktree_for_key(found, "PROJ-142"), found[2])
+  eq(repo.worktree_for_key(found, "PROJ-14"), nil, "the prefix includes the hyphen")
+  eq(repo.worktree_for_branch(found, "PROJ-142-fix-race"), found[2])
+  eq(repo.worktree_for_branch(found, "PROJ-142"), nil)
+end)
+
+-- row ordering ------------------------------------------------------------------------
+
+test("rows: identifiers compare by number, sources in section order", function()
+  local rows = {
+    row.new({ source = "glab", id = "!10", state = "open", title = "b" }),
+    row.new({ source = "jira", id = "PAY-1234", state = "To Do", title = "c" }),
+    row.new({ source = "glab", id = "!9", state = "open", title = "a" }),
+    row.new({ source = "jira", id = "PAY-1201", state = "To Do", title = "d" }),
+  }
+  local ids = vim.tbl_map(function(r)
+    return r.id
+  end, row.sort(rows))
+  eq(ids, { "PAY-1201", "PAY-1234", "!9", "!10" })
+end)
+
+test("rows: a row missing a rendered field is refused", function()
+  eq(pcall(row.new, { source = "jira", id = "PAY-1", state = "", title = "t" }), false)
+  eq(pcall(row.new, { source = "svn", id = "1", state = "s", title = "t" }), false)
+end)
+
+test("rows and items: a category is kept only as a non-empty string, and fork only when true", function()
+  local base = { source = "jira", id = "PAY-1", state = "To Do", title = "t" }
+  eq(row.new(vim.tbl_extend("force", base, { category = "new" })).category, "new")
+  eq(item.new(vim.tbl_extend("force", base, { category = "new" })).category, "new")
+  -- A JSON null decodes to vim.NIL where luanil is not asked for, and a
+  -- payload of another shape can put a table there.
+  for _, odd in ipairs({ "", vim.NIL, { key = "new" }, 3 }) do
+    eq(row.new(vim.tbl_extend("force", base, { category = odd })).category, nil, vim.inspect(odd))
+    eq(item.new(vim.tbl_extend("force", base, { category = odd })).category, nil, vim.inspect(odd))
+  end
+  eq(row.new(vim.tbl_extend("force", base, { fork = true })).fork, true)
+  for _, odd in ipairs({ false, "true", 1 }) do
+    eq(row.new(vim.tbl_extend("force", base, { fork = odd })).fork, nil, vim.inspect(odd))
+  end
+end)
+
+-- spawn's pure parts --------------------------------------------------------------------
+
+test("spawn: the added environment is the four variables and nothing curated", function()
+  eq(spawn.ENV, { NO_COLOR = "1", CLICOLOR = "0", GH_NO_UPDATE_NOTIFIER = "1", GH_PROMPT_DISABLED = "1" })
+end)
+
+test("spawn: a failure message carries stderr verbatim", function()
+  local result = { argv = { "glab", "mr", "list" }, ok = false, code = 1, stdout = "", stderr = "not logged in\nrun glab auth login", timed_out = false }
+  eq(spawn.message(result), "glab exited 1\nnot logged in\nrun glab auth login")
+  eq(spawn.decode({ argv = { "glab" }, stdout = '{"iid": 4}' }), { iid = 4 })
+  local value, err = spawn.decode({ argv = { "glab" }, stdout = "not json" })
+  eq(value, nil)
+  eq(err:find("^glab: output is not JSON") ~= nil, true, err)
+end)
+
+-- The tests below call the real spawn.run and spawn.wait. The only processes
+-- they start are `sh`; a client name that no machine has is how a missing
+-- one is reached.
+
+test("spawn: a missing executable is a result, answered before run returns, with no source location", function()
+  local got
+  local handle = real_run({ "docket-no-such-client" }, nil, function(result)
+    got = result
+  end)
+  eq(handle, nil)
+  eq(got and got.code, spawn.MISSING, "on_done ran before run returned")
+  eq(got.ok, false)
+  eq(got.stderr:find("^[^%s]-:%d+: "), nil, got.stderr)
+  eq(got.stderr:find("docket-no-such-client", 1, true) ~= nil, true, "vim.system's own words name the command: " .. got.stderr)
+  eq(real_wait({ "docket-no-such-client" }).code, spawn.MISSING)
+  eq(spawn.message(got):sub(1, #"docket-no-such-client: not found\n"), "docket-no-such-client: not found\n")
+  eq(spawn.message({ argv = { "acli" }, code = 1, stderr = "", timed_out = false }), "acli exited 1", "no stderr, no trailing newline")
+end)
+
+test("spawn: a working directory that does not exist is not reported as a missing client", function()
+  local gone = real_wait({ "sh", "-c", "true" }, { cwd = "/nonexistent" })
+  eq(gone.ok, false)
+  eq(gone.code, 1, "not MISSING: sh is there")
+  eq(gone.unstarted, true)
+  eq(spawn.message(gone), "sh: not started\nthe working directory /nonexistent does not exist; :cd to one that does")
+  -- vim.fn.getcwd() answers "" in a tab whose directory has been removed.
+  local removed = real_wait({ "sh", "-c", "true" }, { cwd = "" })
+  eq({ removed.code, removed.unstarted }, { 1, true })
+  eq(removed.stderr, "the editor's working directory has been removed; :cd to one that exists")
+  local got
+  real_run({ "sh", "-c", "true" }, { cwd = "/nonexistent" }, function(result)
+    got = result
+  end)
+  eq({ got.code, got.unstarted }, { 1, true }, "run reports it the same way, before it returns")
+  eq(real_wait({ "sh", "-c", "true" }).unstarted, nil, "a process that ran carries no unstarted")
+end)
+
+test("spawn: a process whose child keeps the output open past the timeout is a timeout, not an error", function()
+  -- sh waits for the `sleep` it started, so neither has exited at the
+  -- timeout, and both hold the pipes open.
+  local ok, result = pcall(real_wait, { "sh", "-c", "sleep 2 & wait; true" }, { timeout = 200 })
+  eq(ok, true, tostring(result))
+  eq({ result.ok, result.code, result.timed_out, result.timeout }, { false, spawn.TIMED_OUT, true, 200 })
+  eq(spawn.message(result), "sh: killed after 200 ms without exiting")
+end)
+
+test("spawn: run answers at its timeout when the process exits and a child it left holds the output, and kills that child", function()
+  -- sh exits at once and the `sleep` it started keeps both pipes open, so
+  -- vim.system itself would answer after five seconds, with code 0. The
+  -- sleep's pid goes to a file, since the output is what is being held.
+  local pidfile = vim.fn.tempname()
+  local answers = {}
+  local started = vim.uv.hrtime()
+  real_run({ "sh", "-c", ("sleep 5 & echo $! > %s; true"):format(vim.fn.shellescape(pidfile)) }, { timeout = 200 }, function(result)
+    answers[#answers + 1] = { result = result, ms = (vim.uv.hrtime() - started) / 1e6 }
+  end)
+  vim.wait(2000, function()
+    return #answers > 0
+  end)
+  eq(#answers, 1, "an answer came within two seconds")
+  local result = answers[1].result
+  eq({ result.ok, result.code, result.timed_out, result.timeout }, { false, spawn.TIMED_OUT, true, 200 })
+  eq(answers[1].ms < 1000, true, ("answered after %d ms"):format(answers[1].ms))
+  local pid = tonumber(vim.fn.readfile(pidfile)[1])
+  local gone = vim.wait(1000, function()
+    return not pcall(function()
+      assert(vim.uv.kill(pid, 0))
+    end)
+  end)
+  eq(gone, true, "the sleep sh left behind was killed with its group")
+  -- The group is dead, so vim.system's own answer lands now; it is dropped.
+  vim.wait(300)
+  eq(#answers, 1, "the late exit does not answer a second time")
+  vim.fn.delete(pidfile)
+end)
+
+test("spawn: wait returns at its timeout when the process exits and a child it left holds the output, and kills that child", function()
+  -- sh exits at once and the `sleep` keeps both pipes open, so vim.system's
+  -- own answer would come when the sleep ends.
+  local started = vim.uv.hrtime()
+  local result = real_wait({ "sh", "-c", "sleep 2 & true" }, { timeout = 200 })
+  local ms = (vim.uv.hrtime() - started) / 1e6
+  eq({ result.ok, result.code, result.timed_out, result.timeout }, { false, spawn.TIMED_OUT, true, 200 })
+  eq(ms < 1000, true, ("returned after %d ms"):format(ms))
+  -- The same with the sleep's pid written to a file, since the output is
+  -- what is being held.
+  local pidfile = vim.fn.tempname()
+  started = vim.uv.hrtime()
+  result = real_wait({ "sh", "-c", ("sleep 5 & echo $! > %s; true"):format(vim.fn.shellescape(pidfile)) }, { timeout = 200 })
+  ms = (vim.uv.hrtime() - started) / 1e6
+  eq({ result.ok, result.code, result.timed_out }, { false, spawn.TIMED_OUT, true })
+  eq(ms < 1000, true, ("returned after %d ms"):format(ms))
+  local pid = tonumber(vim.fn.readfile(pidfile)[1])
+  local gone = vim.wait(1000, function()
+    return not pcall(function()
+      assert(vim.uv.kill(pid, 0))
+    end)
+  end)
+  eq(gone, true, "the sleep sh left behind was killed with its group")
+  vim.fn.delete(pidfile)
+  eq(real_wait({ "sh", "-c", "printf out; exit 3" }, { timeout = 1000 }).stdout, "out", "a process that exits in time is answered with its own output")
+end)
+
+test("spawn: run answers a process that exits before its timeout with its own result, once", function()
+  local answers = {}
+  real_run({ "sh", "-c", "printf out; printf err >&2; exit 3" }, { timeout = 200 }, function(result)
+    answers[#answers + 1] = result
+  end)
+  vim.wait(1000, function()
+    return #answers > 0
+  end)
+  vim.wait(300)
+  eq(#answers, 1, "the timer that passes after the exit does not answer")
+  eq({ answers[1].ok, answers[1].code, answers[1].timed_out, answers[1].stdout, answers[1].stderr }, { false, 3, false, "out", "err" })
+end)
+
+test("spawn: at the timeout the group is sent SIGTERM, which a process can catch, and SIGKILL once GRACE has passed", function()
+  -- sh runs a trap once the `wait` the signal interrupts returns, so a
+  -- handler that ran leaves the file behind. The `sleep` holds the output.
+  local marker = vim.fn.tempname()
+  local started = vim.uv.hrtime()
+  local result = real_wait({ "sh", "-c", ("trap 'echo cleaned > %s; exit 0' TERM; sleep 5 & wait"):format(vim.fn.shellescape(marker)) }, { timeout = 200 })
+  local ms = (vim.uv.hrtime() - started) / 1e6
+  eq({ result.ok, result.code, result.timed_out, result.signal }, { false, spawn.TIMED_OUT, true, vim.uv.constants.SIGTERM })
+  eq(ms < 1000, true, ("returned after %d ms"):format(ms))
+  local cleaned = vim.wait(1000, function()
+    return vim.uv.fs_stat(marker) ~= nil
+  end)
+  eq(cleaned, true, "the handler ran, so the signal sent first was one it could catch")
+  eq(vim.fn.readfile(marker), { "cleaned" })
+  vim.fn.delete(marker)
+
+  -- A group that ignores SIGTERM -- the `sleep` inherits the disposition --
+  -- is still there when wait() returns, and gone once GRACE has passed.
+  local pidfile = vim.fn.tempname()
+  result = real_wait({ "sh", "-c", ("trap '' TERM; echo $$ > %s; sleep 5 & wait"):format(vim.fn.shellescape(pidfile)) }, { timeout = 200 })
+  eq({ result.timed_out, result.signal }, { true, vim.uv.constants.SIGTERM })
+  local pid = tonumber(vim.fn.readfile(pidfile)[1])
+  eq(vim.uv.kill(pid, 0), 0, "SIGTERM alone left the leader running")
+  started = vim.uv.hrtime()
+  local gone = vim.wait(spawn.GRACE + 1000, function()
+    return not pcall(function()
+      assert(vim.uv.kill(pid, 0))
+    end)
+  end)
+  ms = (vim.uv.hrtime() - started) / 1e6
+  eq(gone, true, "SIGKILL ended it")
+  eq(ms >= spawn.GRACE * 0.8, true, ("the kill came after %d ms, and GRACE is %d"):format(ms, spawn.GRACE))
+  vim.fn.delete(pidfile)
+end)
+
+test("spawn: a process a signal ended is not ok, whatever its code, and the message names the signal", function()
+  -- vim.system reports such a process with code 0, which alone would read as
+  -- success: a `glab auth status` the OOM killer ended is not signed in.
+  local result = real_wait({ "sh", "-c", "kill -9 $$" }, { timeout = 2000 })
+  eq({ result.ok, result.code, result.signal, result.timed_out }, { false, 0, vim.uv.constants.SIGKILL, false })
+  eq(spawn.message(result), "sh: killed by signal 9")
+  local got
+  real_run({ "sh", "-c", "kill -TERM $$" }, { timeout = 2000 }, function(answer)
+    got = answer
+  end)
+  vim.wait(1000, function()
+    return got ~= nil
+  end)
+  eq({ got.ok, got.code, got.signal }, { false, 0, vim.uv.constants.SIGTERM }, "run reports it the same way")
+  eq(spawn.message(got), "sh: killed by signal 15")
+  eq(real_wait({ "sh", "-c", "exit 0" }, { timeout = 2000 }).signal, nil, "a process that exited carries no signal")
+  -- The timeout result carries the signal sent first, and its message names
+  -- the timeout, which is what the caller decides `unsure` from.
+  local timed = real_wait({ "sh", "-c", "sleep 2" }, { timeout = 100 })
+  eq({ timed.timed_out, timed.ok, timed.signal }, { true, false, vim.uv.constants.SIGTERM })
+  eq(spawn.message(timed), "sh: killed after 100 ms without exiting")
+end)
+
+test("spawn: a word a shell would change is quoted, and sh reads every word back as it was", function()
+  eq(spawn.shell_line({ "acli", [[a\b]], "it's" }), [[acli 'a'"\\"'b' 'it'\''s']])
+  eq(spawn.shell_line({ "glab", "mr", "list", "--reviewer=@me", "a/b.c:1,2%+" }), "glab mr list --reviewer=@me a/b.c:1,2%+", "nothing to quote")
+  -- Through a real shell, so the assertion is what a pasted line does rather
+  -- than what this file expects it to look like. fish reads the same forms --
+  -- the backslash case exists for it -- and is not installed on every machine
+  -- this runs on, so sh is the shell that runs.
+  local words = { [[a\b]], "it's", [[\']], "two words", "$HOME", "(PAY, TIG)", "" }
+  local line = spawn.shell_line(vim.list_extend({ "printf", "[%s]\\n" }, words))
+  local result = real_wait({ "sh", "-c", line })
+  eq(result.ok, true, spawn.message(result))
+  local expected = vim.tbl_map(function(word)
+    return "[" .. word .. "]"
+  end, words)
+  eq(vim.split(result.stdout, "\n", { trimempty = true }), expected, line)
+end)
+
+-- the region compare ----------------------------------------------------------------------
+
+-- The snapshot as the read path stores it: `editable` and `reason` are its
+-- judgement, and the compare makes none of its own.
+local function snapshot()
+  return {
+    regions = {
+      body = { kind = diff.BODY, editable = true, lines = { "The retry loop re-enters", "before the final attempt." } },
+      ["10001"] = {
+        kind = diff.COMMENT,
+        owner = "acc-ana",
+        editable = false,
+        reason = "written by ana; gx opens it on the web",
+        lines = { "Repros on staging." },
+      },
+      ["10002"] = { kind = diff.COMMENT, owner = "acc-me", editable = true, lines = { "Fix is in review." } },
+    },
+  }
+end
+
+local function unchanged()
+  return {
+    body = { lines = { "The retry loop re-enters", "before the final attempt." } },
+    ["10001"] = { lines = { "Repros on staging." } },
+    ["10002"] = { lines = { "Fix is in review." } },
+  }
+end
+
+test("diff: no change yields no calls", function()
+  eq(diff.plan(snapshot(), unchanged()), { calls = {}, skipped = {}, refused = {} })
+end)
+
+test("diff: blank lines joined at the edges are not an edit", function()
+  local current = unchanged()
+  current.body.lines = { "", "The retry loop re-enters", "before the final attempt.", "", "" }
+  eq(diff.plan(snapshot(), current).calls, {})
+end)
+
+test("diff: a changed body yields one body update", function()
+  local current = unchanged()
+  current.body.lines = { "The retry loop re-enters", "before the final attempt, so", "one attempt is lost." }
+  eq(diff.plan(snapshot(), current).calls, {
+    { kind = diff.BODY_UPDATE, id = "body", text = "The retry loop re-enters\nbefore the final attempt, so\none attempt is lost." },
+  })
+end)
+
+test("diff: a changed own comment yields one comment update", function()
+  local current = unchanged()
+  current["10002"].lines = { "Fix is merged." }
+  eq(diff.plan(snapshot(), current).calls, { { kind = diff.COMMENT_UPDATE, id = "10002", text = "Fix is merged." } })
+end)
+
+test("diff: a new region yields a create, an empty one is skipped", function()
+  local loaded = snapshot()
+  loaded.regions.new = { kind = diff.NEW, lines = { "" } }
+  local current = unchanged()
+  current.new = { lines = { "Seen on prod too." } }
+  eq(diff.plan(loaded, current).calls, { { kind = diff.COMMENT_CREATE, id = "new", text = "Seen on prod too." } })
+  current.new = { lines = { "", "  " } }
+  local planned = diff.plan(loaded, current)
+  eq(planned.calls, {})
+  eq(planned.skipped, { { id = "new", reason = "empty; nothing sent" } })
+end)
+
+test("diff: an edit in another owner's region is refused before any call", function()
+  local current = unchanged()
+  current["10001"].lines = { "Repros on staging and prod." }
+  current.body.lines = { "changed too" }
+  local planned = diff.plan(snapshot(), current)
+  eq(planned.calls, {}, "the body change is not sent either")
+  eq(#planned.refused, 1)
+  eq(planned.refused[1].id, "10001")
+  eq(planned.refused[1].reason, "written by ana; gx opens it on the web", "the snapshot's reason, verbatim")
+end)
+
+test("diff: an unknown identity is a reason like any other", function()
+  local loaded = snapshot()
+  loaded.regions["10002"].editable = false
+  loaded.regions["10002"].reason = "the account's own identifier is unknown"
+  local current = unchanged()
+  current["10002"].lines = { "Fix is merged." }
+  local refused = diff.plan(loaded, current).refused
+  eq(#refused, 1)
+  eq(refused[1].reason, "the account's own identifier is unknown")
+end)
+
+test("diff: a body carrying a node the write would flatten is refused when changed", function()
+  local loaded = snapshot()
+  loaded.regions.body.editable = false
+  loaded.regions.body.reason = "carries a mention node, which a write would replace by its flattened text"
+  local current = unchanged()
+  eq(diff.plan(loaded, current), { calls = {}, skipped = {}, refused = {} }, "unchanged, it refuses nothing")
+  current.body.lines = { "The retry loop re-enters", "before the final attempt, always." }
+  local planned = diff.plan(loaded, current)
+  eq(planned.calls, {})
+  eq(planned.refused, { { id = "body", reason = loaded.regions.body.reason } })
+end)
+
+test("diff: a read-only region left unchanged does not stop the rest", function()
+  local current = unchanged()
+  current["10002"].lines = { "Fix is merged." }
+  local planned = diff.plan(snapshot(), current)
+  eq(planned.refused, {})
+  eq(planned.calls, { { kind = diff.COMMENT_UPDATE, id = "10002", text = "Fix is merged." } })
+end)
+
+test("diff: a region loaded empty and still empty is neither skipped nor sent", function()
+  local loaded = snapshot()
+  loaded.regions.body.lines = { "" }
+  local current = unchanged()
+  current.body.lines = { "" }
+  eq(diff.plan(loaded, current), { calls = {}, skipped = {}, refused = {} }, "an item with no description saves clean")
+  current.body.lines = { "", "  " }
+  eq(diff.plan(loaded, current), { calls = {}, skipped = {}, refused = {} }, "blank lines are still not an edit")
+  current.body.lines = { "A description at last." }
+  eq(diff.plan(loaded, current).calls, { { kind = diff.BODY_UPDATE, id = "body", text = "A description at last." } })
+end)
+
+test("diff: a region whose every line was deleted is skipped and the rest still sent", function()
+  local current = unchanged()
+  current["10002"] = { lines = {} }
+  current.body.lines = { "changed" }
+  local planned = diff.plan(snapshot(), current)
+  eq(planned.skipped, { { id = "10002", reason = "empty; nothing sent" } })
+  eq(planned.calls, { { kind = diff.BODY_UPDATE, id = "body", text = "changed" } })
+end)
+
+test("diff: a mark gone from the buffer refuses the whole write, naming the yank and :e!", function()
+  local current = unchanged()
+  current["10001"] = nil
+  current.body.lines = { "changed" }
+  local planned = diff.plan(snapshot(), current)
+  eq(planned.calls, {})
+  -- The help file quotes this text.
+  eq(planned.refused, { { id = "10001", reason = "its mark is gone; yank the text, then :e! reads the item again" } })
+end)
+
+test("diff: regions whose ranges overlap, or one whose end is above its start, refuse the whole write rather than read as emptied", function()
+  local current = unchanged()
+  current.body = { overlaps = "10002" }
+  current["10002"] = { overlaps = "body" }
+  local planned = diff.plan(snapshot(), current)
+  eq(planned.calls, {})
+  eq(planned.skipped, {})
+  eq(planned.refused, {
+    {
+      id = "10002",
+      reason = "its text runs into body's, so which lines are whose is lost; u undoes that edit; otherwise yank the text, then :e! reads the item again",
+    },
+    {
+      id = "body",
+      reason = "its text runs into 10002's, so which lines are whose is lost; u undoes that edit; otherwise yank the text, then :e! reads the item again",
+    },
+  })
+  current = unchanged()
+  current.body = { reversed = true }
+  current["10002"].lines = { "Fix is merged." }
+  planned = diff.plan(snapshot(), current)
+  eq(planned.calls, {}, "the comment's edit waits for the body")
+  eq(planned.refused, {
+    {
+      id = "body",
+      reason = "an edit moved its first line below its last, so its mark no longer spans its text; u undoes that edit; otherwise yank the text, then :e! reads the item again",
+    },
+  })
+end)
+
+-- The text outside the regions of the buffer snapshot() describes, as loaded
+-- and as buffer.current() reads it.
+local FRAME = { "PROJ-142   In Progress   me", "# Retry backoff", "ana   3 days ago", "me   yesterday" }
+local function frame_now(lines)
+  local rows = { 1, 2, 7, 10 }
+  return vim.tbl_map(function(index)
+    return { row = rows[index] or index, text = lines[index] }
+  end, vim.fn.range(1, #lines))
+end
+
+test("diff: text outside every region that was not there at the read refuses the whole write, naming its line", function()
+  local loaded = snapshot()
+  loaded.frame = FRAME
+  local current = unchanged()
+  current.body.lines = { "The retry loop re-enters" }
+  eq(diff.plan(loaded, current, frame_now(FRAME)).calls, { { kind = diff.BODY_UPDATE, id = "body", text = "The retry loop re-enters" } })
+  -- The body's last line, moved out to between the blank after it and the
+  -- first author line.
+  local frame = frame_now(FRAME)
+  table.insert(frame, 3, { row = 6, text = "before the final attempt." })
+  local planned = diff.plan(loaded, current, frame)
+  eq(planned.calls, {}, "the body is not sent without the line")
+  eq(planned.refused, {
+    {
+      id = diff.OUTSIDE,
+      reason = 'line 6, "before the final attempt.", is outside every region, where a save sends nothing; move it into a region, or u undoes the edit that put it there',
+    },
+  })
+  -- An edit to the title is the same: it is never sent.
+  frame = frame_now(FRAME)
+  frame[2].text = "# Retry backoff, again"
+  eq(diff.plan(loaded, unchanged(), frame).refused, {
+    {
+      id = diff.OUTSIDE,
+      reason = 'line 2, "# Retry backoff, again", is outside every region, where a save sends nothing; move it into a region, or u undoes the edit that put it there',
+    },
+  })
+end)
+
+test("diff: text gone from outside the regions refuses the whole write, since a sort may have moved it into one", function()
+  local loaded = snapshot()
+  loaded.frame = FRAME
+  local frame = frame_now(FRAME)
+  table.remove(frame, 4)
+  local current = unchanged()
+  current["10002"].lines = { "me   yesterday", "Fix is in review." }
+  eq(diff.plan(loaded, current, frame).refused, {
+    {
+      id = diff.OUTSIDE,
+      reason = '"me   yesterday" is no longer outside the regions, so an edit deleted it or moved it into one, and a save cannot tell which; u undoes that edit',
+    },
+  })
+end)
+
+test("diff: line breaks and spaces moved outside the regions are not a change, and with no frame given nothing outside is compared", function()
+  local loaded = snapshot()
+  loaded.frame = FRAME
+  -- A reflow that split the last author line in two.
+  local frame = frame_now({ FRAME[1], FRAME[2], FRAME[3], "me" })
+  frame[#frame + 1] = { row = 11, text = "yesterday" }
+  eq(diff.plan(loaded, unchanged(), frame), { calls = {}, skipped = {}, refused = {} })
+  eq(diff.plan(loaded, unchanged()), { calls = {}, skipped = {}, refused = {} })
+end)
+
+test("diff: a region with no snapshot refuses the whole write", function()
+  local current = unchanged()
+  current["99"] = { lines = { "from nowhere" } }
+  local planned = diff.plan(snapshot(), current)
+  eq(planned.calls, {})
+  eq(planned.refused, { { id = "99", reason = "not in the loaded snapshot" } })
+end)
+
+-- the document tree ------------------------------------------------------------------------
+
+local function text(value, marks)
+  return { type = "text", text = value, marks = marks }
+end
+
+local function paragraph(...)
+  return { type = "paragraph", content = { ... } }
+end
+
+local function doc(...)
+  return { version = 1, type = "doc", content = { ... } }
+end
+
+test("adf: render and serialise are inverses over the editable subset", function()
+  local tree = doc(
+    paragraph(text("The retry loop re-enters"), { type = "hardBreak" }, text("before the final attempt.")),
+    paragraph(text("So one attempt is lost."))
+  )
+  local lines = adf.render(tree)
+  eq(lines, { "The retry loop re-enters", "before the final attempt.", "", "So one attempt is lost." })
+  eq(adf.serialise(table.concat(lines, "\n")), tree)
+  for _, sample in ipairs({ "one", "one\ntwo", "one\n\ntwo", "a\n\n\nb", "a\n", "\na", "  spaced  ", "" }) do
+    eq(table.concat(adf.render(adf.serialise(sample)), "\n"), sample, ("round trip of %q"):format(sample))
+    eq(adf.editable(adf.serialise(sample)), true, ("serialised %q is editable"):format(sample))
+  end
+  eq(adf.serialise(""), doc(), "empty text is an empty document")
+  eq(adf.serialise("a\n\n\nb"), doc(paragraph(text("a")), paragraph(), paragraph(text("b"))), "two blanks hold one empty paragraph")
+  eq(adf.render(nil), {}, "an absent body renders to no lines")
+  eq(adf.render(vim.NIL), {}, "a JSON null body renders to no lines")
+  -- A description emptied on the web is a document of empty paragraphs, and
+  -- it stays editable: the judgement is over node types alone.
+  eq({ adf.editable(doc(paragraph())) }, { true }, "one empty paragraph is editable")
+  eq({ adf.editable(doc(paragraph(), paragraph())) }, { true }, "two empty paragraphs are editable")
+  eq(adf.render(doc(paragraph(), paragraph())), { "" }, "and render to the one blank line the region shows")
+end)
+
+test("adf: every tree in the subset renders to lines that serialise back to the same lines", function()
+  -- What editable() rests on, since it judges node types alone: over doc,
+  -- paragraph, hardBreak and unmarked text, the text render() shows is the
+  -- text the write reproduces. Every paragraph of up to three inline nodes
+  -- drawn from these, in documents of up to three paragraphs.
+  local inlines = { text("a"), text(""), text("  x  "), { type = "hardBreak" } }
+  local paragraphs = { paragraph() }
+  for _, first in ipairs(inlines) do
+    paragraphs[#paragraphs + 1] = paragraph(first)
+    for _, second in ipairs(inlines) do
+      paragraphs[#paragraphs + 1] = paragraph(first, second)
+      for _, third in ipairs(inlines) do
+        paragraphs[#paragraphs + 1] = paragraph(first, second, third)
+      end
+    end
+  end
+  -- A region with no lines and one with a single blank line are the same
+  -- buffer text: render.lua shows both as one blank line.
+  local function lines_of(tree)
+    local lines = adf.render(tree)
+    if #lines == 1 and lines[1] == "" then
+      return {}
+    end
+    return lines
+  end
+  local function check(tree)
+    local editable, reason = adf.editable(tree)
+    if not editable then
+      error(("editable refused %s: %s"):format(vim.inspect(tree), reason))
+    end
+    local shown = lines_of(tree)
+    local back = lines_of(adf.serialise(table.concat(adf.render(tree), "\n")))
+    if not vim.deep_equal(back, shown) then
+      error(("round trip of %s:\n  shown %s\n  back  %s"):format(vim.inspect(tree), vim.inspect(shown), vim.inspect(back)))
+    end
+  end
+  local count = 0
+  check(doc())
+  for _, first in ipairs(paragraphs) do
+    check(doc(first))
+    count = count + 1
+    for _, second in ipairs(paragraphs) do
+      check(doc(first, second))
+      count = count + 1
+    end
+  end
+  -- Three paragraphs, over the shorter ones, keeps the run under a second.
+  local short = { paragraph(), paragraph(text("a")), paragraph({ type = "hardBreak" }), paragraph(text(""), text("a")) }
+  for _, first in ipairs(short) do
+    for _, second in ipairs(short) do
+      for _, third in ipairs(short) do
+        check(doc(first, second, third))
+        count = count + 1
+      end
+    end
+  end
+  eq(count > 1000, true, "the space was actually walked")
+end)
+
+test("adf: editable names the first node outside the subset", function()
+  eq({ adf.editable(nil) }, { true }, "an absent body is editable")
+  eq({ adf.editable(doc()) }, { true }, "an empty body is editable")
+  local cases = {
+    { "strong", doc(paragraph(text("plain "), text("bold", { { type = "strong" } }))), "a text node with a strong mark" },
+    { "em", doc(paragraph(text("x", { { type = "em" } }))), "a text node with an em mark" },
+    { "underline", doc(paragraph(text("x", { { type = "underline" } }))), "a text node with an underline mark" },
+    { "link", doc(paragraph(text("see", { { type = "link", attrs = { href = "https://x" } } }))), "a text node with a link mark" },
+    { "mention", doc(paragraph(text("cc "), { type = "mention", attrs = { id = "acc", text = "@ana" } })), "a mention node" },
+    { "list", doc({ type = "bulletList", content = { { type = "listItem", content = { paragraph(text("x")) } } } }), "a bulletList node" },
+    { "heading", doc({ type = "heading", attrs = { level = 2 }, content = { text("Steps") } }), "a heading node" },
+    { "codeBlock", doc({ type = "codeBlock", attrs = { language = "sh" }, content = { text("ls") } }), "a codeBlock node" },
+    { "table", doc({ type = "table", content = {} }), "a table node" },
+    { "emoji", doc(paragraph({ type = "emoji", attrs = { shortName = ":smile:" } })), "an emoji node" },
+  }
+  for _, case in ipairs(cases) do
+    local editable, reason = adf.editable(case[2])
+    eq(editable, false, case[1])
+    eq(reason:find(case[3], 1, true), 9, case[1] .. ": " .. tostring(reason))
+  end
+  -- The first offending node is the one named, even when a later one differs.
+  local _, reason = adf.editable(doc(paragraph(text("a")), { type = "rule" }, paragraph(text("b", { { type = "em" } }))))
+  eq(reason:find("a rule node", 1, true) ~= nil, true, reason)
+end)
+
+test("adf: the nodes Jira produces render in place, and an unknown one is named", function()
+  local tree = doc(
+    { type = "heading", attrs = { level = 2 }, content = { text("Steps") } },
+    {
+      type = "orderedList",
+      attrs = { order = 3 },
+      content = {
+        { type = "listItem", content = { paragraph(text("first"), { type = "hardBreak" }, text("more")) } },
+        { type = "listItem", content = { paragraph(text("second")) } },
+      },
+    },
+    { type = "bulletList", content = { { type = "listItem", content = { paragraph(text("x")), { type = "bulletList", content = { { type = "listItem", content = { paragraph(text("y")) } } } } } } } },
+    { type = "codeBlock", attrs = { language = "sh" }, content = { text("ls\npwd") } },
+    { type = "blockquote", content = { paragraph(text("quoted")), paragraph(text("twice")) } },
+    { type = "panel", attrs = { panelType = "info" }, content = { paragraph(text("note")) } },
+    paragraph(
+      text("bold", { { type = "strong" } }),
+      text(" "),
+      text("em", { { type = "em" } }),
+      text(" "),
+      text("code", { { type = "code" } }),
+      text(" "),
+      text("gone", { { type = "strike" } }),
+      text(" "),
+      text("site", { { type = "link", attrs = { href = "https://example.test" } } }),
+      text(" "),
+      { type = "mention", attrs = { id = "acc", text = "@ana" } },
+      text(" "),
+      { type = "emoji", attrs = { shortName = ":smile:", text = "😀" } },
+      text(" "),
+      { type = "inlineCard", attrs = { url = "https://example.test/PROJ-1" } }
+    ),
+    { type = "rule" },
+    {
+      type = "table",
+      content = {
+        { type = "tableRow", content = { { type = "tableHeader", content = { paragraph(text("k")) } }, { type = "tableHeader", content = { paragraph(text("v")) } } } },
+        { type = "tableRow", content = { { type = "tableCell", content = { paragraph(text("a")) } }, { type = "tableCell", content = { paragraph(text("b")) } } } },
+      },
+    },
+    { type = "mediaSingle", content = { { type = "media", attrs = { id = "m1", alt = "screenshot.png" } } } },
+    { type = "taskList", content = { { type = "taskItem", attrs = { state = "DONE" }, content = { text("done") } }, { type = "taskItem", attrs = { state = "TODO" }, content = { text("open") } } } },
+    { type = "hologram", content = {} },
+    {
+      type = "layoutSection",
+      content = {
+        { type = "layoutColumn", attrs = { width = 50 }, content = { paragraph(text("left")) } },
+        { type = "layoutColumn", attrs = { width = 50 }, content = { paragraph(text("right")) } },
+      },
+    },
+    { type = "blockCard", attrs = { url = "https://example.test/card" } },
+    { type = "bodiedExtension", attrs = { extensionType = "x" }, content = { paragraph(text("kept")), paragraph(text("too")) } },
+    paragraph(text("after "), { type = "placeholder", attrs = { text = "here" } }),
+    paragraph({ type = "wormhole", content = { text("inside") } })
+  )
+  eq(adf.render(tree), {
+    "## Steps",
+    "",
+    "3. first",
+    "   more",
+    "4. second",
+    "",
+    "- x",
+    "  - y",
+    "",
+    "```sh",
+    "ls",
+    "pwd",
+    "```",
+    "",
+    "> quoted",
+    ">",
+    "> twice",
+    "",
+    "> [info]",
+    "> note",
+    "",
+    "**bold** _em_ `code` ~~gone~~ [site](https://example.test) @ana 😀 https://example.test/PROJ-1",
+    "",
+    "---",
+    "",
+    "| k | v |",
+    "| --- | --- |",
+    "| a | b |",
+    "",
+    "[media: screenshot.png]",
+    "",
+    "- [x] done",
+    "- [ ] open",
+    "",
+    "[unsupported: hologram]",
+    "",
+    "left",
+    "",
+    "right",
+    "",
+    "https://example.test/card",
+    "",
+    "[unsupported: bodiedExtension]",
+    "",
+    "kept",
+    "",
+    "too",
+    "",
+    "after here",
+    "",
+    "[unsupported: wormhole] inside",
+  })
+  -- A node in the wrong position, or an unknown one holding inline content,
+  -- renders as inline: one line per line break, not one block per node.
+  eq(adf.render(doc({ type = "widget", content = { text("inline text"), { type = "hardBreak" }, text("second line") } })), {
+    "[unsupported: widget]",
+    "inline text",
+    "second line",
+  })
+  eq(adf.render(doc({ type = "status", attrs = { text = "DONE" } })), { "[DONE]" })
+  eq(adf.render(doc({ type = "date", attrs = { timestamp = "1714737600000" } })), { "2024-05-03" })
+  eq(adf.render(doc({ type = "placeholder", attrs = { text = "here" } })), { "here" })
+  -- A cell is one line, whatever an unknown node inside it would put on a
+  -- line of its own.
+  eq(
+    adf.render({
+      type = "table",
+      content = {
+        { type = "tableRow", content = { { type = "tableCell", content = { { type = "widget", content = { paragraph(text("x")), paragraph(text("y")) } } } } } },
+      },
+    }),
+    { "| [unsupported: widget] x y |" }
+  )
+end)
+
+test("adf: an image renders by its file name wherever ADF puts it", function()
+  -- Inside a paragraph, an image is a mediaInline carrying the file's attrs
+  -- or holding the media node that does; on a line of its own it is a
+  -- mediaSingle holding the media node. Every position names the file.
+  local function media_inline(fields)
+    return vim.tbl_extend("force", { type = "mediaInline" }, fields)
+  end
+  local shot = { alt = "shot.png" }
+  eq(adf.render(doc(paragraph(text("see "), media_inline({ attrs = shot })))), { "see [media: shot.png]" })
+  eq(
+    adf.render(doc(paragraph(media_inline({ content = { { type = "media", attrs = { alt = "inner.png" } } } })))),
+    { "[media: inner.png]" },
+    "a mediaInline holding the media node names the file, not the wrapper"
+  )
+  eq(adf.render(doc(paragraph(text("see "), { type = "media", attrs = shot }))), { "see [media: shot.png]" })
+  eq(adf.render(doc(media_inline({ attrs = shot }))), { "[media: shot.png]" })
+  eq(adf.render(doc({ type = "mediaSingle", content = { { type = "media", attrs = shot } } })), { "[media: shot.png]" })
+  eq(adf.render(doc(paragraph({ type = "media", attrs = { id = "m1" } }))), { "[media: m1]" }, "the id when there is no alt")
+  -- A mention with neither a display text nor an account id is named as
+  -- unsupported rather than rendered as `@nil`.
+  eq(adf.render(doc(paragraph({ type = "mention" }))), { "[unsupported: mention]" })
+  eq(adf.render(doc(paragraph({ type = "mention", attrs = { id = "acc-1" } }))), { "@acc-1" })
+end)
+
+-- the item ------------------------------------------------------------------------------
+
+local function ticket(overrides)
+  local fields = {
+    source = "jira",
+    id = "PROJ-142",
+    title = "Retry backoff drops the last attempt",
+    state = "In Progress",
+    -- What `statusCategory.key` carries for a status in progress, which is
+    -- what the header colours the state by.
+    category = "indeterminate",
+    url = "https://jira.example.test/browse/PROJ-142",
+    assignee = { id = "acc-me", name = "Me Myself" },
+    reporter = { id = "acc-ana", name = "ana" },
+    updated = "2024-05-03T10:00:00.000+0000",
+    body = doc(paragraph(text("The retry loop re-enters"), { type = "hardBreak" }, text("before the final attempt."))),
+    comments = {
+      { id = 10001, author = { id = "acc-ana", name = "ana" }, created = "2024-04-30T12:00:00.000+0000", body = doc(paragraph(text("Repros on staging."))) },
+      { id = 10002, author = { id = "acc-me", name = "Me Myself" }, created = "2024-05-02T09:00:00.000+0000", body = doc(paragraph(text("Fix is in review."))) },
+    },
+    total = 2,
+    me = "acc-me",
+  }
+  for key, value in pairs(overrides or {}) do
+    fields[key] = value
+  end
+  return item.new(fields)
+end
+
+-- 2024-05-03T12:00:00Z, the present every relative time here is measured from.
+local NOW = 1714737600
+
+test("item: the kinds agree with diff's", function()
+  eq({ item.BODY, item.COMMENT, item.NEW }, { diff.BODY, diff.COMMENT, diff.NEW })
+end)
+
+test("item: fields are normalised, a null is nil, and a comment id is a string", function()
+  local it = ticket({ body = vim.NIL, total = vim.NIL, reporter = vim.NIL })
+  eq(it.body, nil)
+  eq(it.total, nil)
+  eq(it.missing, 0, "no total means nothing is known to be missing")
+  eq(it.reporter, nil)
+  eq(it.comments[1].id, "10001")
+  eq(it.comments[1].author, { id = "acc-ana", name = "ana" })
+  -- `project` is kept as a non-empty string alone: with "" kept, the item
+  -- buffer would hold it against the name and refuse the read as "!1 of ".
+  eq(item.new({ source = "glab", id = "!1", title = "t", project = "acme/payments" }).project, "acme/payments")
+  eq(item.new({ source = "glab", id = "!1", title = "t", project = "" }).project, nil)
+  eq(item.new({ source = "glab", id = "!1", title = "t", project = vim.NIL }).project, nil)
+  eq(item.new({ source = "glab", id = "!1", title = "t" }).project, nil)
+  -- Refused with the message alone: the buffer shows it after the item's
+  -- name, where a path into item.lua would be noise.
+  eq({ pcall(item.new, { source = "jira", id = "PROJ-1", title = "" }) }, { false, "item: PROJ-1 needs a non-empty string for title" })
+  eq(
+    { pcall(item.new, { source = "jira", id = "PROJ-1", title = "t", comments = { { body = doc() } } }) },
+    { false, "item: comment 1 of PROJ-1 has no id" }
+  )
+end)
+
+test("item: a truncated thread is the difference between total and what came", function()
+  eq(ticket({ total = 7 }).missing, 5)
+  eq(ticket({ total = 2 }).missing, 0)
+  eq(ticket({ total = 1 }).missing, 0, "a total below the count is not a negative gap")
+  eq(ticket().start_at, 0, "unsaid, the page starts the thread")
+  eq(ticket({ start_at = 5 }).start_at, 5)
+  eq(ticket({ start_at = vim.NIL }).start_at, 0)
+end)
+
+test("item: timestamps parse in every shape the clients write, and read relatively", function()
+  eq(item.parse_time("2024-05-03T12:00:00.000+0000"), NOW)
+  eq(item.parse_time("2024-05-03T13:00:00.000+0100"), NOW)
+  eq(item.parse_time("2024-05-03T11:30:00-00:30"), NOW)
+  eq(item.parse_time("2024-05-03T12:00:00Z"), NOW)
+  eq(item.parse_time("1970-01-01T00:00:00Z"), 0)
+  -- Across a leap day, a month, a year, and either side of the epoch: each
+  -- value is what Python's datetime.fromisoformat gives.
+  eq(item.parse_time("2024-02-29T23:59:59Z"), 1709251199)
+  eq(item.parse_time("2024-03-01T00:00:00Z"), 1709251200)
+  eq(item.parse_time("2024-12-31T23:59:59.999+0100"), 1735685999)
+  eq(item.parse_time("1900-03-01T00:00:00Z"), -2203891200)
+  eq(item.parse_time("2100-02-28T00:00:00Z"), 4107456000)
+  eq(item.parse_time("yesterday"), nil)
+  eq(item.parse_time(nil), nil)
+  -- An impossible date is nil rather than a plausible moment.
+  eq(item.parse_time("2024-13-45T00:00:00Z"), nil)
+  eq(item.parse_time("2024-02-30T00:00:00Z"), nil)
+  eq(item.parse_time("2023-02-29T00:00:00Z"), nil, "not a leap year")
+  eq(item.parse_time("2024-05-03T24:00:00Z"), nil)
+  eq(item.ago(NOW - 5, NOW), "just now")
+  eq(item.ago(NOW - 59, NOW), "just now")
+  eq(item.ago(NOW - 60, NOW), "1m ago")
+  eq(item.ago(NOW - 300, NOW), "5m ago")
+  eq(item.ago(NOW - 3599, NOW), "59m ago")
+  eq(item.ago(NOW - 7200, NOW), "2h ago")
+  eq(item.ago(NOW - 86399, NOW), "23h ago")
+  eq(item.ago(NOW - 86400, NOW), "yesterday")
+  eq(item.ago(NOW - 30 * 3600, NOW), "yesterday")
+  eq(item.ago(NOW - 2 * 86400, NOW), "2 days ago")
+  eq(item.ago(NOW - 3 * 86400, NOW), "3 days ago")
+  eq(item.ago(NOW - 30 * 86400, NOW), "2024-04-03")
+  eq(item.ago(NOW - 45 * 86400, NOW), "2024-03-19")
+end)
+
+test("item: regions are the body then each comment, owned or not", function()
+  local regions = item.regions(ticket())
+  eq(#regions, 3)
+  eq(regions[1].id, "body")
+  eq(regions[1].kind, item.BODY)
+  eq(regions[1].editable, true)
+  eq(regions[2], { id = "10001", kind = item.COMMENT, owner = "acc-ana", editable = false, reason = "written by ana", body = ticket().comments[1].body })
+  eq(regions[3].editable, true)
+  eq(regions[3].owner, "acc-me")
+end)
+
+test("item: an unknown identity makes every comment read-only and the body stays editable", function()
+  local regions = item.regions(ticket({ me = vim.NIL }))
+  eq(regions[1].editable, true)
+  for index = 2, 3 do
+    eq(regions[index].editable, false)
+    eq(regions[index].reason:find("identifier is unknown", 1, true) ~= nil, true, regions[index].reason)
+  end
+end)
+
+-- the buffer rendering --------------------------------------------------------------------
+
+test("render: the lines and the ranges of each region", function()
+  local lines, regions = render.render(ticket(), { now = NOW })
+  eq(lines, {
+    "PROJ-142   In Progress   me   updated 2h ago",
+    "# Retry backoff drops the last attempt",
+    "",
+    "The retry loop re-enters",
+    "before the final attempt.",
+    "",
+    "ana   3 days ago",
+    "Repros on staging.",
+    "",
+    "me   yesterday",
+    "Fix is in review.",
+  })
+  eq(regions, {
+    {
+      id = "body",
+      kind = diff.BODY,
+      owner = nil,
+      editable = true,
+      reason = nil,
+      first_line = 4,
+      last_line = 5,
+      lines = { "The retry loop re-enters", "before the final attempt." },
+    },
+    {
+      id = "10001",
+      kind = diff.COMMENT,
+      owner = "acc-ana",
+      editable = false,
+      reason = "written by ana; " .. render.WEB_HINT,
+      first_line = 8,
+      last_line = 8,
+      lines = { "Repros on staging." },
+    },
+    {
+      id = "10002",
+      kind = diff.COMMENT,
+      owner = "acc-me",
+      editable = true,
+      reason = nil,
+      first_line = 11,
+      last_line = 11,
+      lines = { "Fix is in review." },
+    },
+  })
+  for _, region in ipairs(regions) do
+    eq(vim.list_slice(lines, region.first_line, region.last_line), region.lines, region.id .. " range matches its lines")
+  end
+  -- The regions are exactly what diff's snapshot takes.
+  local snap = { regions = {} }
+  local current = {}
+  for _, region in ipairs(regions) do
+    snap.regions[region.id] = region
+    current[region.id] = { lines = vim.deepcopy(region.lines) }
+  end
+  eq(diff.plan(snap, current), { calls = {}, skipped = {}, refused = {} })
+end)
+
+test("render: a region carrying a node the write would flatten is read-only with the node named", function()
+  local it = ticket({
+    body = doc(paragraph(text("cc "), { type = "mention", attrs = { id = "acc-ana", text = "@ana" } })),
+    comments = {
+      { id = 10002, author = { id = "acc-me", name = "me" }, created = "2024-05-02T09:00:00.000+0000", body = doc(paragraph(text("plain "), text("bold", { { type = "strong" } }))) },
+    },
+    total = 1,
+  })
+  local lines, regions = render.render(it, { now = NOW })
+  eq(lines[4], "cc @ana")
+  eq(regions[1].editable, false)
+  eq(regions[1].reason, "carries a mention node, which a write would replace by its flattened text; " .. render.WEB_HINT)
+  eq(lines[7], "plain **bold**")
+  eq(regions[2].editable, false)
+  eq(regions[2].reason:find("a text node with a strong mark", 1, true) ~= nil, true, regions[2].reason)
+end)
+
+test("render: ownership is judged before the tree, and an unknown identity keeps the body editable", function()
+  local it = ticket({
+    comments = {
+      { id = 10001, author = { id = "acc-ana", name = "ana" }, body = doc(paragraph(text("x", { { type = "em" } }))) },
+    },
+    total = 1,
+  })
+  local _, regions = render.render(it, { now = NOW })
+  eq(regions[2].reason, "written by ana; " .. render.WEB_HINT, "the owner is named, not the mark")
+  _, regions = render.render(ticket({ me = vim.NIL }), { now = NOW })
+  eq(regions[1].editable, true)
+  eq(regions[2].editable, false)
+  eq(regions[3].editable, false)
+end)
+
+test("render: an empty body is one editable blank line, and no comments is no author line", function()
+  local lines, regions = render.render(ticket({ body = vim.NIL, comments = {}, total = 0, assignee = vim.NIL, updated = vim.NIL }), { now = NOW })
+  eq(lines, { "PROJ-142   In Progress   unassigned", "# Retry backoff drops the last attempt", "", "" })
+  eq(#regions, 1)
+  eq(regions[1], { id = "body", kind = diff.BODY, owner = nil, editable = true, reason = nil, first_line = 4, last_line = 4, lines = { "" } })
+end)
+
+test("render: a truncated thread says how many comments are not shown, where they would be", function()
+  -- The page starts the thread, so the comments not shown are the newer ones.
+  local lines, regions = render.render(ticket({ total = 7 }), { now = NOW })
+  eq(lines[#lines], "5 of 7 comments not shown; " .. render.WEB_HINT)
+  eq(lines[#lines - 1], "")
+  eq(#regions, 3, "the comments it has are ordinary regions")
+  eq(regions[3].last_line, #lines - 2, "the notice sits outside every region")
+  -- The page starts past the beginning, so the older ones are missing.
+  lines, regions = render.render(ticket({ total = 7, start_at = 5 }), { now = NOW })
+  eq(vim.list_slice(lines, 5, 9), {
+    "before the final attempt.",
+    "",
+    "5 of 7 comments not shown; " .. render.WEB_HINT,
+    "",
+    "ana   3 days ago",
+  })
+  eq(lines[#lines], "Fix is in review.")
+  eq(regions[1].last_line, 5)
+  eq(regions[2].first_line, 10, "the notice sits between the body and the first comment")
+  -- A page from the middle of the thread: some missing at each end, and
+  -- each end says how many lie there.
+  lines = render.render(ticket({ total = 7, start_at = 2 }), { now = NOW })
+  eq(lines[7], "2 of 7 comments not shown; " .. render.WEB_HINT)
+  eq(lines[#lines], "3 of 7 comments not shown; " .. render.WEB_HINT)
+  eq(lines[#lines - 2], "Fix is in review.")
+  -- start_at past the whole gap: everything missing lies before.
+  lines = render.render(ticket({ total = 7, start_at = 9 }), { now = NOW })
+  eq(lines[7], "5 of 7 comments not shown; " .. render.WEB_HINT)
+  eq(lines[#lines], "Fix is in review.")
+  -- No comment given at all: one notice after the body, whatever start_at.
+  lines, regions = render.render(ticket({ comments = {}, total = 4, start_at = 2 }), { now = NOW })
+  eq(vim.list_slice(lines, 5), { "before the final attempt.", "", "4 of 4 comments not shown; " .. render.WEB_HINT })
+  eq(#regions, 1)
+  -- The noun agrees with the thread's size: a thread of one that arrived
+  -- empty is one comment.
+  lines = render.render(ticket({ comments = {}, total = 1 }), { now = NOW })
+  eq(lines[#lines], "1 of 1 comment not shown; " .. render.WEB_HINT)
+  lines = render.render(ticket({ total = 2 }), { now = NOW })
+  eq(lines[#lines], "Fix is in review.")
+end)
+
+test("render: an author line carries the timestamp it has, and the name alone without one", function()
+  local it = ticket({
+    comments = {
+      { id = 10001, author = { id = "acc-ana", name = "ana" }, updated = "2024-04-30T12:00:00Z", body = doc(paragraph(text("x"))) },
+      { id = 10002, author = { id = "acc-ana", name = "ana" }, body = doc(paragraph(text("y"))) },
+    },
+    total = 2,
+  })
+  local lines = render.render(it, { now = NOW })
+  eq(lines[7], "ana   3 days ago", "updated stands in for created")
+  eq(lines[10], "ana", "no timestamp at all: the name, with no trailing separator")
+end)
+
+test("render: a timestamp that does not parse is shown as given", function()
+  local lines = render.render(ticket({ updated = "a while back" }), { now = NOW })
+  eq(lines[1], "PROJ-142   In Progress   me   updated a while back")
+end)
+
+-- A merge request as the glab adapter hands it over: bodies are markdown
+-- strings, and identities are usernames on both sides of the ownership test.
+local function merge_request(overrides)
+  local fields = {
+    source = "glab",
+    id = "!482",
+    title = "Bump the pinned acli",
+    state = "opened",
+    assignee = { id = "me", name = "Me Myself" },
+    updated = "2024-05-03T10:00:00.000Z",
+    body = "Bumps the pin to 1.3.36.\n\n- moves the digest\n- reruns the matrix",
+    comments = {
+      { id = "9001", author = { id = "ana", name = "Ana" }, created = "2024-04-30T12:00:00.000Z", body = "Looks **good** to me." },
+      { id = "9002", author = { id = "me", name = "Me Myself" }, created = "2024-05-02T09:00:00.000Z", body = "Thanks.\nMerging once green." },
+    },
+    total = 2,
+    me = "me",
+  }
+  for key, value in pairs(overrides or {}) do
+    fields[key] = value
+  end
+  return item.new(fields)
+end
+
+test("render: a markdown body is its own lines, breaks kept, and editable as it stands", function()
+  local lines, regions = render.render(merge_request(), { now = NOW })
+  eq(lines, {
+    "!482   opened   me   updated 2h ago",
+    "# Bump the pinned acli",
+    "",
+    "Bumps the pin to 1.3.36.",
+    "",
+    "- moves the digest",
+    "- reruns the matrix",
+    "",
+    "Ana   3 days ago",
+    "Looks **good** to me.",
+    "",
+    "me   yesterday",
+    "Thanks.",
+    "Merging once green.",
+  })
+  eq(regions[1].lines, { "Bumps the pin to 1.3.36.", "", "- moves the digest", "- reruns the matrix" })
+  eq(regions[1].editable, true)
+  eq(regions[1].reason, nil, "a string carries no node to refuse")
+  eq(regions[2].editable, false)
+  eq(regions[2].reason, "written by Ana; " .. render.WEB_HINT, "ownership still applies, by username")
+  eq(regions[3].editable, true)
+  eq(regions[3].reason, nil)
+  eq(regions[3].lines, { "Thanks.", "Merging once green." })
+  for _, region in ipairs(regions) do
+    eq(vim.list_slice(lines, region.first_line, region.last_line), region.lines, region.id .. " range matches its lines")
+  end
+  -- The empty description GitLab returns as "" is one blank line to type into.
+  local _, empty = render.render(merge_request({ body = "" }), { now = NOW })
+  eq(empty[1].lines, { "" })
+  eq(empty[1].editable, true)
+  -- A body written with CRLF line ends shows no carriage returns.
+  local _, crlf = render.render(merge_request({ body = "one\r\ntwo\r\n" }), { now = NOW })
+  eq(crlf[1].lines, { "one", "two", "" })
+end)
+
+test("render: markdown naming a document node is text, and a tree still takes the adf path", function()
+  local _, regions = render.render(merge_request({ body = "A `paragraph` with a mention, a codeBlock and a table." }), { now = NOW })
+  eq(regions[1].lines, { "A `paragraph` with a mention, a codeBlock and a table." })
+  eq(regions[1].editable, true)
+  eq(regions[1].reason, nil)
+  -- The same words as a Jira tree carrying a mention node are read-only.
+  local _, jira = render.render(
+    ticket({ body = doc(paragraph(text("A paragraph with "), { type = "mention", attrs = { id = "acc-ana", text = "@ana" } })) }),
+    { now = NOW }
+  )
+  eq(jira[1].lines, { "A paragraph with @ana" }, "a tree renders through adf")
+  eq(jira[1].editable, false)
+  eq(jira[1].reason, "carries a mention node, which a write would replace by its flattened text; " .. render.WEB_HINT)
+end)
+
+test("render: a merge request's regions feed the compare, and an edit is one update", function()
+  local _, regions = render.render(merge_request(), { now = NOW })
+  local snap, current = { regions = {} }, {}
+  for _, region in ipairs(regions) do
+    snap.regions[region.id] = region
+    current[region.id] = { lines = vim.deepcopy(region.lines) }
+  end
+  eq(diff.plan(snap, current), { calls = {}, skipped = {}, refused = {} }, "unedited, nothing is sent")
+  current.body.lines = { "Bumps the pin to 1.3.37.", "", "- moves the digest", "- reruns the matrix" }
+  eq(diff.plan(snap, current), {
+    calls = { { kind = diff.BODY_UPDATE, id = "body", text = "Bumps the pin to 1.3.37.\n\n- moves the digest\n- reruns the matrix" } },
+    skipped = {},
+    refused = {},
+  })
+  current.body.lines = vim.deepcopy(regions[1].lines)
+  current["9002"].lines = { "Thanks.", "Merged." }
+  eq(diff.plan(snap, current).calls, { { kind = diff.COMMENT_UPDATE, id = "9002", text = "Thanks.\nMerged." } })
+  current["9001"].lines = { "Looks bad." }
+  eq(diff.plan(snap, current).refused, { { id = "9001", reason = "written by Ana; " .. render.WEB_HINT } })
+end)
+
+-- the adapter contract ---------------------------------------------------------------------
+
+-- A function of exactly that many parameters, since verify() holds each call
+-- to the arity the contract gives it.
+local function taking(count)
+  local params = {}
+  for index = 1, count do
+    params[index] = "p" .. index
+  end
+  return assert(load(("return function(%s) end"):format(table.concat(params, ", "))))()
+end
+
+-- An adapter carrying every required call at its arity and no capability, to vary.
+local function bare_adapter()
+  local adapter = { capabilities = {} }
+  for _, name in ipairs(adapters.REQUIRED) do
+    adapter[name] = taking(adapters.ARITY[name])
+  end
+  return adapter
+end
+
+test("adapters: a module missing a required call is refused, naming it", function()
+  local adapter = bare_adapter()
+  adapter.whoami = nil
+  adapter.token_url = nil
+  adapter.project_of = nil
+  local ok, err = adapters.verify(adapter, "x")
+  eq(ok, false)
+  eq(err:find("required call whoami is missing", 1, true) ~= nil, true, err)
+  eq(err:find("required call token_url is missing", 1, true) ~= nil, true, "every shortfall is named: " .. err)
+  -- The dash calls project_of() on every row a key takes, without checking
+  -- for it, so an adapter without it has to fail here rather than there.
+  eq(err:find("required call project_of is missing", 1, true) ~= nil, true, err)
+  eq({ adapters.verify(bare_adapter(), "x") }, { true }, "the required calls alone are a valid adapter")
+end)
+
+test("adapters: a capability is refused when declared and not implemented, or implemented and not declared", function()
+  local adapter = bare_adapter()
+  adapter.capabilities = { "states" }
+  local ok, err = adapters.verify(adapter, "x")
+  eq(ok, false)
+  eq(err:find("capability states is declared and not implemented", 1, true) ~= nil, true, err)
+  adapter = bare_adapter()
+  adapter.states = function() end
+  ok, err = adapters.verify(adapter, "x")
+  eq(ok, false)
+  eq(err:find("states is implemented and not declared", 1, true) ~= nil, true, err)
+  adapter = bare_adapter()
+  adapter.capabilities = { "teleport" }
+  ok, err = adapters.verify(adapter, "x")
+  eq(ok, false)
+  eq(err:find("capability teleport is not one the contract names", 1, true) ~= nil, true, err)
+  adapter = bare_adapter()
+  adapter.capabilities = { "states" }
+  adapter.states = taking(2)
+  eq({ adapters.verify(adapter, "x") }, { true })
+  eq(adapters.can(adapter, "states"), true)
+  eq(adapters.can(adapter, "diff"), false)
+end)
+
+test("adapters: a call of the wrong arity is refused, and a vararg one is not held to a count", function()
+  local adapter = bare_adapter()
+  adapter.rows = taking(1)
+  local ok, err = adapters.verify(adapter, "x")
+  eq(ok, false)
+  eq(err:find("rows takes 1 parameters and the contract gives it 2", 1, true) ~= nil, true, err)
+  adapter = bare_adapter()
+  adapter.capabilities = { "comment_update" }
+  adapter.comment_update = taking(3)
+  ok, err = adapters.verify(adapter, "x")
+  eq(ok, false)
+  eq(err:find("comment_update takes 3 parameters and the contract gives it 4", 1, true) ~= nil, true, err)
+  adapter = bare_adapter()
+  adapter.rows = function(...)
+    return ...
+  end
+  eq({ adapters.verify(adapter, "x") }, { true }, "a vararg function's count says nothing")
+  -- A contract name with no arity is a shortfall in the message, not a raise:
+  -- get() runs verify() outside its pcall, so a raise would reach auth.ready.
+  adapter = bare_adapter()
+  local saved_arity = adapters.ARITY.url
+  adapters.ARITY.url = nil
+  ok, err = adapters.verify(adapter, "x")
+  adapters.ARITY.url = saved_arity
+  eq(ok, false)
+  eq(err, "adapter x: url is in the contract with no arity, so nothing holds it to one")
+  for _, name in ipairs(adapters.REQUIRED) do
+    eq(type(adapters.ARITY[name]), "number", name .. " has an arity")
+  end
+  for _, name in ipairs(adapters.OPTIONAL) do
+    eq(type(adapters.ARITY[name]), "number", name .. " has an arity")
+  end
+end)
+
+test("adapters: a handoff is the name of a plugin or absent", function()
+  local adapter = bare_adapter()
+  adapter.handoff = "octo.nvim"
+  eq({ adapters.verify(adapter, "x") }, { true })
+  for _, odd in ipairs({ true, "", 1, {} }) do
+    adapter.handoff = odd
+    local ok, err = adapters.verify(adapter, "x")
+    eq(ok, false, vim.inspect(odd))
+    eq(err, ("adapter x: handoff is %s rather than the name of the plugin an item opens in"):format(vim.inspect(odd)))
+  end
+  eq(gh.handoff, "octo.nvim")
+  eq({ jira.handoff, glab.handoff }, {}, "the adapters that render their own items name none")
+end)
+
+test("adapters: the registry verifies a module on load and does not keep one that fails", function()
+  -- A registry of its own, which holds no module an earlier test loaded
+  -- through the shared one, so the stub below is what it loads.
+  local saved_registry, saved_gh = package.loaded["docket.adapters"], package.loaded["docket.adapters.gh"]
+  package.loaded["docket.adapters"] = nil
+  local registry = require("docket.adapters")
+  package.loaded["docket.adapters"] = saved_registry
+  local incomplete = bare_adapter()
+  incomplete.whoami = nil
+  package.loaded["docket.adapters.gh"] = incomplete
+  local adapter, err = registry.get("gh")
+  local again, err_again = registry.get("gh")
+  package.loaded["docket.adapters.gh"] = saved_gh
+  eq(adapter, nil)
+  eq(err:find("adapter gh: required call whoami is missing", 1, true) ~= nil, true, err)
+  eq(again, nil)
+  eq(err_again, err, "a module that failed is asked for afresh, not cached")
+end)
+
+test("adapters: the calls a save makes are capabilities, and jira passes the contract", function()
+  local named = {}
+  for _, name in ipairs(adapters.OPTIONAL) do
+    named[name] = true
+  end
+  for _, call in ipairs({ diff.BODY_UPDATE, diff.COMMENT_UPDATE, diff.COMMENT_CREATE }) do
+    eq(named[call], true, call)
+  end
+  eq({ adapters.verify(jira, "jira") }, { true })
+  eq(adapters.get("jira"), jira, "the registry hands back the module")
+  local adapter, err = adapters.get("svn")
+  eq(adapter, nil)
+  eq(err:find("jira, glab, gh", 1, true) ~= nil, true, "the refusal names the adapters: " .. err)
+end)
+
+-- the jira adapter -------------------------------------------------------------------------
+
+local ACLI = { "acli", "jira" }
+
+local function argv_of(...)
+  return vim.list_extend(vim.deepcopy(ACLI), { ... })
+end
+
+local function done(argv, payload)
+  local stdout = type(payload) == "string" and payload or vim.json.encode(payload)
+  return { argv = argv, ok = true, code = 0, stdout = stdout, stderr = "", timed_out = false }
+end
+
+local function failed(argv, code, stderr)
+  return { argv = argv, ok = false, code = code, stdout = "", stderr = stderr, timed_out = false }
+end
+
+-- Replaces spawn.run with one that records every call and answers each from
+-- `answer(argv, opts)` before run returns. Returns the calls and the restore.
+local function stub_run(answer)
+  local calls, saved = {}, spawn.run
+  spawn.run = function(argv, opts, on_done)
+    calls[#calls + 1] = { argv = argv, opts = opts }
+    on_done(answer(argv, opts))
+    return nil
+  end
+  return calls, function()
+    spawn.run = saved
+  end
+end
+
+-- stub_run with the answer delivered from a libuv timer instead, which is the
+-- fast-event context vim.system's own callback runs in: a vim.fn call or a
+-- buffer change reached from there raises E5560 in the editor, and under
+-- stub_run it would pass. A test using it waits with vim.wait.
+local function stub_run_fast(answer)
+  local calls, saved = {}, spawn.run
+  spawn.run = function(argv, opts, on_done)
+    calls[#calls + 1] = { argv = argv, opts = opts }
+    local timer = vim.uv.new_timer()
+    timer:start(0, 0, function()
+      timer:close()
+      on_done(answer(argv, opts))
+    end)
+  end
+  return calls, function()
+    spawn.run = saved
+  end
+end
+
+local function stub_wait(answer)
+  local calls, saved = {}, spawn.wait
+  spawn.wait = function(argv, opts)
+    calls[#calls + 1] = { argv = argv, opts = opts }
+    return answer(argv, opts)
+  end
+  return calls, function()
+    spawn.wait = saved
+  end
+end
+
+local function jql_of(argv)
+  for index, word in ipairs(argv) do
+    if word == "--jql" then
+      return argv[index + 1]
+    end
+  end
+  return nil
+end
+
+local function has(argv, word)
+  for _, given in ipairs(argv) do
+    if given == word then
+      return true
+    end
+  end
+  return false
+end
+
+local function user(id, name)
+  return {
+    accountId = id,
+    accountType = "atlassian",
+    active = true,
+    avatarUrls = vim.empty_dict(),
+    displayName = name,
+    self = "https://example.atlassian.net/rest/api/3/user?accountId=" .. id,
+    timeZone = "Europe/Lisbon",
+  }
+end
+
+-- A search row as acli prints one: the key, the fields asked for.
+local function found(key, fields)
+  return { id = "1" .. key:match("%d+$"), key = key, self = "https://example.atlassian.net/rest/api/3/issue/1" .. key:match("%d+$"), fields = fields }
+end
+
+-- A comment as `view --fields comment` returns one: `author`, `body`,
+-- `created`, `id`, `jsdPublic`, `self`, `updateAuthor`, `updated`. The
+-- update author is somebody else on purpose, since the adapter must judge
+-- ownership by `author` alone.
+local function comment(id, author, created, body)
+  return {
+    author = author,
+    body = body,
+    created = created,
+    id = id,
+    jsdPublic = true,
+    self = "https://example.atlassian.net/rest/api/3/issue/11001/comment/" .. id,
+    updateAuthor = user("acc-bot", "Automation"),
+    updated = created:gsub("T10", "T11"),
+  }
+end
+
+-- The `view` payload as phase 0 recorded it: the top-level keys, `fields`
+-- holding what was asked for, `description` a document, `comment` a page
+-- with `startAt`, `maxResults` and `total`.
+local function view_payload()
+  return {
+    changelog = vim.NIL,
+    editmeta = vim.NIL,
+    expand = "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+    fields = {
+      summary = "Retry backoff drops the last attempt",
+      status = { name = "In Progress", statusCategory = { key = "indeterminate", name = "In Progress" } },
+      assignee = vim.tbl_extend("force", user("acc-me", "Me Myself"), { emailAddress = "me@example.test" }),
+      reporter = user("acc-ana", "Ana"),
+      updated = "2024-05-03T10:00:00.000+0000",
+      description = doc(paragraph(text("The retry loop re-enters"), { type = "hardBreak" }, text("before the final attempt."))),
+      comment = {
+        comments = {
+          comment("10001", user("acc-ana", "Ana"), "2024-04-30T10:00:00.000+0000", doc(paragraph(text("Repros on staging.")))),
+          comment("10002", user("acc-me", "Me Myself"), "2024-05-02T10:00:00.000+0000", doc(paragraph(text("Fix is in review.")))),
+        },
+        maxResults = 14,
+        self = "https://example.atlassian.net/rest/api/3/issue/11001/comment",
+        startAt = 0,
+        total = 5,
+      },
+    },
+    fieldsToInclude = vim.NIL,
+    id = "11001",
+    key = "TIG-1001",
+    names = vim.NIL,
+    operations = vim.NIL,
+    properties = vim.NIL,
+    renderedFields = vim.NIL,
+    schema = vim.NIL,
+    self = "https://example.atlassian.net/rest/api/3/issue/11001",
+    transitions = vim.NIL,
+  }
+end
+
+local ASSIGNEE_QUERY = argv_of("workitem", "search", "--jql", "assignee = currentUser()", "--json", "--fields", "assignee")
+local REPORTER_QUERY = argv_of("workitem", "search", "--jql", "reporter = currentUser()", "--json", "--fields", "reporter")
+
+test("jira: whoami falls back to reporter, and then answers without asking again", function()
+  jira.forget()
+  local calls, restore = stub_run(function(argv)
+    if jql_of(argv) == "assignee = currentUser()" then
+      return done(argv, {})
+    end
+    return done(argv, { found("TIG-7", { reporter = user("acc-me", "Me Myself") }) })
+  end)
+  local answers = {}
+  jira.whoami(function(id, err)
+    answers[#answers + 1] = { id, err }
+  end)
+  jira.whoami(function(id, err)
+    answers[#answers + 1] = { id, err }
+  end)
+  restore()
+  eq(answers, { { "acc-me" }, { "acc-me" } })
+  eq(#calls, 2, "two searches for the first answer, none for the second")
+  eq(calls[1].argv, ASSIGNEE_QUERY)
+  eq(calls[2].argv, REPORTER_QUERY)
+  eq(has(calls[1].argv, "--paginate"), false, "the first page is enough")
+end)
+
+test("jira: whoami with nothing assigned or reported says to assign one work item, and asks again next time", function()
+  jira.forget()
+  local calls, restore = stub_run(function(argv)
+    return done(argv, {})
+  end)
+  local got
+  jira.whoami(function(id, err)
+    got = { id, err }
+  end)
+  eq(got[1], nil)
+  eq(got[2]:find("Assign it one work item", 1, true) ~= nil, true, got[2])
+  jira.whoami(function() end)
+  restore()
+  eq(#calls, 4, "an empty answer is not remembered")
+end)
+
+test("jira: whoami reports a failed search with acli's own words, and joins callers during one query", function()
+  jira.forget()
+  local _, restore = stub_run(function(argv)
+    return failed(argv, 1, "Error: not authenticated")
+  end)
+  local got
+  jira.whoami(function(id, err)
+    got = { id, err }
+  end)
+  restore()
+  eq(got, { nil, "acli exited 1\nError: not authenticated" })
+
+  -- Two callers while the search is in flight make one search.
+  local pending = {}
+  local saved = spawn.run
+  spawn.run = function(argv, _, on_done)
+    pending[#pending + 1] = { argv = argv, on_done = on_done }
+  end
+  local answers = {}
+  jira.whoami(function(id)
+    answers[#answers + 1] = id
+  end)
+  jira.whoami(function(id)
+    answers[#answers + 1] = id
+  end)
+  eq(#pending, 1, "one search in flight")
+  pending[1].on_done(done(pending[1].argv, { found("TIG-7", { assignee = user("acc-me", "Me Myself") }) }))
+  spawn.run = saved
+  eq(answers, { "acc-me", "acc-me" })
+end)
+
+test("jira: a whoami answer landing after a login is not remembered as the new account's", function()
+  -- spawn.wait pumps the event loop, and so do the login flow's prompts, so a
+  -- search started before the login settles inside it, after forget().
+  jira.forget()
+  local pending = {}
+  local saved = spawn.run
+  spawn.run = function(argv, _, on_done)
+    pending[#pending + 1] = { argv = argv, on_done = on_done }
+  end
+  local got
+  jira.whoami(function(id, err)
+    got = { id, err }
+  end)
+  local _, restore_wait = stub_wait(function(argv)
+    -- The old account's search answers while the login blocks.
+    local search = table.remove(pending, 1)
+    search.on_done(done(search.argv, { found("TIG-7", { assignee = user("acc-OLD-ACCOUNT", "Old") }) }))
+    return done(argv, "")
+  end)
+  jira.auth_login("tok", { site = "example.atlassian.net", email = "new@example.test" })
+  restore_wait()
+  eq(got[1], nil)
+  eq(got[2]:find("a login ran while the query was in flight", 1, true) ~= nil, true, got[2])
+  jira.whoami(function() end)
+  eq(#pending, 1, "nothing was remembered: the next whoami searches again")
+  eq(jql_of(pending[1].argv), "assignee = currentUser()")
+  -- Answered, so no query is left in flight for the tests after this one.
+  pending[1].on_done(done(pending[1].argv, { found("TIG-7", { assignee = user("acc-me", "Me Myself") }) }))
+  spawn.run = saved
+end)
+
+test("jira: a caller asking after a login starts its own query, and the stale one changes nothing", function()
+  jira.forget()
+  local pending = {}
+  local saved = spawn.run
+  spawn.run = function(argv, _, on_done)
+    pending[#pending + 1] = { argv = argv, on_done = on_done }
+  end
+  local before
+  jira.whoami(function(id, err)
+    before = { id, err }
+  end)
+  local _, restore_wait = stub_wait(function(argv)
+    return done(argv, "")
+  end)
+  -- The old account's search is still running when the login returns.
+  jira.auth_login("tok", { site = "example.atlassian.net", email = "new@example.test" })
+  restore_wait()
+  local after
+  jira.whoami(function(id, err)
+    after = { id, err }
+  end)
+  eq(#pending, 2, "the caller after the login does not join the stale query")
+  eq(after, nil, "and waits on its own")
+  pending[2].on_done(done(pending[2].argv, { found("TIG-7", { assignee = user("acc-NEW", "New") }) }))
+  eq(after, { "acc-NEW" }, "answered from its own query")
+  eq(before, nil, "the stale query has not exited yet")
+  pending[1].on_done(done(pending[1].argv, { found("TIG-7", { assignee = user("acc-OLD", "Old") }) }))
+  eq(before[1], nil)
+  eq(before[2]:find("a login ran while the query was in flight", 1, true) ~= nil, true, before[2])
+  local again
+  jira.whoami(function(id)
+    again = id
+  end)
+  spawn.run = saved
+  eq(again, "acc-NEW", "the stale exit changed nothing")
+  eq(#pending, 2, "and nothing was asked again")
+end)
+
+test("jira: a login the client refuses still drops the identity and refuses the query in flight", function()
+  jira.forget()
+  local pending = {}
+  local saved = spawn.run
+  spawn.run = function(argv, _, on_done)
+    pending[#pending + 1] = { argv = argv, on_done = on_done }
+  end
+  local got
+  jira.whoami(function(id, err)
+    got = { id, err }
+  end)
+  local _, restore_wait = stub_wait(function(argv)
+    -- The search answers while the login blocks, as it does on a login that
+    -- succeeds: the flow runs the same way up to the client's verdict.
+    local search = table.remove(pending, 1)
+    search.on_done(done(search.argv, { found("TIG-7", { assignee = user("acc-me", "Me Myself") }) }))
+    return failed(argv, 1, "Error: Invalid token")
+  end)
+  local result = jira.auth_login("bad", { site = "example.atlassian.net", email = "me@example.test" })
+  restore_wait()
+  eq(result.ok, false)
+  eq(got[1], nil, "the answer is not handed on")
+  -- Nobody signed in and the account that was signed in still is, so the
+  -- refusal says a login ran rather than that an account replaced another.
+  eq(got[2]:find("a login ran while the query was in flight", 1, true) ~= nil, true, got[2])
+  eq(got[2]:find("may be the account that signed out", 1, true) ~= nil, true, got[2])
+  jira.whoami(function() end)
+  eq(#pending, 1, "the identity was dropped whatever the client answered, so the next whoami asks again")
+  -- Answered, so no query is left in flight for the tests after this one.
+  pending[1].on_done(done(pending[1].argv, { found("TIG-7", { assignee = user("acc-me", "Me Myself") }) }))
+  spawn.run = saved
+end)
+
+test("jira: each query owns its waiters, so a stale settle answers its own caller and leaves the fresh list alone", function()
+  jira.forget()
+  local pending = {}
+  local saved = spawn.run
+  spawn.run = function(argv, _, on_done)
+    pending[#pending + 1] = { argv = argv, on_done = on_done }
+  end
+  -- Every answer a caller is given is recorded, so a caller answered twice is
+  -- told apart from one answered once.
+  local answers = { {}, {}, {}, {} }
+  local function ask(index)
+    jira.whoami(function(id, err)
+      answers[index][#answers[index] + 1] = { id, err }
+    end)
+  end
+  ask(1)
+  eq(#pending, 1, "the first caller starts a query")
+  local _, restore_wait = stub_wait(function(argv)
+    return done(argv, "")
+  end)
+  jira.auth_login("tok", { site = "example.atlassian.net", email = "new@example.test" })
+  restore_wait()
+  ask(2)
+  eq(#pending, 2, "the caller after the login starts its own query")
+  ask(3)
+  eq(#pending, 2, "and the next one joins that query")
+  -- The stale query settles into a slot the fresh one now holds.
+  pending[1].on_done(done(pending[1].argv, { found("TIG-7", { assignee = user("acc-old", "Old") }) }))
+  eq(#answers[1], 1, "its own caller is answered once")
+  eq(answers[1][1][1], nil)
+  eq(answers[1][1][2]:find("a login ran while the query was in flight", 1, true) ~= nil, true, answers[1][1][2])
+  eq(answers[2], {}, "and the fresh query's callers are left for its own settle")
+  eq(answers[3], {})
+  ask(4)
+  eq(#pending, 2, "the stale settle left the fresh slot in place, so a later caller joins it too")
+  pending[2].on_done(done(pending[2].argv, { found("TIG-7", { assignee = user("acc-new", "New") }) }))
+  spawn.run = saved
+  eq(answers[2], { { "acc-new" } }, "each caller of the fresh query is answered exactly once")
+  eq(answers[3], { { "acc-new" } })
+  eq(answers[4], { { "acc-new" } })
+  eq(#answers[1], 1, "and the stale caller is not answered again")
+end)
+
+test("jira: a section that answers after a login is not shown, and its keys and site are not remembered", function()
+  jira.forget()
+  local pending, saved = {}, spawn.run
+  spawn.run = function(argv, _, on_done)
+    pending[#pending + 1] = { argv = argv, on_done = on_done }
+  end
+  local got
+  jira.rows({ title = "Mine", query = "project = OLD" }, function(rows, err)
+    got = { rows, err }
+  end)
+  jira.forget()
+  pending[1].on_done(done(pending[1].argv, { found("OLD-1", { summary = "One", status = { name = "To Do" } }) }))
+  spawn.run = saved
+  eq(got, { nil, "jira: a login ran while this section was in flight, so its rows are not shown; refresh to ask again" })
+  eq(jira.complete("item", "OLD"), {}, "the previous account's keys are not offered")
+  eq(jira.url({ id = "OLD-1" }), nil, "nor is its site read off the rows")
+end)
+
+test("jira: an item read across a login opens with no identity and the reason, and its site is not read off it", function()
+  jira.forget()
+  local pending, saved = {}, spawn.run
+  spawn.run = function(argv, _, on_done)
+    pending[#pending + 1] = { argv = argv, on_done = on_done }
+  end
+  local got
+  jira.item("TIG-1001", function(it, err, me_err)
+    got = { it, err, me_err }
+  end)
+  -- The identity answers under the account signing out, and the login runs
+  -- before `view` lands.
+  pending[1].on_done(done(pending[1].argv, { found("TIG-7", { assignee = user("acc-me", "Me Myself") }) }))
+  jira.forget()
+  pending[2].on_done(done(pending[2].argv, view_payload()))
+  spawn.run = saved
+  eq(got[2], nil, "the item still opens")
+  eq(got[1].me, nil)
+  eq(got[3], "a login ran while the item was read; open it again")
+  eq(got[1].url, nil, "the site is the new account's to name")
+  eq(item.regions(got[1])[3].editable, false, "the comment the previous account wrote is not offered for editing")
+end)
+
+test("jira: the item is built from the view payload, thread and identity included", function()
+  jira.forget()
+  local calls, restore = stub_run(function(argv)
+    if argv[4] == "search" then
+      return done(argv, { found("TIG-7", { assignee = user("acc-me", "Me Myself") }) })
+    end
+    return done(argv, view_payload())
+  end)
+  local got, got_err
+  jira.item("TIG-1001", function(it, err)
+    got, got_err = it, err
+  end)
+  -- The identity is not asked for again.
+  jira.item("TIG-1001", function() end)
+  restore()
+  eq(#calls, 3, "the second open is one view call")
+  eq(got_err, nil)
+  eq(calls[2].argv, argv_of("workitem", "view", "TIG-1001", "--fields", jira.VIEW_FIELDS, "--json"))
+  eq(jira.VIEW_FIELDS, "summary,status,assignee,reporter,updated,description,comment")
+  eq(got.id, "TIG-1001")
+  eq(got.title, "Retry backoff drops the last attempt")
+  eq(got.state, "In Progress")
+  eq(got.assignee, { id = "acc-me", name = "Me Myself" })
+  eq(got.reporter, { id = "acc-ana", name = "Ana" })
+  eq(got.updated, "2024-05-03T10:00:00.000+0000")
+  eq(got.body, view_payload().fields.description)
+  eq(got.me, "acc-me")
+  eq(#got.comments, 2)
+  eq(got.comments[1].id, "10001")
+  eq(got.comments[1].author, { id = "acc-ana", name = "Ana" }, "accountId and displayName, as item.new takes them")
+  eq(got.comments[2].author, { id = "acc-me", name = "Me Myself" }, "the author, never updateAuthor: Jira grants edit rights by author")
+  eq(got.comments[1].created, "2024-04-30T10:00:00.000+0000", "a comment read through view carries created")
+  eq(got.comments[1].updated, "2024-04-30T11:00:00.000+0000", "and updated, which the conflict check compares")
+  eq(got.comments[1].body, view_payload().fields.comment.comments[1].body)
+  eq(got.total, 5)
+  eq(got.start_at, 0)
+  eq(got.missing, 3)
+  eq(got.url, "https://example.atlassian.net/browse/TIG-1001", "the site is read off the payload's self")
+  -- The item renders, and the ownership test is accountId against accountId.
+  local lines, regions = render.render(got, { now = NOW })
+  eq(lines[1], "TIG-1001   In Progress   me   updated 2h ago")
+  eq(regions[2].editable, false)
+  eq(regions[2].reason, "written by Ana; " .. render.WEB_HINT)
+  eq(regions[3].editable, true)
+  eq(lines[#lines], "3 of 5 comments not shown; " .. render.WEB_HINT)
+end)
+
+test("jira: a page from the middle of a thread keeps its offset, and the notice lands at each end", function()
+  jira.forget()
+  local _, restore = stub_run(function(argv)
+    if argv[4] == "search" then
+      return done(argv, { found("TIG-7", { assignee = user("acc-me", "Me Myself") }) })
+    end
+    local payload = view_payload()
+    payload.fields.comment.startAt = 4
+    payload.fields.comment.total = 9
+    return done(argv, payload)
+  end)
+  local got
+  jira.item("TIG-1001", function(it)
+    got = it
+  end)
+  restore()
+  eq(got.start_at, 4)
+  eq(got.total, 9)
+  eq(got.missing, 7)
+  local lines = render.render(got, { now = NOW })
+  local notices = vim.tbl_filter(function(line)
+    return line:find("comments not shown", 1, true) ~= nil
+  end, lines)
+  eq(notices, { "4 of 9 comments not shown; " .. render.WEB_HINT, "3 of 9 comments not shown; " .. render.WEB_HINT })
+  eq(lines[#lines], notices[2], "the newer ones are missing after the page")
+end)
+
+test("jira: an item still opens when the identity is unknown, with the reason beside it", function()
+  jira.forget()
+  local _, restore = stub_run(function(argv)
+    if argv[4] == "search" then
+      return done(argv, {})
+    end
+    return done(argv, view_payload())
+  end)
+  local got, got_err, got_me_err
+  jira.item("TIG-1001", function(it, err, me_err)
+    got, got_err, got_me_err = it, err, me_err
+  end)
+  restore()
+  eq(got_err, nil)
+  eq(got.me, nil)
+  eq(got_me_err:find("Assign it one work item", 1, true) ~= nil, true, got_me_err)
+  local regions = item.regions(got)
+  eq(regions[2].editable, false)
+  eq(regions[3].editable, false, "the own comment too, for want of an ownership test")
+end)
+
+test("jira: a failed view and a payload with no fields are each reported", function()
+  jira.forget()
+  local _, restore = stub_run(function(argv)
+    if argv[4] == "search" then
+      return done(argv, { found("TIG-7", { assignee = user("acc-me", "Me Myself") }) })
+    end
+    if argv[5] == "TIG-404" then
+      return failed(argv, 1, "Error: Issue does not exist or you do not have permission to see it.")
+    end
+    return done(argv, "null")
+  end)
+  local got, got_err
+  jira.item("TIG-404", function(it, err)
+    got, got_err = it, err
+  end)
+  eq(got, nil)
+  eq(got_err, "acli exited 1\nError: Issue does not exist or you do not have permission to see it.")
+  jira.item("TIG-1", function(it, err)
+    got, got_err = it, err
+  end)
+  restore()
+  eq(got, nil)
+  eq(got_err:find("no `fields` object", 1, true) ~= nil, true, got_err)
+end)
+
+-- The document file a write hands acli, read while it exists: the stub reads
+-- it before answering, and the adapter removes it once the call is done.
+local function read_document(argv, flag)
+  for index, word in ipairs(argv) do
+    if word == flag then
+      local path = argv[index + 1]
+      local handle = assert(io.open(path, "r"))
+      local content = handle:read("a")
+      handle:close()
+      return path, vim.json.decode(content)
+    end
+  end
+  return nil, nil
+end
+
+test("jira: a comment is created as a document through --body-file, never as text", function()
+  local path, written
+  local calls, restore = stub_run(function(argv)
+    path, written = read_document(argv, "--body-file")
+    return done(argv, { results = {}, successCount = 1, totalCount = 1 })
+  end)
+  local got
+  jira.comment_create("TIG-1001", "one\ntwo\n\nthree", function(ok, err)
+    got = { ok, err }
+  end)
+  restore()
+  eq(got, { true })
+  eq(vim.list_slice(calls[1].argv, 1, 8), argv_of("workitem", "comment", "create", "--key", "TIG-1001", "--json"))
+  eq(written, adf.serialise("one\ntwo\n\nthree"), "the file holds the serialised tree")
+  eq(has(calls[1].argv, "one\ntwo\n\nthree"), false, "the text is in no argument")
+  eq(vim.uv.fs_stat(path), nil, "the file is removed once acli has exited")
+end)
+
+test("jira: a comment update goes through --body-adf and a body update through --description-file --yes", function()
+  local written_comment, written_body
+  local calls, restore = stub_run(function(argv)
+    if argv[5] == "update" then
+      written_comment = select(2, read_document(argv, "--body-adf"))
+    else
+      written_body = select(2, read_document(argv, "--description-file"))
+    end
+    return done(argv, "")
+  end)
+  local outcomes = {}
+  jira.comment_update("TIG-1001", "10002", "Fix is merged.", function(ok, err)
+    outcomes[#outcomes + 1] = { ok, err }
+  end)
+  jira.body_update("TIG-1001", "A description at last.", function(ok, err)
+    outcomes[#outcomes + 1] = { ok, err }
+  end)
+  restore()
+  eq(outcomes, { { true }, { true } })
+  eq(vim.list_slice(calls[1].argv, 1, 9), argv_of("workitem", "comment", "update", "--key", "TIG-1001", "--id", "10002"))
+  eq(written_comment, adf.serialise("Fix is merged."))
+  eq(vim.list_slice(calls[2].argv, 1, 8), argv_of("workitem", "edit", "--key", "TIG-1001", "--yes", "--json"))
+  eq(written_body, adf.serialise("A description at last."))
+end)
+
+test("jira: a write that fails reports acli's words, and a bulk summary with no success is a failure", function()
+  local _, restore = stub_run(function(argv)
+    if argv[5] == "create" then
+      return done(argv, { results = { { key = "TIG-1001", error = "comment body is required" } }, successCount = 0, totalCount = 1 })
+    end
+    return failed(argv, 1, "Error: field 'description' cannot be set")
+  end)
+  local outcomes = {}
+  jira.comment_create("TIG-1001", "x", function(ok, err)
+    outcomes[#outcomes + 1] = { ok, err }
+  end)
+  jira.body_update("TIG-1001", "x", function(ok, err)
+    outcomes[#outcomes + 1] = { ok, err }
+  end)
+  restore()
+  eq(outcomes, { { false, "TIG-1001: comment body is required" }, { false, "acli exited 1\nError: field 'description' cannot be set" } })
+end)
+
+test("jira: a structured Jira error in a bulk summary is flattened, never printed as a table address", function()
+  local _, restore = stub_run(function(argv)
+    return done(argv, {
+      results = {
+        {
+          key = "TIG-1001",
+          error = { errorMessages = { "Transition is not valid" }, errors = { resolution = "Resolution is required", summary = "too long" } },
+        },
+        { key = "TIG-1002", error = { code = 403 } },
+      },
+      successCount = 0,
+      totalCount = 2,
+    })
+  end)
+  local got
+  jira.state_set("TIG-1001", "Done", function(ok, err)
+    got = { ok, err }
+  end)
+  restore()
+  eq(got[1], false)
+  eq(got[2], "TIG-1001: Transition is not valid; resolution: Resolution is required; summary: too long\nTIG-1002: " .. vim.json.encode({ code = 403 }))
+  eq(got[2]:find("table: 0x", 1, true), nil)
+end)
+
+test("jira: a document file left by a client killed with the editor is removed at VimLeavePre", function()
+  local held
+  local saved = spawn.run
+  spawn.run = function(argv)
+    for index, word in ipairs(argv) do
+      if word == "--body-file" then
+        held = argv[index + 1]
+      end
+    end
+    -- The client never calls back.
+  end
+  jira.comment_create("TIG-1001", "left behind", function() end)
+  spawn.run = saved
+  eq(vim.uv.fs_stat(held) ~= nil, true, "the file exists while the client runs")
+  eq(bit.band(vim.uv.fs_stat(held).mode, 511), 384, "created 0600, before anything opens it")
+  -- The adapter registers the hook on vim.schedule, so that requiring it
+  -- from a fast-event context works; one pump of the loop is what runs it.
+  vim.wait(0)
+  eq(#vim.api.nvim_get_autocmds({ group = "docket_jira_files", event = "VimLeavePre" }), 1)
+  vim.api.nvim_exec_autocmds("VimLeavePre", { group = "docket_jira_files" })
+  eq(vim.uv.fs_stat(held), nil, "removed on leaving")
+end)
+
+test("jira: a search that prints an unknown shape is refused with a command a shell accepts", function()
+  local _, restore = stub_run(function(argv)
+    return done(argv, { nextPageToken = "abc" })
+  end)
+  local got
+  jira.rows({ query = "project IN (PAY, TIG) AND statusCategory != Done" }, function(rows, err)
+    got = { rows, err }
+  end)
+  restore()
+  eq(got[1], nil)
+  eq(got[2]:find("neither a list nor an object holding `issues`", 1, true) ~= nil, true, got[2])
+  local line = got[2]:match("\n  (.-)\n")
+  eq(
+    line,
+    "acli jira workitem search --jql 'project IN (PAY, TIG) AND statusCategory != Done' --json --fields "
+      .. jira.ROW_FIELDS
+      .. " --paginate",
+    "the JQL is quoted, so `(PAY,` opens no substitution in fish"
+  )
+end)
+
+test("jira: a document that cannot be written is reported and its file removed", function()
+  local before = vim.fn.glob(vim.uv.os_tmpdir() .. "/docket-*", false, true)
+  local saved_write, saved_run = vim.uv.fs_write, spawn.run
+  vim.uv.fs_write = function()
+    return nil, "EIO: i/o error"
+  end
+  spawn.run = function()
+    error("nothing runs without a document")
+  end
+  local got
+  jira.comment_create("TIG-1001", "x", function(ok, err)
+    got = { ok, err }
+  end)
+  vim.uv.fs_write, spawn.run = saved_write, saved_run
+  eq(got[1], false)
+  eq(got[2]:find("^cannot write .*docket%-.*: EIO") ~= nil, true, got[2])
+  eq(vim.fn.glob(vim.uv.os_tmpdir() .. "/docket-*", false, true), before, "no file left behind")
+end)
+
+test("jira: a transition carries --yes, and a comment delete names the key and the id", function()
+  local calls, restore = stub_run(function(argv)
+    return done(argv, "")
+  end)
+  local outcomes = {}
+  jira.state_set("TIG-1001", "In Review", function(ok, err)
+    outcomes[#outcomes + 1] = { ok, err }
+  end)
+  jira.comment_delete("TIG-1001", "10002", function(ok, err)
+    outcomes[#outcomes + 1] = { ok, err }
+  end)
+  restore()
+  eq(outcomes, { { true }, { true } })
+  eq(calls[1].argv, argv_of("workitem", "transition", "--key", "TIG-1001", "--status", "In Review", "--yes", "--json"))
+  eq(calls[2].argv, argv_of("workitem", "comment", "delete", "--key", "TIG-1001", "--id", "10002"))
+end)
+
+test("jira: states are the distinct statuses across the project's rows, sorted", function()
+  local calls, restore = stub_run(function(argv)
+    return done(argv, {
+      found("TIG-1", { status = { name = "To Do" } }),
+      found("TIG-2", { status = { name = "In Progress" } }),
+      found("TIG-3", { status = { name = "To Do" } }),
+      found("TIG-4", { status = { name = "Done" } }),
+      found("TIG-5", {}),
+    })
+  end)
+  local got
+  jira.states("TIG-1001", function(states, err)
+    got = { states, err }
+  end)
+  restore()
+  eq(got[2], nil)
+  eq(got[1], {
+    { label = "Done", target = "Done" },
+    { label = "In Progress", target = "In Progress" },
+    { label = "To Do", target = "To Do" },
+  })
+  eq(jql_of(calls[1].argv), "project = TIG ORDER BY updated DESC")
+  eq(has(calls[1].argv, "--paginate"), false, "one page of recent rows carries the workflow's statuses")
+end)
+
+test("jira: states refuses an identifier that is not a key, because a query reaches acli as written", function()
+  local calls, restore = stub_run(function(argv)
+    return done(argv, {})
+  end)
+  local got
+  for _, id in ipairs({ "x OR project = SECRET", "tig-1", "TIG", "PROJ-142abc", "A-1" }) do
+    jira.states(id, function(states, err)
+      got = { states, err }
+    end)
+    eq(got[1], nil, id)
+    eq(got[2], ("%s is not a work item key, so its project is unknown"):format(id))
+  end
+  restore()
+  eq(calls, {}, "nothing was searched")
+  -- The shape is env.KEY_PATTERN's read the other way, so the two accept the
+  -- same identifiers; `A-1` is refused by both, since the prefix wants two
+  -- characters at least.
+  calls, restore = stub_run(function(argv)
+    return done(argv, {})
+  end)
+  for _, id in ipairs({ "TIG-1001", "AB1-2", "PROJ-142", "A-1", "TIG-1a", "tig-1", "PROJ-142abc" }) do
+    local refused
+    jira.states(id, function(_, err)
+      refused = err ~= nil
+    end)
+    eq(refused, env.key_of(id) ~= id, id .. ": states and env.key_of agree")
+  end
+  restore()
+  eq(#calls, 3, "the three keys were searched")
+end)
+
+test("jira: rows are normalised, either search shape is read, and complete answers from them", function()
+  jira.forget()
+  local calls, restore = stub_run(function(argv)
+    if jql_of(argv):find("issues", 1, true) then
+      return done(argv, { issues = { found("TIG-9", { summary = "Nine", status = { name = "Done" } }) }, startAt = 0, maxResults = 50 })
+    end
+    return done(argv, {
+      found("TIG-12", { summary = "Twelve", status = { name = "To Do" }, assignee = user("acc-me", "Me Myself"), updated = "2024-05-03T10:00:00.000+0000" }),
+      found("TIG-3", { summary = "Three", status = { name = "In Progress" }, assignee = vim.NIL }),
+    })
+  end)
+  local got
+  jira.rows({ title = "Mine", query = "project = TIG" }, function(rows, err)
+    got = { rows, err }
+  end)
+  eq(got[2], nil)
+  eq(calls[1].argv, argv_of("workitem", "search", "--jql", "project = TIG", "--json", "--fields", jira.ROW_FIELDS, "--paginate"))
+  eq(got[1][1].id, "TIG-12")
+  eq(got[1][1].state, "To Do")
+  eq(got[1][1].title, "Twelve")
+  eq(got[1][1].source, "jira")
+  eq(got[1][1].assignee, { id = "acc-me", name = "Me Myself" })
+  eq(got[1][2].assignee, nil)
+  eq(jira.complete("item", "tig-1"), { { id = "TIG-12", title = "Twelve" } })
+  eq(jira.complete("item", "Tig-1"), { { id = "TIG-12", title = "Twelve" } }, "matched in any case")
+  eq(jira.complete("item", ""), { { id = "TIG-3", title = "Three" }, { id = "TIG-12", title = "Twelve" } }, "in the dashboard's order, by number")
+  eq(jira.complete("user", "me"), {}, "no user is offered: a mention cannot be written")
+  eq(jira.complete("user", "T"), {}, "nor a key, for a query that matches one")
+  jira.rows({ title = "Recently updated", query = "project = TIG AND text ~ issues" }, function(rows, err)
+    got = { rows, err }
+  end)
+  restore()
+  eq(got[2], nil)
+  eq(#got[1], 1)
+  eq(got[1][1].id, "TIG-9")
+  eq(got[1][1].branch, nil)
+  eq(jira.branch(got[1][1]), nil, "a ticket has no branch until the launcher generates one")
+  -- The dashboard runs its Jira sections at once, so the candidates are the
+  -- rows both sections last returned, not the last section to finish.
+  eq(jira.complete("item", ""), {
+    { id = "TIG-3", title = "Three" },
+    { id = "TIG-9", title = "Nine" },
+    { id = "TIG-12", title = "Twelve" },
+  })
+end)
+
+test("jira: a section's rows replace its own candidates, and a key two sections return is offered once", function()
+  jira.forget()
+  local _, restore = stub_run(function(argv)
+    local jql = jql_of(argv)
+    if jql == "mine" then
+      return done(argv, {
+        found("TIG-12", { summary = "Twelve", status = { name = "To Do" } }),
+        found("TIG-3", { summary = "Three", status = { name = "In Progress" } }),
+      })
+    end
+    if jql == "mine, after the transition" then
+      return done(argv, { found("TIG-12", { summary = "Twelve and a half", status = { name = "Done" } }) })
+    end
+    if jql == "reported, after the transition" then
+      return done(argv, {})
+    end
+    return done(argv, { found("TIG-3", { summary = "Three", status = { name = "In Progress" } }) })
+  end)
+  jira.rows({ title = "Mine", query = "mine" }, function() end)
+  jira.rows({ title = "Reported by me", query = "reported" }, function() end)
+  eq(jira.complete("item", ""), {
+    { id = "TIG-3", title = "Three" },
+    { id = "TIG-12", title = "Twelve" },
+  }, "TIG-3 is in both sections and is offered once")
+  -- The first section runs again: TIG-3 has left it, and TIG-12's summary was
+  -- edited. The other section still holds TIG-3.
+  jira.rows({ title = "Mine", query = "mine, after the transition" }, function() end)
+  eq(jira.complete("item", ""), {
+    { id = "TIG-3", title = "Three" },
+    { id = "TIG-12", title = "Twelve and a half" },
+  }, "the section's own rows replaced what it returned before")
+  -- And when the section that still held TIG-3 returns nothing, the key is
+  -- offered by no section and gone.
+  jira.rows({ title = "Reported by me", query = "reported, after the transition" }, function() end)
+  restore()
+  eq(jira.complete("item", ""), { { id = "TIG-12", title = "Twelve and a half" } })
+end)
+
+test("jira: a row the client left without a status is left out and named, and the rest still shown", function()
+  local _, restore = stub_run(function(argv)
+    if jql_of(argv):find("broken", 1, true) then
+      return done(argv, { found("TIG-1", { summary = "One" }), found("TIG-2", { status = { name = "Done" } }) })
+    end
+    return done(argv, {
+      found("TIG-1", { summary = "One" }),
+      found("TIG-2", { summary = "Two", status = { name = "Done" } }),
+      found("TIG-3", { summary = "Three", status = { name = "To Do" } }),
+    })
+  end)
+  local got
+  jira.rows({ query = "project = TIG" }, function(rows, err, warning)
+    got = { rows, err, warning }
+  end)
+  eq(got[2], nil)
+  eq(#got[1], 2, "the whole rows survive")
+  eq(got[1][1].id, "TIG-2")
+  eq(got[1][2].id, "TIG-3")
+  eq(got[3]:find("TIG-1 needs a non-empty string for state", 1, true) ~= nil, true, got[3])
+  jira.rows({ query = "project = TIG AND text ~ broken" }, function(rows, err, warning)
+    got = { rows, err, warning }
+  end)
+  restore()
+  eq(got[1], nil, "no row survived")
+  eq(got[2]:find("TIG-1 needs a non-empty string for state", 1, true) ~= nil, true, got[2])
+  eq(got[2]:find("TIG-2 needs a non-empty string for title", 1, true) ~= nil, true, got[2])
+  eq(got[3], nil)
+end)
+
+test("category: a Jira status's category reaches the row and the item, and colours `Renewal` by it rather than by its name", function()
+  jira.forget()
+  -- `Renewal` holds `new`, which a match on the name would colour as open.
+  local renewal = { name = "Renewal", statusCategory = { key = "indeterminate", name = "In Progress" } }
+  local _, restore = stub_run(function(argv)
+    if argv[4] == "search" and jql_of(argv) == "assignee = currentUser()" then
+      return done(argv, { found("TIG-7", { assignee = user("acc-me", "Me Myself") }) })
+    end
+    if argv[4] == "search" then
+      return done(argv, {
+        found("TIG-5", { summary = "Five", status = renewal }),
+        found("TIG-6", { summary = "Six", status = { name = "Triage" } }),
+      })
+    end
+    local payload = view_payload()
+    payload.fields.status = renewal
+    return done(argv, payload)
+  end)
+  local rows, it
+  jira.rows({ title = "Mine", query = "project = TIG" }, function(found_rows)
+    rows = found_rows
+  end)
+  jira.item("TIG-1001", function(found_item)
+    it = found_item
+  end)
+  restore()
+  eq({ rows[1].category, rows[2].category }, { "indeterminate", nil }, "a status carrying no category leaves none")
+  eq({ it.state, it.category }, { "Renewal", "indeterminate" })
+
+  local _, _, marks = list.lines({ root = "/w/repo", sections = { { def = { title = "Mine" }, rows = rows } } }, 0)
+  local states = {}
+  for _, mark in ipairs(marks) do
+    if mark[2] == #list.INDENT + #"TIG-5" + #list.GAP then
+      states[#states + 1] = mark[4]
+    end
+  end
+  eq(states, { "DocketStatePending", "DocketLabel" }, "the dashboard's state column: by category, and a label with none")
+
+  local buf = vim.api.nvim_create_buf(false, true)
+  buffer.populate(buf, it, { now = NOW })
+  local header
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, buffer.DECOR, 0, -1, { details = true })) do
+    if mark[2] == 0 and mark[3] == #"TIG-1001" + #render.SEPARATOR then
+      header = { mark[3], mark[4].end_col, mark[4].hl_group }
+    end
+  end
+  vim.api.nvim_buf_delete(buf, { force = true })
+  eq(header, { 11, 11 + #"Renewal", "DocketStatePending" }, "the item buffer's header")
+end)
+
+local STATUS_SIGNED_IN = "✓ Authenticated\n  Site: example.atlassian.net\n  Email: me@example.test\n  Authentication Type: api_token\n"
+-- The site here is one nothing but this output names, so an assertion on it
+-- proves the `Site:` line was read rather than a `self` URL from an earlier
+-- payload, which also names example.atlassian.net.
+local STATUS_ONLY_SITE = "✓ Authenticated\n  Site: status-only.atlassian.net\n  Email: me@example.test\n  Authentication Type: api_token\n"
+
+test("jira: auth status is read from the output, and a missing client is said to be missing", function()
+  local _, restore = stub_wait(function(argv)
+    return done(argv, STATUS_ONLY_SITE)
+  end)
+  local status = jira.auth_status()
+  restore()
+  eq(status, { authenticated = true, missing = false, detail = vim.trim(STATUS_ONLY_SITE) })
+  eq(jira.url({ id = "TIG-1" }), "https://status-only.atlassian.net/browse/TIG-1", "the site comes off the Site: line")
+
+  _, restore = stub_wait(function(argv)
+    return failed(argv, 1, "✗ Not authenticated. Run: acli jira auth login")
+  end)
+  status = jira.auth_status()
+  restore()
+  eq(status, { authenticated = false, missing = false, detail = "acli exited 1\n✗ Not authenticated. Run: acli jira auth login" })
+
+  _, restore = stub_wait(function(argv)
+    return done(argv, "Not authenticated\n")
+  end)
+  eq(jira.auth_status().authenticated, false, "the word has to be the capitalised one on its own")
+  restore()
+
+  _, restore = stub_wait(function(argv)
+    return failed(argv, spawn.MISSING, "ENOENT: no such file or directory")
+  end)
+  status = jira.auth_status()
+  restore()
+  eq(status.missing, true)
+  eq(status.authenticated, false)
+end)
+
+test("jira: a login the client refuses leaves the site of the account still signed in", function()
+  jira.forget()
+  local _, restore = stub_wait(function(argv)
+    if argv[4] == "status" then
+      return done(argv, STATUS_ONLY_SITE)
+    end
+    return failed(argv, 1, "Error: 401 Unauthorized")
+  end)
+  jira.auth_status()
+  local result = jira.auth_login("bad", { site = "typo.atlassian.net", email = "me@example.test" })
+  restore()
+  eq(result.ok, false)
+  eq(jira.url({ id = "TIG-1" }), "https://status-only.atlassian.net/browse/TIG-1")
+  eq(jira.auth_fields()[1].default, "status-only.atlassian.net", "and offers it at the next login")
+  _, restore = stub_wait(function(argv)
+    return done(argv, "")
+  end)
+  jira.auth_login("good", { site = "other.atlassian.net", email = "me@example.test" })
+  restore()
+  eq(jira.url({ id = "TIG-1" }), "https://other.atlassian.net/browse/TIG-1", "a login that succeeds names its own")
+end)
+
+test("jira: the login puts the token on stdin with a trailing newline and never in the argument list", function()
+  jira.forget()
+  local calls, restore = stub_wait(function(argv)
+    return done(argv, "")
+  end)
+  local result = jira.auth_login("s3cret-token", { site = "example.atlassian.net", email = "me@example.test" })
+  restore()
+  eq(result.ok, true)
+  eq(#calls, 1)
+  eq(calls[1].argv, argv_of("auth", "login", "--site", "example.atlassian.net", "--email", "me@example.test", "--token"))
+  eq(calls[1].opts.stdin, "s3cret-token\n")
+  for _, word in ipairs(calls[1].argv) do
+    eq(word:find("s3cret", 1, true), nil, "the token is in no argument")
+  end
+  eq(jira.token_url(), "https://id.atlassian.com/manage-profile/security/api-tokens")
+  local names = vim.tbl_map(function(field)
+    return field.name
+  end, jira.auth_fields())
+  eq(names, { "site", "email" })
+end)
+
+test("jira: a login drops the remembered identity and the rows, so the next open asks again", function()
+  jira.forget()
+  local runs, restore_run = stub_run(function(argv)
+    return done(argv, { found("TIG-7", { assignee = user("acc-me", "Me Myself"), summary = "Seven", status = { name = "To Do" } }) })
+  end)
+  jira.whoami(function() end)
+  jira.whoami(function() end)
+  eq(#runs, 1)
+  jira.rows({ query = "project = TIG" }, function() end)
+  eq(jira.complete("item", ""), { { id = "TIG-7", title = "Seven" } }, "a candidate from the account signed in until now")
+  local _, restore_wait = stub_wait(function(argv)
+    return done(argv, "")
+  end)
+  jira.auth_login("t", { site = "s", email = "e" })
+  restore_wait()
+  eq(jira.complete("item", ""), {}, "no key from the previous account's projects is offered")
+  jira.whoami(function() end)
+  restore_run()
+  eq(#runs, 3, "asked again after the login")
+end)
+
+-- the login flow --------------------------------------------------------------------------
+
+-- The editor's prompts, replaced for a test and put back after it.
+local function stub_prompts(answers)
+  local saved = { input = vim.fn.input, inputsecret = vim.fn.inputsecret, confirm = vim.fn.confirm, open = vim.ui.open, echo = vim.api.nvim_echo }
+  local asked = {}
+  -- Silenced, so the token page the flow puts in the history stays out of
+  -- the suite's output; a test that wants it replaces nvim_echo itself.
+  vim.api.nvim_echo = function() end
+  vim.fn.input = function(opts)
+    asked[#asked + 1] = opts.prompt
+    return answers.input or ""
+  end
+  vim.fn.inputsecret = function(prompt)
+    asked[#asked + 1] = prompt
+    return answers.secret or ""
+  end
+  vim.fn.confirm = function()
+    return answers.confirm or 2
+  end
+  vim.ui.open = function(url)
+    asked[#asked + 1] = "open " .. url
+  end
+  return asked, function()
+    vim.fn.input, vim.fn.inputsecret, vim.fn.confirm, vim.ui.open = saved.input, saved.inputsecret, saved.confirm, saved.open
+    vim.api.nvim_echo = saved.echo
+  end
+end
+
+-- What a client's state check answers, from `state` as stub_acli takes it:
+-- acli from `signed_in`, glab and gh from `state.glab` and `state.gh`, each
+-- not signed in unless set. A client not signed in exits 1 with words of its
+-- own, as all three do. nil for a call that is not a state check.
+local function status_answer(state, argv)
+  if argv[1] == "acli" then
+    if argv[3] ~= "auth" or argv[4] ~= "status" then
+      return nil
+    end
+    if state.signed_in then
+      return done(argv, STATUS_SIGNED_IN)
+    end
+    return failed(argv, 1, "✗ Not authenticated")
+  end
+  if argv[2] ~= "auth" or argv[3] ~= "status" then
+    return nil
+  end
+  if state[argv[1]] then
+    return done(argv, ("✓ Logged in to %s.example.test as me\n"):format(argv[1]))
+  end
+  return failed(argv, 1, ("x %s: no token"):format(argv[1]))
+end
+
+-- The clients as the flows meet them. acli: `auth status` answers from
+-- `signed_in`, which a successful `auth login` flips, and `auth login`
+-- answers from `login`. glab and gh: every call answers as their state check
+-- does, from `state.glab` and `state.gh`.
+local function stub_acli(state)
+  return stub_wait(function(argv)
+    if argv[1] ~= "acli" then
+      if state[argv[1]] then
+        return done(argv, ("✓ Logged in to %s.example.test as me\n"):format(argv[1]))
+      end
+      return failed(argv, 1, ("x %s: no token"):format(argv[1]))
+    end
+    local status = status_answer(state, argv)
+    if status then
+      return status
+    end
+    local result = state.login(argv)
+    if result.ok then
+      state.signed_in = true
+    end
+    return result
+  end)
+end
+
+-- An answer for stub_run or stub_run_fast: each client's state check answers
+-- as stub_acli has it answer, from `state`, and every other call goes to
+-- `answer`. The dashboard asks for the state through spawn.run, so a test of
+-- it that stubs spawn.run answers the check there.
+local function checked(state, answer)
+  return function(argv, opts)
+    return status_answer(state, argv) or answer(argv, opts)
+  end
+end
+
+-- spawn.run answering the state checks alone, each client signed in as
+-- `state` says, for a test that replaces the calls after them itself.
+local function stub_checks(state)
+  return stub_run(checked(state, function(argv)
+    error("a call past the state check reached spawn.run: " .. table.concat(argv, " "))
+  end))
+end
+
+-- Whether a recorded call is a client's state check.
+local function is_status(call)
+  return status_answer({}, call.argv) ~= nil
+end
+
+test("auth: the flow checks the state, prompts, logs in on stdin, and reports the state after", function()
+  jira.forget()
+  local calls, restore_acli = stub_acli({ signed_in = false, login = function(argv)
+    return done(argv, "")
+  end })
+  local asked, restore_prompts = stub_prompts({ input = "me@example.test", secret = "tok", confirm = 1 })
+  -- The token page has to be in the message history before the dialog,
+  -- because vim.fn.confirm draws on the command line and clears it.
+  local echoed, saved_echo = {}, vim.api.nvim_echo
+  vim.api.nvim_echo = function(chunks, history)
+    echoed[#echoed + 1] = { chunks[1][1], history, #asked }
+  end
+  config.configure({ jira = { site = "example.atlassian.net" } })
+  local ok, message = auth.login("jira")
+  config.configure({})
+  vim.api.nvim_echo = saved_echo
+  restore_prompts()
+  restore_acli()
+  eq(ok, true)
+  eq(message:sub(1, #"jira: signed in"), "jira: signed in")
+  eq(message:find("Site: example.atlassian.net", 1, true) ~= nil, true, "the state after the login is what is reported")
+  eq(asked, { "Atlassian account email: ", "open " .. jira.TOKEN_URL, "jira token: " }, "the site came from setup{} and was not asked for")
+  eq(echoed, { { "A token is minted at " .. jira.TOKEN_URL, true, 1 } }, "echoed into the history, after the field and before the dialog")
+  eq(#calls, 3)
+  eq(calls[1].argv, argv_of("auth", "status"))
+  eq(calls[2].argv, argv_of("auth", "login", "--site", "example.atlassian.net", "--email", "me@example.test", "--token"))
+  eq(calls[2].opts.stdin, "tok\n")
+  eq(calls[3].argv, argv_of("auth", "status"))
+end)
+
+test("auth: a client already signed in is left alone, and force logs in again", function()
+  local calls, restore_acli = stub_acli({ signed_in = true, login = function(argv)
+    return done(argv, "")
+  end })
+  local asked, restore_prompts = stub_prompts({ input = "x", secret = "tok" })
+  local ok, message = auth.login("jira")
+  eq(ok, true)
+  eq(message:sub(1, #"jira: already signed in"), "jira: already signed in")
+  -- The bang on the command name, where Vim reads one: `:Docket login! jira`
+  -- passes `login!` as an argument, and the command refuses it.
+  eq(message:find(":Docket! login jira", 1, true) ~= nil, true, "the way through is named: " .. message)
+  eq(asked, {}, "no prompt")
+  eq(#calls, 1, "the state check alone")
+  ok = auth.login("jira", { force = true })
+  restore_prompts()
+  restore_acli()
+  eq(ok, true)
+  eq(#calls, 4, "the state check, the login, the state check after")
+  eq(calls[3].argv[4], "login", "force runs the login")
+  eq(calls[3].opts.stdin, "tok\n")
+end)
+
+test("auth: a machine with no opener reports it and the flow goes on", function()
+  local _, restore_acli = stub_acli({ signed_in = false, login = function(argv)
+    return done(argv, "")
+  end })
+  local _, restore_prompts = stub_prompts({ input = "x", secret = "tok", confirm = 1 })
+  vim.ui.open = function()
+    return nil, "vim.ui.open: no handler found (tried: xdg-open)"
+  end
+  local echoed, saved_echo = {}, vim.api.nvim_echo
+  vim.api.nvim_echo = function(chunks)
+    echoed[#echoed + 1] = { chunks[1][1], chunks[1][2] }
+  end
+  local ok = auth.login("jira")
+  vim.api.nvim_echo = saved_echo
+  restore_prompts()
+  restore_acli()
+  eq(ok, true, "the address is on screen to reach by hand")
+  eq(echoed, {
+    { "A token is minted at " .. jira.TOKEN_URL, nil },
+    { "vim.ui.open: no handler found (tried: xdg-open)", "WarningMsg" },
+  }, "the failure is highlighted as one")
+end)
+
+test("auth: an empty answer stops the flow with nothing run", function()
+  local calls, restore_acli = stub_acli({ signed_in = false, login = function()
+    error("no login should run")
+  end })
+  local _, restore_prompts = stub_prompts({ input = "" })
+  local ok, message = auth.login("jira")
+  eq(ok, false)
+  eq(message, "jira: no site given; nothing changed")
+  restore_prompts()
+  _, restore_prompts = stub_prompts({ input = "x", secret = "" })
+  ok, message = auth.login("jira")
+  restore_prompts()
+  restore_acli()
+  eq(ok, false)
+  eq(message, "jira: no token given; nothing changed")
+  eq(#calls, 2, "one state check per attempt and no login")
+  -- <C-c> at input() raises where inputsecret() answers "", and reads the same.
+  calls, restore_acli = stub_acli({ signed_in = false, login = function()
+    error("no login should run")
+  end })
+  _, restore_prompts = stub_prompts({})
+  vim.fn.input = function()
+    error("Keyboard interrupt")
+  end
+  ok, message = auth.login("jira")
+  restore_prompts()
+  restore_acli()
+  eq({ ok, message }, { false, "jira: no site given; nothing changed" })
+  eq(#calls, 1, "the state check alone")
+end)
+
+test("auth: a failed login reports the client's own message verbatim", function()
+  local _, restore_acli = stub_acli({ signed_in = false, login = function(argv)
+    return failed(argv, 1, "Error: 401 Unauthorized\nCheck the token and the email address.")
+  end })
+  local _, restore_prompts = stub_prompts({ input = "x", secret = "tok" })
+  local ok, message = auth.login("jira")
+  restore_prompts()
+  restore_acli()
+  eq(ok, false)
+  eq(message, "acli exited 1\nError: 401 Unauthorized\nCheck the token and the email address.")
+end)
+
+test("auth: a missing client and an unknown adapter are each refused with the reason", function()
+  local _, restore_acli = stub_wait(function(argv)
+    return failed(argv, spawn.MISSING, "ENOENT: no such file or directory")
+  end)
+  local ok, message = auth.login("jira")
+  local adapter, reason = auth.ready("jira")
+  restore_acli()
+  eq(ok, false)
+  eq(message:find("^jira: the client is not installed") ~= nil, true, message)
+  eq(adapter, nil)
+  eq(reason:find("not installed", 1, true) ~= nil, true, reason)
+  ok, message = auth.login("svn")
+  eq(ok, false)
+  eq(message:find("no adapter named svn", 1, true) ~= nil, true, message)
+end)
+
+test("auth: ready hands the adapter over when signed in and names the login command otherwise", function()
+  local _, restore_acli = stub_acli({ signed_in = false })
+  local adapter, reason = auth.ready("jira")
+  eq(adapter, nil)
+  eq(reason:find(":Docket login jira", 1, true) ~= nil, true, reason)
+  eq(reason:find("Not authenticated", 1, true) ~= nil, true, "the client's own output follows")
+  restore_acli()
+  _, restore_acli = stub_acli({ signed_in = true })
+  adapter, reason = auth.ready("jira")
+  restore_acli()
+  eq(adapter, jira)
+  eq(reason, nil)
+end)
+
+-- spawn.run holding every call it is given, in the order given, until the
+-- test hands one its result with `answer(index, result)`.
+local function stub_run_held()
+  local held, saved = {}, spawn.run
+  spawn.run = function(argv, opts, on_done)
+    held[#held + 1] = { argv = argv, opts = opts, on_done = on_done }
+  end
+  local function answer(index, result)
+    held[index].on_done(result)
+  end
+  return held, answer, function()
+    spawn.run = saved
+  end
+end
+
+test("auth: check answers what ready answers, handed on, and a name the registry refuses before it returns", function()
+  local answers = {}
+  for _, signed_in in ipairs({ true, false }) do
+    local _, restore_wait = stub_acli({ signed_in = signed_in })
+    local ready = { auth.ready("jira") }
+    restore_wait()
+    local _, restore_run = stub_run(checked({ signed_in = signed_in }, function(argv)
+      error("the check ran more than the state check: " .. table.concat(argv, " "))
+    end))
+    local _, restore_guard = stub_wait(function(argv)
+      error("check held the editor for " .. table.concat(argv, " "))
+    end)
+    local checked_answer
+    auth.check("jira", function(adapter, message)
+      checked_answer = { adapter, message }
+    end)
+    restore_guard()
+    restore_run()
+    answers[#answers + 1] = { ready = ready, check = checked_answer }
+  end
+  eq(answers[1].check, { jira }, "signed in, the adapter and no message")
+  eq(answers[2].check, answers[2].ready, "signed out, ready()'s message word for word")
+  eq(answers[2].check[2]:find("^jira: not signed in; run :Docket login jira") ~= nil, true, answers[2].check[2])
+  local unknown
+  auth.check("svn", function(adapter, message)
+    unknown = { adapter, message }
+  end)
+  eq(unknown, { nil, select(2, adapters.get("svn")) }, "answered before check returned")
+end)
+
+test("auth: a check answered after a login for its backend is refused, and one for another backend's login is not", function()
+  -- Holds the check's `auth status`, runs the login, and then answers it.
+  local function across(login_backend)
+    local held, answer, restore_run = stub_run_held()
+    local got
+    auth.check("jira", function(adapter, message)
+      got = { adapter, message }
+    end)
+    local _, restore_acli = stub_acli({ signed_in = true, glab = true, login = function(argv)
+      return done(argv, "")
+    end })
+    local _, restore_prompts = stub_prompts({ input = "x", secret = "tok" })
+    config.configure({ jira = { site = "example.atlassian.net" } })
+    local logged_in, message = auth.login(login_backend, { force = true })
+    config.configure({})
+    restore_prompts()
+    restore_acli()
+    eq(logged_in, true, message)
+    eq(got, nil, "the check is still out")
+    answer(1, done(held[1].argv, STATUS_SIGNED_IN))
+    restore_run()
+    return got
+  end
+  eq(across("jira"), {
+    nil,
+    "jira: a login ran while the state check was in flight, so its answer is not shown; refresh to ask again",
+  })
+  eq(across("glab"), { jira }, "a login to GitLab leaves Jira's answer standing")
+  glab.forget()
+end)
+
+-- the item buffer ---------------------------------------------------------------------------
+
+-- vim.notify replaced for a test, recording each message with its level, and
+-- put back after it.
+--
+-- nvim's own `log:` notice is left out. Where `~/.local/state/nvim` cannot be
+-- written -- the harness's sandbox is such a place -- nvim logs to `nvim.log`
+-- in the working directory instead and announces that through vim.notify, on
+-- a scheduled callback, the first time its Lua side logs; the wipe of a
+-- `bufhidden=wipe` buffer is what first makes it do so here. A test counting
+-- notices would otherwise count the environment.
+local function stub_notify()
+  local saved, notices = vim.notify, {}
+  vim.notify = function(message, level)
+    if tostring(message):find("^log: ") then
+      return
+    end
+    notices[#notices + 1] = { message = message, level = level }
+  end
+  return notices, function()
+    vim.notify = saved
+  end
+end
+
+-- A scratch buffer holding the ticket, as the read command leaves it.
+local function loaded_buffer(overrides)
+  local name = buffer.name("jira", (overrides or {}).id or "PROJ-142")
+  -- buffer.named rather than bufnr(), which matches its argument as a pattern.
+  local previous = buffer.named(name)
+  if previous then
+    vim.api.nvim_buf_delete(previous, { force = true })
+  end
+  local buf = vim.api.nvim_create_buf(false, false)
+  vim.api.nvim_buf_set_name(buf, name)
+  buffer.populate(buf, ticket(overrides), { now = NOW })
+  return buf
+end
+
+-- The region marks as `{ [id] = { first_row, end_row } }`, 0-based, end
+-- exclusive, with `invalid` where the mark is.
+local function ranges(buf)
+  local marks = vim.b[buf].docket.marks
+  local found = {}
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, buffer.REGIONS, 0, -1, { details = true })) do
+    local known = marks[tostring(mark[1])]
+    found[known.id] = { mark[2], mark[4].end_row, invalid = mark[4].invalid }
+  end
+  return found
+end
+
+test("buffer: the name carries the source, the project where the source numbers items within one, and the identifier, and parses back", function()
+  eq(buffer.name("jira", "PROJ-142"), "docket://jira/PROJ-142")
+  eq({ buffer.parse("docket://jira/PROJ-142") }, { "jira", "PROJ-142" }, "a Jira key names its project already")
+  eq(buffer.name("glab", "!482", "acme/payments"), "docket://glab/acme/payments/!482")
+  eq({ buffer.parse("docket://glab/acme/payments/!482") }, { "glab", "!482", "acme/payments" })
+  eq(
+    { buffer.parse(buffer.name("glab", "!482", "acme/sub/payments")) },
+    { "glab", "!482", "acme/sub/payments" },
+    "a subgroup's slashes stay in the project, and the identifier is the last part"
+  )
+  eq({ buffer.parse("docket://glab/!482") }, { "glab", "!482" }, "a name typed with no project parses to none")
+  eq(buffer.BY_PROJECT, { glab = true })
+  eq({ buffer.parse("/tmp/notes.txt") }, {})
+  eq({ buffer.parse("docket://jira") }, {})
+end)
+
+test("repo: the project path is read off origin's URL over scp, https and ssh, and a URL naming no host names none", function()
+  for _, url in ipairs({
+    "git@gitlab.example.test:acme/payments.git",
+    "https://gitlab.example.test/acme/payments.git/",
+    "https://gitlab.example.test/acme/payments",
+    "ssh://git@gitlab.example.test:2222/acme/payments.git",
+  }) do
+    eq(repo.project_of(url), "acme/payments", url)
+  end
+  eq(repo.project_of("git@gitlab.example.test:acme/sub/payments.git"), "acme/sub/payments", "a subgroup is part of the path")
+  eq(repo.project_of("/srv/git/x.git"), nil, "a local path names no host")
+  eq(repo.project_of("https://gitlab.example.test"), nil, "nor a project")
+  eq(repo.project_of("https://gitlab.example.test/"), nil)
+end)
+
+test("repo: the remotes are read off `git remote -v` by their fetch URLs, and the set-url remedy is made from an address's site", function()
+  eq(
+    repo.parse_remotes(table.concat({
+      "origin\tgit@github.com:me/payments.git (fetch)",
+      "origin\tgit@github.com:me/payments.git (push)",
+      "upstream\thttps://github.com/acme/payments.git (fetch)",
+      "upstream\tgit@github.com:acme/payments-push.git (push)",
+      "",
+    }, "\n")),
+    {
+      { name = "origin", url = "git@github.com:me/payments.git" },
+      { name = "upstream", url = "https://github.com/acme/payments.git" },
+    },
+    "each remote once, by the URL it fetches from"
+  )
+  eq(repo.parse_remotes(""), {}, "a clone with no remote")
+  eq(
+    repo.set_url_remedy("https://gitlab.example.test/gitlab/acme/payments/-/merge_requests/482", "gitlab/acme/payments"),
+    "; where origin spells this project another way -- an ssh URL without the instance's path prefix, or the path the project had before a move or a rename -- git remote set-url origin https://gitlab.example.test/gitlab/acme/payments.git makes the two agree"
+  )
+  eq(
+    repo.set_url_remedy("http://github.com/acme/payments/pull/12", "acme/payments"),
+    "; where origin spells this project another way -- an ssh URL without the instance's path prefix, or the path the project had before a move or a rename -- git remote set-url origin http://github.com/acme/payments.git makes the two agree",
+    "the address's own scheme"
+  )
+  eq(repo.set_url_remedy(nil, "acme/payments"), nil, "no address, no URL to point origin at")
+  eq(repo.set_url_remedy("acme/payments!482", "acme/payments"), nil, "nor from a reference with no site")
+end)
+
+test("buffer: the options that route :w, keep the buffer switchable and out of a session", function()
+  local buf = loaded_buffer()
+  eq(vim.bo[buf].buftype, "acwrite")
+  eq(vim.bo[buf].bufhidden, "hide")
+  eq(vim.bo[buf].buflisted, false)
+  eq(vim.bo[buf].swapfile, false)
+  eq(vim.bo[buf].filetype, "docket")
+  eq(vim.bo[buf].modified, false, "the read is not an edit")
+  -- The omnifunc names docket.complete, which is not part of this build, so
+  -- it is left unset: mini.completion would run it after every keystroke.
+  eq(vim.bo[buf].omnifunc, "")
+  eq(vim.b[buf].minicompletion_config, nil)
+  package.loaded[buffer.COMPLETE] = { omnifunc = function() end }
+  buffer.prepare(buf)
+  package.loaded[buffer.COMPLETE] = nil
+  eq(vim.bo[buf].omnifunc, buffer.OMNIFUNC, "set once the module loads")
+  eq(vim.b[buf].minicompletion_config, { fallback_action = "<C-x><C-o>" })
+
+  -- A buffer `:e docket://…` makes is listed, and the read unlists it. It
+  -- turns undo off for the lines it sets and back on after, so the edits
+  -- that follow the read can be undone.
+  local previous = buffer.named(buffer.name("jira", "PROJ-77"))
+  if previous then
+    vim.api.nvim_buf_delete(previous, { force = true })
+  end
+  local listed = vim.api.nvim_create_buf(true, false)
+  vim.api.nvim_buf_set_name(listed, buffer.name("jira", "PROJ-77"))
+  eq(vim.bo[listed].buflisted, true)
+  local undolevels = vim.bo[listed].undolevels
+  buffer.populate(listed, ticket({ id = "PROJ-77" }), { now = NOW })
+  eq(vim.bo[listed].buflisted, false)
+  eq(vim.bo[listed].undolevels, undolevels, "the read turns undo off for itself alone")
+  vim.api.nvim_buf_set_text(listed, 3, 0, 3, 0, { "X" })
+  vim.api.nvim_buf_call(listed, function()
+    vim.cmd("silent! undo")
+  end)
+  eq(vim.api.nvim_buf_get_lines(listed, 3, 4, false), { "The retry loop re-enters" }, "an edit after the read is undone")
+  vim.api.nvim_buf_delete(listed, { force = true })
+end)
+
+test("buffer: named finds the buffer of exactly that name, where bufnr would match a prefix", function()
+  local long = loaded_buffer({ id = "PAY-142" })
+  local short = loaded_buffer({ id = "PAY-1" })
+  eq(buffer.named(buffer.name("jira", "PAY-1")), short)
+  eq(buffer.named(buffer.name("jira", "PAY-142")), long)
+  eq(buffer.named(buffer.name("jira", "PAY-14")), nil)
+  eq(vim.fn.bufnr(buffer.name("jira", "PAY-14")) ~= -1, true, "bufnr answers a buffer for a name that none has")
+  vim.api.nvim_buf_delete(long, { force = true })
+  vim.api.nvim_buf_delete(short, { force = true })
+end)
+
+test("buffer: a line added below a region's last line by o, a linewise p or :put stays inside it, on the body, the last comment and a new comment", function()
+  local function added(command, row, region)
+    local buf = loaded_buffer()
+    vim.api.nvim_set_current_buf(buf)
+    vim.fn.setreg("a", "added\n", "l")
+    vim.api.nvim_win_set_cursor(0, { row, 0 })
+    vim.cmd(command)
+    local got = { buffer.current(buf)[region].lines, #buffer.plan(buf).calls }
+    vim.api.nvim_buf_delete(buf, { force = true })
+    return got
+  end
+  local body = { "The retry loop re-enters", "before the final attempt.", "added" }
+  local comment = { "Fix is in review.", "added" }
+  for _, command in ipairs({ "normal! oadded", 'normal! "ap', "put a" }) do
+    eq(added(command, 5, "body"), { body, 1 }, command .. " on the body's last line")
+    eq(added(command, 11, "10002"), { comment, 1 }, command .. " on the buffer's last line")
+  end
+end)
+
+test("buffer: undo right after the read leaves the buffer as the read left it", function()
+  local buf = loaded_buffer()
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  vim.api.nvim_buf_call(buf, function()
+    vim.cmd("silent! undo")
+  end)
+  eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), lines)
+  eq(vim.bo[buf].modified, false)
+  eq(ranges(buf).body, { 3, 5 })
+end)
+
+test("buffer: one mark per region, from column 0 of its first line to column 0 of the line after", function()
+  local buf = loaded_buffer()
+  eq(ranges(buf), { body = { 3, 5 }, ["10001"] = { 7, 8 }, ["10002"] = { 10, 11 } })
+  eq(vim.api.nvim_buf_line_count(buf), 11, "the last region ends the buffer, and its end mark sits past the last line")
+  local state = vim.b[buf].docket
+  eq(state.source, "jira")
+  eq(state.id, "PROJ-142")
+  eq(state.title, "Retry backoff drops the last attempt")
+  local kinds, edges = {}, {}
+  for _, known in pairs(state.marks) do
+    kinds[known.id] = { kind = known.kind, owner = known.owner }
+    edges[known.id] = vim.api.nvim_buf_get_extmark_by_id(buf, buffer.EDGES, known.edge, {})
+  end
+  eq(edges, { body = { 5, 0 }, ["10001"] = { 8, 0 }, ["10002"] = { 11, 0 } }, "each edge where its range ends")
+  eq(kinds, {
+    body = { kind = diff.BODY },
+    ["10001"] = { kind = diff.COMMENT, owner = "acc-ana" },
+    ["10002"] = { kind = diff.COMMENT, owner = "acc-me" },
+  })
+end)
+
+test("buffer: the snapshot is diff's contract, and the marks unedited yield no calls", function()
+  local buf = loaded_buffer()
+  local _, regions = render.render(ticket(), { now = NOW })
+  local expected = { regions = {} }
+  for _, region in ipairs(regions) do
+    expected.regions[region.id] = {
+      kind = region.kind,
+      owner = region.owner,
+      editable = region.editable,
+      reason = region.reason,
+      lines = region.lines,
+    }
+  end
+  expected.frame = { "PROJ-142   In Progress   me   updated 2h ago", "# Retry backoff drops the last attempt", "ana   3 days ago", "me   yesterday" }
+  eq(buffer.snapshot(buf), expected)
+  local _, frame = buffer.current(buf)
+  eq(frame, {
+    { row = 1, text = expected.frame[1] },
+    { row = 2, text = expected.frame[2] },
+    { row = 7, text = expected.frame[3] },
+    { row = 10, text = expected.frame[4] },
+  }, "the text outside the regions, by line")
+  eq(buffer.current(buf), {
+    body = { lines = { "The retry loop re-enters", "before the final attempt." } },
+    ["10001"] = { lines = { "Repros on staging." } },
+    ["10002"] = { lines = { "Fix is in review." } },
+  })
+  eq(buffer.plan(buf), { calls = {}, skipped = {}, refused = {} })
+end)
+
+test("buffer: typing at the start or the end of a region stays inside it", function()
+  local buf = loaded_buffer()
+  vim.api.nvim_buf_set_text(buf, 3, 0, 3, 0, { "X" })
+  local last = #vim.api.nvim_buf_get_lines(buf, 4, 5, false)[1]
+  vim.api.nvim_buf_set_text(buf, 4, last, 4, last, { "Y" })
+  eq(ranges(buf).body, { 3, 5 })
+  eq(buffer.current(buf).body.lines, { "XThe retry loop re-enters", "before the final attempt.Y" })
+  eq(#buffer.plan(buf).calls, 1, "one body update")
+  eq(buffer.plan(buf).calls[1].kind, diff.BODY_UPDATE)
+end)
+
+test("buffer: a line opened below a region stays inside, and so does text typed on the blank line after it", function()
+  local buf = loaded_buffer()
+  -- <CR> at the end of the body's last line
+  local last = #vim.api.nvim_buf_get_lines(buf, 4, 5, false)[1]
+  vim.api.nvim_buf_set_text(buf, 4, last, 4, last, { "", "" })
+  eq(ranges(buf).body, { 3, 6 })
+  eq(buffer.current(buf).body.lines, { "The retry loop re-enters", "before the final attempt.", "" })
+  eq(buffer.plan(buf), { calls = {}, skipped = {}, refused = {} }, "a trailing blank line is not an edit")
+  -- typing on the blank line that separates the body from the first author
+  -- line, where the end of the body's mark sits
+  vim.api.nvim_buf_set_text(buf, 6, 0, 6, 0, { "Z" })
+  eq(ranges(buf).body, { 3, 6 }, "the end is part-way along the line now")
+  eq(buffer.current(buf).body.lines, { "The retry loop re-enters", "before the final attempt.", "", "Z" })
+  eq(buffer.plan(buf).calls, {
+    { kind = diff.BODY_UPDATE, id = "body", text = "The retry loop re-enters\nbefore the final attempt.\n\nZ" },
+  })
+  -- the same at the end of the buffer, where the last region is
+  local n = vim.api.nvim_buf_line_count(buf)
+  last = #vim.api.nvim_buf_get_lines(buf, n - 1, n, false)[1]
+  vim.api.nvim_buf_set_text(buf, n - 1, last, n - 1, last, { "", "more" })
+  eq(buffer.current(buf)["10002"].lines, { "Fix is in review.", "more" })
+end)
+
+test("buffer: a line opened above a region joins it, which the trim makes harmless", function()
+  local buf = loaded_buffer()
+  vim.api.nvim_buf_set_text(buf, 3, 0, 3, 0, { "", "" })
+  eq(ranges(buf).body, { 3, 6 })
+  eq(buffer.plan(buf), { calls = {}, skipped = {}, refused = {} })
+end)
+
+test("buffer: deleting every line of a region leaves an empty range, which the save skips as emptied", function()
+  local buf = loaded_buffer()
+  local range = ranges(buf)["10001"]
+  vim.api.nvim_buf_set_lines(buf, range[1], range[2], false, {})
+  eq(ranges(buf)["10001"], { 7, 7 })
+  eq(buffer.current(buf)["10001"], { lines = {} })
+  local plan = buffer.plan(buf)
+  eq(plan.skipped, { { id = "10001", reason = "empty; nothing sent" } })
+  eq(plan.refused, {})
+  eq(ranges(buf)["10002"], { 9, 10 }, "the region after it moved up with the text")
+end)
+
+test("buffer: an edit in another account's region is refused before any call", function()
+  local buf = loaded_buffer()
+  vim.api.nvim_buf_set_text(buf, 7, 0, 7, 0, { "not mine: " })
+  local plan = buffer.plan(buf)
+  eq(plan.calls, {})
+  eq(#plan.refused, 1)
+  eq(plan.refused[1].id, "10001")
+  eq(plan.refused[1].reason, "written by ana; " .. render.WEB_HINT)
+end)
+
+test("buffer: the write command sends nothing, reports the plan, and leaves the text", function()
+  local buf = loaded_buffer()
+  vim.api.nvim_buf_set_text(buf, 3, 0, 3, 0, { "X" })
+  local notices, restore = stub_notify()
+  local sent, message = buffer.write(buf)
+  restore()
+  eq(sent, false)
+  eq(message, "the write path is not part of this build; 1 region(s) still hold their edits")
+  eq(#notices, 1)
+  eq(vim.api.nvim_buf_get_lines(buf, 3, 4, false), { "XThe retry loop re-enters" })
+  -- BufWriteCmd discards what the write command returns, so the notice is
+  -- the only report `:w` makes on a buffer nothing was read into.
+  local empty = vim.api.nvim_create_buf(false, false)
+  notices, restore = stub_notify()
+  sent, message = buffer.write(empty)
+  restore()
+  eq(sent, false)
+  eq(message, "nothing loaded in this buffer; :e reads the item")
+  eq(notices, { { message = message, level = vim.log.levels.WARN } })
+  -- Nothing edited: not a count of nothing.
+  buf = loaded_buffer()
+  notices, restore = stub_notify()
+  _, message = buffer.write(buf)
+  restore()
+  eq(message, "nothing changed")
+  -- A refusal empties the calls, so no count is stated beside it.
+  vim.api.nvim_buf_set_text(buf, 7, 0, 7, 0, { "not mine: " })
+  notices, restore = stub_notify()
+  _, message = buffer.write(buf)
+  restore()
+  eq(message, "10001: refused: written by ana; " .. render.WEB_HINT)
+end)
+
+test("buffer: a read populates again and the marks are made afresh", function()
+  local buf = loaded_buffer()
+  vim.api.nvim_buf_set_text(buf, 3, 0, 3, 0, { "X" })
+  buffer.populate(buf, ticket({ comments = {} }), { now = NOW })
+  eq(ranges(buf), { body = { 3, 5 } })
+  eq(#vim.api.nvim_buf_get_extmarks(buf, buffer.REGIONS, 0, -1, {}), 1, "no stale mark")
+  eq(#vim.api.nvim_buf_get_extmarks(buf, buffer.EDGES, 0, -1, {}), 1, "no stale edge")
+  eq(vim.bo[buf].modified, false)
+end)
+
+test("buffer: editable lines carry DocketEditable one mark per line, and the runs are highlighted", function()
+  local buf = loaded_buffer()
+  local lines, runs = {}, {}
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, buffer.DECOR, 0, -1, { details = true })) do
+    if mark[4].line_hl_group then
+      lines[#lines + 1] = mark[2]
+    else
+      runs[#runs + 1] = { mark[2], mark[3], mark[4].end_col, mark[4].hl_group }
+    end
+  end
+  table.sort(lines)
+  eq(lines, { 3, 4, 10 }, "the body's two lines and the own comment; not the other account's")
+  table.sort(runs, function(a, b)
+    return a[1] < b[1] or (a[1] == b[1] and a[2] < b[2])
+  end)
+  eq(runs, {
+    { 0, 11, 22, "DocketStatePending" },
+    { 0, 25, 27, "DocketUser" },
+    { 6, 0, 3, "DocketUser" },
+    { 9, 0, 2, "DocketUser" },
+  })
+end)
+
+test("highlight: a Jira state is coloured by its category alone, and a review's by its fixed word", function()
+  -- The category decides, whatever the name holds: `Renewal` carries `new`
+  -- and `Newly done` carries both `new` and `done`.
+  eq(highlight.state_group("Renewal", "indeterminate"), "DocketStatePending")
+  eq(highlight.state_group("Newly done", "indeterminate"), "DocketStatePending")
+  eq(highlight.state_group("In Progress", "indeterminate"), "DocketStatePending")
+  eq(highlight.state_group("To Do", "new"), "DocketStateOpen")
+  eq(highlight.state_group("x", "done"), "DocketStateClosed")
+  eq(highlight.state_group("Open", "undefined"), "DocketLabel", "a category outside Jira's three is not guessed at from the name")
+  -- With no category, which is every GitLab and GitHub state, the word is
+  -- matched whole and in any case; anything else is a label.
+  eq(highlight.state_group("opened"), "DocketStateOpen", "GitLab's")
+  eq(highlight.state_group("open"), "DocketStateOpen", "GitHub's, lower-cased")
+  eq(highlight.state_group("MERGED"), "DocketStateMerged")
+  eq(highlight.state_group("closed"), "DocketStateClosed")
+  for _, state in ipairs({ "draft", "locked", "In Progress", "Done", "Renewal", "reopened" }) do
+    eq(highlight.state_group(state), "DocketLabel", state)
+  end
+end)
+
+test("highlight: the groups link to Octo* when octo is loaded and defines them, else to built-ins", function()
+  eq(vim.tbl_map(function(group)
+    return group[1]
+  end, highlight.GROUPS), {
+    "DocketEditable",
+    "DocketUser",
+    "DocketLabel",
+    "DocketStateOpen",
+    "DocketStateClosed",
+    "DocketStateMerged",
+    "DocketStatePending",
+  })
+  local saved = package.loaded["octo"]
+  package.loaded["octo"] = nil
+  highlight.define()
+  local function link(name)
+    return vim.api.nvim_get_hl(0, { name = name, link = true }).link
+  end
+  eq(link("DocketEditable"), "NormalFloat")
+  eq(link("DocketUser"), "Identifier")
+  eq(link("DocketLabel"), "Label")
+  eq(link("DocketStateOpen"), "DiagnosticOk")
+  eq(link("DocketStateClosed"), "DiagnosticError")
+  eq(link("DocketStateMerged"), "Special")
+  eq(link("DocketStatePending"), "DiagnosticWarn")
+  package.loaded["octo"] = {}
+  vim.api.nvim_set_hl(0, "OctoEditable", { bg = "#222222" })
+  vim.api.nvim_set_hl(0, "OctoUser", { fg = "#aaaaaa" })
+  highlight.define()
+  eq(link("DocketEditable"), "OctoEditable")
+  eq(link("DocketUser"), "OctoUser")
+  eq(link("DocketLabel"), "Label", "a group octo has not defined is not linked to")
+  package.loaded["octo"] = saved
+  highlight.define()
+end)
+
+test("buffer: open reads the item through its adapter after the state check, and clears modified", function()
+  jira.forget()
+  local wait_calls, restore_wait = stub_acli({ signed_in = true })
+  local calls, restore_run = stub_run(function(argv)
+    if argv[4] == "search" then
+      return done(argv, { found("TIG-7", { assignee = user("acc-me", "Me Myself") }) })
+    end
+    return done(argv, view_payload())
+  end)
+  local notices, restore_notify = stub_notify()
+  local finished, ok, message
+  local adapter = auth.ready("jira")
+  local status_calls = #wait_calls
+  local buf = buffer.open("jira", "TIG-1001", function(read_ok, read_message)
+    finished, ok, message = true, read_ok, read_message
+  end, adapter)
+  vim.wait(1000, function()
+    return finished
+  end)
+  eq(#wait_calls, status_calls, "the adapter handed down means the read asks for the state no second time")
+  local first_ok, first_message = ok, message
+  finished = false
+  local second = buffer.open("jira", "TIG-1001", function()
+    finished = true
+  end)
+  vim.wait(1000, function()
+    return finished
+  end)
+  restore_run()
+  restore_wait()
+  restore_notify()
+  eq(first_ok, true, first_message)
+  eq(first_message, nil)
+  eq(notices, {})
+  eq(second, buf, "a second open is the same buffer")
+  eq(vim.api.nvim_get_current_buf(), buf)
+  eq(vim.api.nvim_buf_get_name(buf), "docket://jira/TIG-1001")
+  eq(calls[#calls].argv, argv_of("workitem", "view", "TIG-1001", "--fields", jira.VIEW_FIELDS, "--json"))
+  eq(vim.api.nvim_buf_get_lines(buf, 0, 2, false)[2], "# Retry backoff drops the last attempt")
+  eq(vim.bo[buf].modified, false)
+  eq(vim.b[buf].docket.id, "TIG-1001")
+  eq(vim.tbl_count(vim.b[buf].docket.snapshot.regions), 3)
+  vim.api.nvim_buf_delete(buf, { force = true })
+end)
+
+test("buffer: a read on a backend not signed in reports the login command and reads nothing", function()
+  local _, restore_wait = stub_acli({ signed_in = false })
+  local calls, restore_run = stub_run(function(argv)
+    return done(argv, {})
+  end)
+  local notices, restore_notify = stub_notify()
+  local buf = vim.api.nvim_create_buf(false, false)
+  vim.api.nvim_buf_set_name(buf, buffer.name("jira", "PROJ-9"))
+  local finished, ok, message
+  buffer.read(buf, function(read_ok, read_message)
+    finished, ok, message = true, read_ok, read_message
+  end)
+  vim.wait(200, function()
+    return finished
+  end)
+  restore_run()
+  restore_wait()
+  restore_notify()
+  eq(ok, false)
+  eq(message:find(":Docket login jira", 1, true) ~= nil, true, message)
+  eq(#calls, 0, "no client call after the state check")
+  eq(#notices, 1)
+  eq(notices[1].level, vim.log.levels.ERROR)
+  eq(vim.bo[buf].buftype, "acwrite", "the options are set even so")
+end)
+
+test("buffer: a buffer holding unsaved edits is not read into, whether they came before the read or while the client ran", function()
+  jira.forget()
+  local name = buffer.name("jira", "TIG-1001")
+  local previous = buffer.named(name)
+  if previous then
+    vim.api.nvim_buf_delete(previous, { force = true })
+  end
+  local _, restore_wait = stub_acli({ signed_in = true })
+  local runs, restore_run = stub_run(function(argv)
+    if argv[4] == "search" then
+      return done(argv, { found("TIG-7", { assignee = user("acc-me", "Me Myself") }) })
+    end
+    return done(argv, view_payload())
+  end)
+  local notices, restore_notify = stub_notify()
+  local answers = {}
+  local function record(ok, message)
+    answers[#answers + 1] = { ok, message }
+  end
+  local refusal = "docket://jira/TIG-1001 holds unsaved edits, so the item is not read into it; :e! discards them and reads it"
+
+  local buf = buffer.open("jira", "TIG-1001", record)
+  vim.wait(1000, function()
+    return #answers == 1
+  end)
+  vim.api.nvim_buf_set_text(buf, 3, 0, 3, 0, { "X" })
+  local asked = #runs
+  eq(buffer.open("jira", "TIG-1001", record), buf)
+  eq(answers[2], { false, refusal }, "refused at once")
+  eq(#runs, asked, "the client is not asked for the item")
+  eq(vim.api.nvim_buf_get_lines(buf, 3, 4, false), { "XThe retry loop re-enters" }, "the edit is kept")
+  eq(vim.bo[buf].modified, true)
+  restore_run()
+  vim.api.nvim_buf_delete(buf, { force = true })
+
+  -- The edit is typed while the client runs: the answer lands on a buffer
+  -- that has changed since the read was asked for.
+  local pending, saved = {}, spawn.run
+  spawn.run = function(argv, _, on_done)
+    pending[#pending + 1] = { argv = argv, on_done = on_done }
+  end
+  buf = buffer.open("jira", "TIG-1001", record)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "typed while the client ran" })
+  while #pending > 0 do
+    local call = table.remove(pending, 1)
+    call.on_done(done(call.argv, call.argv[4] == "search" and { found("TIG-7", { assignee = user("acc-me", "Me Myself") }) } or view_payload()))
+  end
+  spawn.run = saved
+  vim.wait(1000, function()
+    return #answers == 3
+  end)
+  restore_notify()
+  restore_wait()
+  eq(answers[1], { true, nil })
+  eq(answers[3], { false, refusal })
+  eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), { "typed while the client ran" })
+  eq(vim.bo[buf].modified, true)
+  eq(vim.b[buf].docket, nil, "nothing was loaded over the edit")
+  eq(notices, { { message = refusal, level = vim.log.levels.WARN }, { message = refusal, level = vim.log.levels.WARN } })
+  vim.api.nvim_buf_delete(buf, { force = true })
+end)
+
+-- the commands ----------------------------------------------------------------------------
+
+test("commands: an identifier's shape names its adapter", function()
+  eq({ commands.source_of("PROJ-142") }, { "jira" })
+  eq({ commands.source_of("A1-7") }, { "jira" })
+  eq({ commands.source_of("!482") }, { "glab" })
+  eq({ commands.source_of("#12") }, { "gh" })
+  local source, err = commands.source_of("proj-142")
+  eq(source, nil)
+  eq(err:find("PROJ-142", 1, true) ~= nil, true, err)
+  eq(err:find("#12", 1, true) ~= nil, true, "the refusal names every shape: " .. err)
+  eq(commands.source_of("PROJ-142abc"), nil)
+end)
+
+test("commands: the launcher's warning is printed beside the path, never dropped", function()
+  local base = { path = "/w/PROJ-1-x", branch = "PROJ-1-x", window = "PROJ-1-x" }
+  local message, level = commands.describe(vim.tbl_extend("force", base, { how = "tmux", editor = "PROJ-1-x", shell = "PROJ-1-x-sh" }))
+  eq(message, "worktree /w/PROJ-1-x on PROJ-1-x\ntmux windows PROJ-1-x and PROJ-1-x-sh")
+  eq(level, vim.log.levels.INFO)
+  message, level = commands.describe(vim.tbl_extend("force", base, {
+    how = "tmux",
+    editor = "PROJ-1-x",
+    shell = nil,
+    warning = "tmux exited 1\ncan't find window: =PROJ-1-x-sh",
+  }))
+  eq(message:find("worktree /w/PROJ-1-x", 1, true), 1)
+  eq(message:find("the companion window closed", 1, true) ~= nil, true, message)
+  eq(message:find("warning: tmux exited 1\ncan't find window: =PROJ-1-x-sh", 1, true) ~= nil, true, message)
+  eq(level, vim.log.levels.WARN)
+  message, level = commands.describe(vim.tbl_extend("force", base, {
+    how = "tab",
+    script = "tmux new-window -S -n 'PROJ-1-x' -c '/w/PROJ-1-x' 'nvim'",
+    warning = "E492: Not an editor command: Docket review !4",
+  }))
+  eq(message:find("a tab of this editor is at the worktree", 1, true) ~= nil, true, message)
+  eq(message:find("tmux new-window -S -n 'PROJ-1-x'", 1, true) ~= nil, true, "the script follows the path")
+  eq(message:find("warning: E492", 1, true) ~= nil, true, message)
+  eq(level, vim.log.levels.WARN)
+end)
+
+test("commands: the review mode reports that it is not built, and a malformed argument list is refused", function()
+  local notices, restore = stub_notify()
+  commands.run({ fargs = { "review", "!4" }, bang = false })
+  commands.run({ fargs = { "PROJ-1", "PROJ-2" }, bang = false })
+  commands.run({ fargs = { "lower-1" }, bang = false })
+  restore()
+  eq(notices[1].message, commands.NOT_BUILT.review)
+  eq(notices[1].level, vim.log.levels.WARN)
+  eq(notices[2].message:find("one identifier", 1, true) ~= nil, true, notices[2].message)
+  eq(notices[3].level, vim.log.levels.ERROR)
+  eq(#notices, 3)
+end)
+
+test("commands: an item on a backend not signed in names the login command", function()
+  local _, restore_wait = stub_acli({ signed_in = false })
+  local notices, restore_notify = stub_notify()
+  local buf = commands.item("PROJ-142")
+  restore_notify()
+  restore_wait()
+  eq(buf, nil)
+  eq(#notices, 1)
+  eq(notices[1].message:find("jira: not signed in; run :Docket login jira", 1, true), 1, notices[1].message)
+end)
+
+test("commands: an item asks the client for the state once, and a backend not signed in is one notice", function()
+  jira.forget()
+  local wait_calls, restore_wait = stub_acli({ signed_in = true })
+  local run_calls, restore_run = stub_run(function(argv)
+    if argv[4] == "search" then
+      return done(argv, { found("TIG-7", { assignee = user("acc-me", "Me Myself") }) })
+    end
+    return done(argv, view_payload())
+  end)
+  local notices, restore_notify = stub_notify()
+  local buf = commands.item("TIG-1001")
+  vim.wait(1000, function()
+    return vim.b[buf].docket ~= nil
+  end)
+  commands.item("!482")
+  restore_notify()
+  restore_run()
+  restore_wait()
+  local status = 0
+  for _, call in ipairs(wait_calls) do
+    if call.argv[4] == "status" then
+      status = status + 1
+    end
+  end
+  eq(status, 1, "one auth status for the open")
+  eq(run_calls[#run_calls].argv[4], "view")
+  eq(notices, {
+    { message = "glab: not signed in; run :Docket login glab\nglab exited 1\nx glab: no token", level = vim.log.levels.ERROR },
+  })
+  eq(adapters.get("gh"), require("docket.adapters.gh"), "the registry loads and verifies the GitHub adapter")
+  vim.api.nvim_buf_delete(buf, { force = true })
+end)
+
+test("commands: the launcher from an item buffer takes a ticket and refuses a merge request", function()
+  local buf = vim.api.nvim_create_buf(false, false)
+  vim.b[buf].docket = { source = "glab", id = "!482", title = "Bump the pin" }
+  local notices, restore = stub_notify()
+  commands.work(buf)
+  commands.work(vim.api.nvim_create_buf(false, false))
+  restore()
+  eq(notices, {
+    { message = "!482 is not a ticket; the launcher takes a ticket here", level = vim.log.levels.ERROR },
+    { message = "nothing loaded in this buffer; :e reads the item", level = vim.log.levels.ERROR },
+  })
+end)
+
+test("commands: login names the backend given, or Jira and the remote's client", function()
+  local asked = {}
+  local saved_login = auth.login
+  auth.login = function(name, opts)
+    asked[#asked + 1] = { name, opts.force }
+    return true, name .. ": signed in"
+  end
+  local saved_root, saved_url = repo.root, repo.remote_url
+  repo.root = function()
+    return { root = "/w/repo", bare = true }
+  end
+  repo.remote_url = function()
+    return "git@gitlab.example.test:acme/payments.git"
+  end
+  local notices, restore_notify = stub_notify()
+  commands.run({ fargs = { "login", "jira" }, bang = true })
+  commands.run({ fargs = { "login" }, bang = false })
+  restore_notify()
+  auth.login, repo.root, repo.remote_url = saved_login, saved_root, saved_url
+  eq(asked, { { "jira", true }, { "jira", false }, { "glab", false } })
+  eq(#notices, 3)
+  eq(notices[1].level, vim.log.levels.INFO)
+  local _, restore_wait = stub_wait(function(argv)
+    return { argv = argv, ok = false, code = 128, stdout = "", stderr = "fatal: not a git repository\n", timed_out = false }
+  end)
+  local outside = commands.backends("/w/outside")
+  restore_wait()
+  eq(outside, { "jira" }, "outside a clone, Jira alone")
+end)
+
+test("commands: gx opens the adapter's url, and completion offers the subcommands then the backends", function()
+  local _, restore_wait = stub_acli({ signed_in = true })
+  jira.auth_status()
+  restore_wait()
+  local asked, restore_prompts = stub_prompts({})
+  local buf = loaded_buffer()
+  commands.browse(buf)
+  restore_prompts()
+  eq(asked, { "open https://example.atlassian.net/browse/PROJ-142" })
+  local saved_open = vim.ui.open
+  vim.ui.open = function()
+    return nil, "vim.ui.open: no handler found"
+  end
+  local notices, restore_notify = stub_notify()
+  commands.browse(buf)
+  restore_notify()
+  vim.ui.open = saved_open
+  eq(notices, { { message = "vim.ui.open: no handler found", level = vim.log.levels.WARN } })
+  eq(commands.complete("", "Docket "), { "login", "review" })
+  eq(commands.complete("r", "Docket r"), { "review" })
+  eq(commands.complete("", "Docket login "), row.SOURCES)
+  eq(commands.complete("g", "Docket! login g"), { "glab", "gh" })
+end)
+
+-- the in-flight join ----------------------------------------------------------------------
+
+-- A join of its own, with every request it starts and every answer each
+-- waiter receives recorded. `accept` records the key and the values it is
+-- given, and runs the function `raise` names when that is set.
+local function recorded_flight(refusal)
+  local log = { requests = {}, accepted = {}, order = {} }
+  local joined = flight.new({
+    refusal = refusal or "refused",
+    accept = function(key, ...)
+      log.order[#log.order + 1] = "accept"
+      if log.raise then
+        error(log.raise, 0)
+      end
+      log.accepted[#log.accepted + 1] = { key, ... }
+    end,
+  })
+  log.request = function(settle)
+    log.requests[#log.requests + 1] = settle
+  end
+  log.waiter = function(name)
+    log[name] = {}
+    return function(...)
+      log.order[#log.order + 1] = name
+      log[name][#log[name] + 1] = { n = select("#", ...), ... }
+    end
+  end
+  return joined, log
+end
+
+test("flight: a second caller joins the request in flight, and every waiter gets every value once, after accept", function()
+  local joined, log = recorded_flight()
+  eq(joined:pending("k"), false)
+  eq(joined:join("k", log.request, log.waiter("first")), true, "the first caller starts the request")
+  eq(joined:join("k", log.request, log.waiter("second")), false, "the second joins it")
+  eq(#log.requests, 1)
+  eq(joined:pending("k"), true)
+  eq(joined:join("other", log.request, log.waiter("elsewhere")), true, "another key is a request of its own")
+  eq(#log.requests, 2)
+  -- A nil in the middle and one at the end are values like any other.
+  log.requests[1]({ "row" }, nil, "a warning", nil)
+  eq(log.first, { { { "row" }, nil, "a warning", nil, n = 4 } })
+  eq(log.second, log.first)
+  eq(log.accepted, { { "k", { "row" }, nil, "a warning" } })
+  eq(log.order, { "accept", "first", "second" }, "what accept keeps is in place before any waiter sees it")
+  eq(joined:pending("k"), false, "the answer frees the key")
+  eq(joined:pending("other"), true)
+  eq(joined:join("k", log.request, log.waiter("third")), true, "and the next caller starts afresh")
+  eq(#log.requests, 3)
+end)
+
+test("flight: a settle called twice answers once", function()
+  local joined, log = recorded_flight()
+  joined:join("k", log.request, log.waiter("first"))
+  log.requests[1]("once")
+  log.requests[1]("twice")
+  eq(log.first, { { "once", n = 1 } })
+  eq(log.accepted, { { "k", "once" } }, "and accept is not run again")
+  -- The second settle of a request is no answer to the one after it.
+  joined:join("k", log.request, log.waiter("later"))
+  log.requests[1]("late")
+  eq(log.later, {}, "a request's settle answers its own waiters alone")
+  eq(joined:pending("k"), true)
+end)
+
+test("flight: an answer landing after an invalidate is refused, and accept never sees it", function()
+  local joined, log = recorded_flight(function(key)
+    return key .. ": moved on"
+  end)
+  joined:join("k", log.request, log.waiter("first"))
+  joined:join("k", log.request, log.waiter("second"))
+  joined:invalidate("k")
+  eq(joined:pending("k"), false, "the request in flight is not one a later caller would join")
+  log.requests[1]({ "stale row" })
+  eq(log.first, { { nil, "k: moved on", n = 2 } }, "the refusal is a function of the key")
+  eq(log.second, log.first, "and it reaches every caller that joined the stale request")
+  eq(log.accepted, {})
+  -- An invalidate with nothing in flight refuses nothing: the next request
+  -- starts in the generation it moved to.
+  joined:invalidate("idle")
+  joined:join("idle", log.request, log.waiter("idle"))
+  log.requests[2]("fresh")
+  eq(log.idle, { { "fresh", n = 1 } })
+  local plain, plain_log = recorded_flight("a login ran")
+  plain:join("k", plain_log.request, plain_log.waiter("first"))
+  plain:invalidate("k")
+  plain_log.requests[1]("stale")
+  eq(plain_log.first, { { nil, "a login ran", n = 2 } }, "or a string")
+end)
+
+test("flight: a caller after an invalidate starts its own request, and the stale settle leaves that one's slot alone", function()
+  local joined, log = recorded_flight()
+  joined:join("k", log.request, log.waiter("stale"))
+  joined:invalidate("k")
+  eq(joined:join("k", log.request, log.waiter("fresh")), true, "rather than waiting out a request only to be refused")
+  eq(joined:join("k", log.request, log.waiter("joined")), false, "and the next caller joins the fresh one")
+  eq(#log.requests, 2)
+  log.requests[1]("old")
+  eq(log.stale, { { nil, "refused", n = 2 } })
+  eq({ log.fresh, log.joined }, { {}, {} }, "the fresh request's callers wait for its own answer")
+  eq(joined:pending("k"), true, "the stale settle did not clear the fresh request's slot")
+  eq(joined:join("k", log.request, log.waiter("later")), false, "so a later caller still joins it")
+  eq(#log.requests, 2)
+  log.requests[2]("new")
+  for _, name in ipairs({ "fresh", "joined", "later" }) do
+    eq(log[name], { { "new", n = 1 } }, name)
+  end
+  eq(log.stale, { { nil, "refused", n = 2 } }, "and the stale caller is not answered again")
+  eq(log.accepted, { { "k", "new" } })
+  eq(joined:pending("k"), false)
+end)
+
+test("flight: invalidate_all moves on every key with a request in flight", function()
+  local joined, log = recorded_flight()
+  joined:join("a", log.request, log.waiter("a"))
+  joined:join("b", log.request, log.waiter("b"))
+  joined:invalidate_all()
+  eq({ joined:pending("a"), joined:pending("b") }, { false, false })
+  log.requests[1]("rows")
+  log.requests[2]("rows")
+  eq({ log.a, log.b }, { { { nil, "refused", n = 2 } }, { { nil, "refused", n = 2 } } })
+  eq(log.accepted, {})
+end)
+
+test("flight: a request that raises answers its waiters and frees the slot; one that raises after answering is reported once", function()
+  local joined, log = recorded_flight()
+  local started = joined:join("k", function()
+    error("no client")
+  end, log.waiter("first"))
+  eq(started, true)
+  eq(log.first[1].n, 2)
+  eq(log.first[1][1], nil)
+  eq(log.first[1][2]:find("no client", 1, true) ~= nil, true, log.first[1][2])
+  -- The error is the answer, and accept is handed it as one: the cache and
+  -- every whoami() keep nothing when the first value is nil.
+  eq(log.accepted, { { "k", nil, log.first[1][2] } })
+  eq(joined:pending("k"), false, "the slot is free, where otherwise every later caller would join a request that never answers")
+  eq(joined:join("k", log.request, log.waiter("next")), true)
+
+  local notices, restore = stub_notify()
+  joined:join("late", function(settle)
+    settle("answered")
+    error("raised after answering", 0)
+  end, log.waiter("late"))
+  vim.wait(1000, function()
+    return #notices > 0
+  end)
+  restore()
+  eq(log.late, { { "answered", n = 1 } }, "the waiter keeps the answer and is not answered again")
+  eq(notices, { { message = "raised after answering", level = vim.log.levels.ERROR } }, "there is nobody left to hand the error to")
+end)
+
+test("flight: an accept that raises gives every waiter nil and what it raised", function()
+  local joined, log = recorded_flight()
+  log.raise = "disk full"
+  joined:join("k", log.request, log.waiter("first"))
+  joined:join("k", log.request, log.waiter("second"))
+  log.requests[1]({ "row" })
+  eq(log.first, { { nil, "disk full", n = 2 } })
+  eq(log.second, log.first)
+  eq(joined:pending("k"), false)
+end)
+
+test("flight: a waiter that raises is reported, and the waiters behind it are still answered", function()
+  local joined, log = recorded_flight()
+  joined:join("k", log.request, function()
+    error("the first caller raised", 0)
+  end)
+  joined:join("k", log.request, log.waiter("second"))
+  -- The settle runs where a spawn callback would, in a fast event, where
+  -- vim.notify is refused; the report is scheduled out of it. The stand-in
+  -- records where it was called from, since it would not refuse itself.
+  local notices, saved = {}, vim.notify
+  vim.notify = function(message, level)
+    -- nvim's own notice, which stub_notify leaves out for the reason it states.
+    if not tostring(message):find("^log: ") then
+      notices[#notices + 1] = { message = message, level = level, fast = vim.in_fast_event() }
+    end
+  end
+  local timer = vim.uv.new_timer()
+  timer:start(0, 0, function()
+    timer:close()
+    log.requests[1]("answer")
+  end)
+  vim.wait(1000, function()
+    return #notices > 0
+  end)
+  vim.notify = saved
+  eq(log.second, { { "answer", n = 1 } })
+  eq(notices, { { message = "the first caller raised", level = vim.log.levels.ERROR, fast = false } })
+end)
+
+-- the cache -------------------------------------------------------------------------------
+
+-- Points the cache at a directory of its own for one test, and hands back the
+-- function that restores the configured one and removes the directory.
+local function scratch_cache()
+  local saved = config.options.cache_dir
+  local dir = vim.fn.tempname()
+  config.options.cache_dir = dir
+  return dir, function()
+    config.options.cache_dir = saved
+    vim.fn.delete(dir, "rf")
+  end
+end
+
+local ROWS = {
+  row.new({ source = "jira", id = "PAY-9", state = "To Do", title = "Nine" }),
+  row.new({ source = "jira", id = "PAY-10", state = "In Progress", title = "Ten" }),
+}
+
+test("cache: the key is the adapter, the clone a client resolves in, and the query", function()
+  eq(cache.key("jira", "project IN (PAY)" .. OPEN), "jira project IN (PAY)" .. OPEN)
+  eq(cache.key("glab", { "mr", "list", "--reviewer=@me" }), "glab mr list --reviewer=@me")
+  eq(cache.key("glab", { "mr", "list", "--reviewer=@me" }, "/w/payments"), "glab /w/payments mr list --reviewer=@me")
+  eq(
+    cache.key("glab", { "mr", "list" }, "/w/a") ~= cache.key("glab", { "mr", "list" }, "/w/b"),
+    true,
+    "one query in two clones is two keys, because the client reads the project from the working directory"
+  )
+  eq(cache.name("a") ~= cache.name("b"), true, "two keys, two files")
+  eq(cache.name("a"), "0002b60600000061", "a key's file is the same in every release, so an upgrade does not orphan the cache")
+  eq(#cache.name("jira project IN (PAY)" .. OPEN), 16)
+  eq(cache.path("k"), config.options.cache_dir .. "/" .. cache.name("k") .. ".json")
+end)
+
+test("cache: rows round-trip with the moment they were written, under a private mode", function()
+  local dir, restore = scratch_cache()
+  local key = cache.key("jira", "project IN (PAY)" .. OPEN)
+  eq(cache.read(key), nil, "a miss before any write")
+  eq(cache.write(key, ROWS, 1000), true)
+  eq(cache.read(key), { rows = ROWS, written = 1000 })
+  -- An adapter adds fields beyond the ones row.new returns -- `updated` on
+  -- every row, a merge request's `url` -- and read() holds each entry to
+  -- row.new rather than replacing it with what row.new built.
+  local extra = vim.tbl_extend("error", ROWS[1], { updated = "2024-05-03T10:00:00.000+0000", url = "https://jira.example.test/browse/PAY-9" })
+  eq(cache.write(key, { extra }, 1500), true)
+  eq(cache.read(key), { rows = { extra }, written = 1500 }, "what the adapter added beyond the rendered fields comes back")
+  eq(cache.write(key, {}, 2000), true)
+  eq(cache.read(key), { rows = {}, written = 2000 }, "an empty section is cached too")
+  local file = vim.uv.fs_stat(cache.path(key))
+  eq(bit.band(file.mode, 511), 384, "0600")
+  eq(bit.band(vim.uv.fs_stat(dir).mode, 511), 448, "0700")
+  local decoded = vim.json.decode(table.concat(vim.fn.readfile(cache.path(key)), "\n"))
+  eq(decoded.key, key, "the key is inside the file")
+  eq(#vim.fn.glob(dir .. "/*.tmp", false, true), 0, "no temporary file left")
+  cache.drop(key)
+  eq(cache.read(key), nil, "dropped")
+  restore()
+end)
+
+test("cache: an absent directory, one that cannot be written, and a file that is not JSON are each a miss", function()
+  local dir, restore = scratch_cache()
+  local key = "jira q"
+  config.options.cache_dir = dir .. "/absent/deeper"
+  eq(cache.read(key), nil, "absent directory")
+  eq(cache.write(key, ROWS), true, "the directory is made on the first write")
+  eq(cache.read(key).rows, ROWS)
+
+  vim.fn.mkdir(dir .. "/sealed", "p")
+  vim.uv.fs_chmod(dir .. "/sealed", tonumber("555", 8))
+  config.options.cache_dir = dir .. "/sealed/inside"
+  eq(cache.write(key, ROWS), false, "a directory that cannot be made")
+  config.options.cache_dir = dir .. "/sealed"
+  eq(cache.write(key, ROWS), false, "a directory that cannot be written into")
+  eq(cache.read(key), nil)
+  vim.uv.fs_chmod(dir .. "/sealed", tonumber("755", 8))
+
+  vim.fn.mkdir(dir, "p")
+  vim.fn.writefile({ "" }, dir .. "/afile")
+  config.options.cache_dir = dir .. "/afile"
+  eq(cache.write(key, ROWS), false, "a cache directory that exists as a file")
+  eq(cache.read(key), nil)
+
+  config.options.cache_dir = dir
+  vim.fn.mkdir(dir, "p")
+  vim.fn.writefile({ "not json" }, cache.path(key))
+  eq(cache.read(key), nil, "not JSON")
+  vim.fn.writefile({ "[1, 2]" }, cache.path(key))
+  eq(cache.read(key), nil, "JSON of the wrong shape")
+  vim.fn.writefile({ vim.json.encode({ key = "jira other", written = 1, rows = ROWS }) }, cache.path(key))
+  eq(cache.read(key), nil, "another key's rows under this key's name")
+  vim.fn.writefile({ vim.json.encode({ key = key, written = "1", rows = ROWS }) }, cache.path(key))
+  eq(cache.read(key), nil, "a written moment that is not a number")
+  vim.fn.writefile({ '{"key":"jira q","written":1,"rows":{"PAY-1":{"id":"PAY-1"}}}' }, cache.path(key))
+  eq(cache.read(key), nil, "rows as an object, which ipairs reads as none at all")
+  vim.fn.writefile({ vim.json.encode({ key = key, written = 1, rows = { { source = "jira", id = "PAY-1" } } }) }, cache.path(key))
+  eq(cache.read(key), nil, "a row with none of the fields the dashboard renders")
+  local unknown = vim.tbl_extend("force", ROWS[1], { source = "bitbucket" })
+  vim.fn.writefile({ vim.json.encode({ key = key, written = 1, rows = { ROWS[1], unknown } }) }, cache.path(key))
+  eq(cache.read(key), nil, "one row from no adapter, which would kill the render inside :Docket")
+  cache.clear()
+  eq(#vim.fn.glob(dir .. "/*.json", false, true), 0, "clear removes every row file")
+  restore()
+end)
+
+test("cache: a write that stops part way is reported and leaves nothing behind", function()
+  local dir, restore = scratch_cache()
+  local key = "jira q"
+  local saved = vim.uv.fs_write
+  -- A file system that fills part way through: fs_write answers with the
+  -- bytes it took, and the rest of the rows never reach the file.
+  vim.uv.fs_write = function(fd, data)
+    return saved(fd, data:sub(1, math.floor(#data / 2)))
+  end
+  local ok = cache.write(key, ROWS)
+  vim.uv.fs_write = saved
+  eq(ok, false)
+  eq(cache.read(key), nil, "the short file is not renamed into place")
+  eq(#vim.fn.glob(dir .. "/*.tmp", false, true), 0, "and it is not left beside the name it would have taken")
+
+  local saved_rename = vim.uv.fs_rename
+  vim.uv.fs_rename = function()
+    return nil
+  end
+  ok = cache.write(key, ROWS)
+  vim.uv.fs_rename = saved_rename
+  eq(ok, false, "a rename that fails is not a write either")
+  eq(#vim.fn.glob(dir .. "/*.tmp", false, true), 0, "and the file it wrote is removed")
+
+  eq(cache.write(key, ROWS), true, "the next write answers as usual")
+  eq(cache.read(key).rows, ROWS)
+  restore()
+end)
+
+test("cache: one request in flight per key, and a second ask joins the first", function()
+  local _, restore = scratch_cache()
+  local key = "jira q"
+  local asked, deliver = 0, nil
+  local function request(hand)
+    asked = asked + 1
+    deliver = hand
+  end
+  local got = {}
+  local function waiter(name)
+    return function(rows, err, warning)
+      got[#got + 1] = { name, rows, err, warning }
+    end
+  end
+  eq(cache.fetch(key, request, waiter("first")), true)
+  eq(cache.fetch(key, request, waiter("second")), false, "the second ask joins")
+  eq(asked, 1, "one request")
+  eq(cache.pending(key), true)
+  eq(got, {}, "nothing delivered yet")
+  deliver(ROWS, nil, "one row was left out")
+  eq(cache.pending(key), false)
+  eq(got, { { "first", ROWS, nil, "one row was left out" }, { "second", ROWS, nil, "one row was left out" } })
+  deliver(ROWS, nil, "one row was left out")
+  eq(#got, 2, "an adapter that hands its rows over twice answers each waiter once")
+  eq(cache.read(key).rows, ROWS, "a successful answer is written")
+  eq(cache.fetch(key, request, waiter("third")), true, "after the answer, a new request starts")
+  eq(asked, 2)
+  deliver(nil, "acli exited 1")
+  eq(got[3], { "third", nil, "acli exited 1" })
+  eq(cache.read(key).rows, ROWS, "a failed answer leaves the cached rows")
+  eq(cache.fetch("jira other", function()
+    error("no client")
+  end, waiter("raised")), true)
+  eq(got[4][1], "raised")
+  eq(got[4][2], nil)
+  eq(got[4][3]:find("no client", 1, true) ~= nil, true, got[4][3])
+  eq(cache.pending("jira other"), false, "a request that raised frees its key")
+  restore()
+end)
+
+test("cache: a waiter that raises is reported, and the rows are still written and reach the waiters behind it", function()
+  local _, restore = scratch_cache()
+  local key = "jira q"
+  local deliver
+  cache.fetch(key, function(hand)
+    deliver = hand
+  end, function()
+    error("a section's paint raised", 0)
+  end)
+  local got
+  cache.fetch(key, function()
+    error("the second ask joins; its request is never called")
+  end, function(rows)
+    got = rows
+  end)
+  local notices, restore_notify = stub_notify()
+  deliver(ROWS)
+  vim.wait(1000, function()
+    return #notices > 0
+  end)
+  restore_notify()
+  eq(got, ROWS)
+  eq(cache.read(key).rows, ROWS)
+  eq(notices, { { message = "a section's paint raised", level = vim.log.levels.ERROR } })
+  eq(cache.pending(key), false)
+  restore()
+end)
+
+test("cache: a caller arriving after a drop asks the client itself rather than joining the abandoned request", function()
+  local _, restore = scratch_cache()
+  local key = "jira q"
+  local hands = {}
+  local function request(hand)
+    hands[#hands + 1] = hand
+  end
+  local got = {}
+  local function waiter(name)
+    return function(rows, err)
+      got[#got + 1] = { name, rows, err }
+    end
+  end
+  eq(cache.fetch(key, request, waiter("before")), true)
+  cache.drop(key)
+  eq(cache.pending(key), false, "the request in flight is not one a later ask would join")
+  eq(cache.fetch(key, request, waiter("after")), true, "so the later ask spawns its own")
+  eq(#hands, 2)
+  hands[1](ROWS, nil, "a warning")
+  eq(#got, 1, "the abandoned request answers the caller that started it and nobody else")
+  eq(got[1][1], "before")
+  eq(got[1][2], nil)
+  eq(got[1][3]:find("dropped while the request was in flight", 1, true) ~= nil, true, got[1][3])
+  eq(cache.read(key), nil, "and nothing it fetched is written")
+  eq(cache.pending(key), true, "the request that started after the drop is the one in flight")
+  eq(cache.fetch(key, request, waiter("later")), false, "so a third caller joins that one rather than spawning again")
+  eq(#hands, 2)
+  hands[2](ROWS)
+  eq(got[2], { "after", ROWS, nil }, "the caller that asked after the drop gets the rows")
+  eq(got[3], { "later", ROWS, nil }, "and so does the one that joined it")
+  eq(cache.read(key).rows, ROWS)
+  eq(cache.pending(key), false)
+  restore()
+end)
+
+test("cache: an answer landing after its key was dropped is neither written nor shown", function()
+  local _, restore = scratch_cache()
+  local key = "jira q"
+  local deliver
+  local got
+  cache.fetch(key, function(hand)
+    deliver = hand
+  end, function(rows, err, warning)
+    got = { rows, err, warning }
+  end)
+  cache.drop(key)
+  deliver(ROWS, nil, "a warning")
+  eq(got[1], nil)
+  eq(got[2]:find("dropped while the request was in flight", 1, true) ~= nil, true, got[2])
+  eq(got[3], nil, "the warning goes with the rows")
+  eq(cache.read(key), nil, "not written")
+  eq(cache.pending(key), false)
+
+  cache.fetch(key, function(hand)
+    deliver = hand
+  end, function(rows)
+    got = { rows }
+  end)
+  cache.clear()
+  deliver(ROWS)
+  eq(got[1], nil, "clear supersedes a request in flight too")
+
+  cache.fetch(key, function(hand)
+    deliver = hand
+  end, function(rows)
+    got = { rows }
+  end)
+  deliver(ROWS)
+  eq(got[1], ROWS, "the next request answers as usual")
+  eq(cache.read(key).rows, ROWS)
+  restore()
+end)
+
+test("cache: a login drops every key, because the key names no account", function()
+  local dir, restore = scratch_cache()
+  local mine = cache.key("jira", "assignee = currentUser()" .. OPEN)
+  local reviews = cache.key("glab", { "mr", "list", "--reviewer=@me" }, "/w/repo")
+  eq(cache.write(mine, ROWS), true)
+  eq(cache.write(reviews, ROWS), true)
+  local restore_acli = select(2, stub_acli({ signed_in = false, login = function(argv)
+    return done(argv, "")
+  end }))
+  local restore_prompts = select(2, stub_prompts({ input = "me@example.test", secret = "tok", confirm = 2 }))
+  -- The scratch directory is passed through configure(), which rebuilds the
+  -- options from the defaults: the login would otherwise clear the directory
+  -- the environment names and these reads would answer from a third one.
+  config.configure({ jira = { site = "example.atlassian.net" }, cache_dir = dir })
+  local ok, message = auth.login("jira")
+  restore_prompts()
+  restore_acli()
+  eq(ok, true, message)
+  eq(config.options.cache_dir, dir, "the login read the keys these assertions read")
+  eq(cache.read(mine), nil, "the rows the account that signed out fetched")
+  eq(cache.read(reviews), nil, "and every other backend's, since none of the keys says whose they are")
+  config.configure({})
+  restore()
+end)
+
+-- the dashboard ---------------------------------------------------------------------------
+
+-- The clone the dashboard is opened on: repo's lookups run git through
+-- spawn.wait, and the tests give the clone its binding and its remote directly.
+local function stub_clone(binding, url)
+  local saved = { root = repo.root, binding = repo.binding, remote_url = repo.remote_url }
+  repo.root = function()
+    return { root = "/w/repo", bare = true }
+  end
+  repo.binding = function()
+    return binding
+  end
+  repo.remote_url = function()
+    return url
+  end
+  return function()
+    repo.root, repo.binding, repo.remote_url = saved.root, saved.binding, saved.remote_url
+  end
+end
+
+-- A search row for the dashboard: a status of nil is a row the client left
+-- without one, which row.new refuses.
+local function dash_row(key, status, summary)
+  return found(key, {
+    summary = summary,
+    status = status and { name = status } or nil,
+    assignee = user("acc-me", "Me Myself"),
+    reporter = user("acc-ana", "Ana"),
+    updated = "2024-05-03T10:00:00.000+0000",
+  })
+end
+
+-- Runs every callback already scheduled: one scheduled here is queued behind
+-- them, and vim.wait pumps the loop until it has run.
+local function drained()
+  local ran = false
+  vim.schedule(function()
+    ran = true
+  end)
+  return vim.wait(2000, function()
+    return ran
+  end)
+end
+
+-- Waits for every section's state check and then its request to answer. The
+-- callbacks already queued are run first, because a check's answer is
+-- settled from a scheduled callback even when the client answered at once.
+local function settled(buf)
+  if not drained() then
+    return false
+  end
+  return vim.wait(2000, function()
+    for _, section in ipairs(list.state(buf).sections) do
+      if section.status == "checking" or section.status == "fetching" then
+        return false
+      end
+    end
+    return true
+  end)
+end
+
+local function lines_of(buf)
+  return vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+end
+
+test("list: the lines carry each section's count, age, reason, error and warning, and the row on each line", function()
+  local now = 10000
+  local reason = "rows come from every project; bind this repository with\n  git config --add dotfiles.jira.project <KEY>\nacli jira project list lists the keys"
+  local state = {
+    root = "/w/repo",
+    sections = {
+      { def = { title = "All open tickets", query = "q" }, key = "k", rows = ROWS, written = now - 180 },
+      { def = { title = "Assigned to me (unbound)", query = "q", reason = reason }, key = "k", rows = { ROWS[1] }, written = now - 300, status = "fetching" },
+      { def = { title = "Mine", query = "q" }, key = "k", status = "fetching" },
+      { def = { title = "Also mine", query = "q" }, key = "k", error = "jira: not signed in; run :Docket login jira\n✗ Not authenticated" },
+      { def = { title = "Review requested", query = "q" }, key = "k", rows = { ROWS[2] }, written = now, warning = "row: PAY-8 needs a non-empty string for state" },
+      { def = { title = "Reviews", reason = "origin is on bitbucket.example.test, which is neither GitLab nor GitHub, so there are no review sections" } },
+      { def = { title = "Stale", query = "q" }, key = "k", rows = { ROWS[1] }, written = now - 7200, error = "acli exited 1\nconnection refused" },
+    },
+  }
+  local lines, at, marks, heads = list.lines(state, now)
+  eq(lines, {
+    "Docket · /w/repo",
+    "",
+    "All open tickets (2) · 3m ago",
+    "  PAY-9    To Do         Nine",
+    "  PAY-10   In Progress   Ten",
+    "",
+    "Assigned to me (unbound) (1) · 5m ago, refreshing",
+    "  rows come from every project; bind this repository with",
+    "    git config --add dotfiles.jira.project <KEY>",
+    "  acli jira project list lists the keys",
+    "  PAY-9   To Do   Nine",
+    "",
+    "Mine · fetching",
+    "",
+    "Also mine · error",
+    "  jira: not signed in; run :Docket login jira",
+    "  ✗ Not authenticated",
+    "",
+    "Review requested (1) · just now",
+    "  PAY-10   In Progress   Ten",
+    "  warning: row: PAY-8 needs a non-empty string for state",
+    "",
+    "Reviews",
+    "  origin is on bitbucket.example.test, which is neither GitLab nor GitHub, so there are no review sections",
+    "",
+    "Stale (1) · 2h ago, refresh failed",
+    "  acli exited 1",
+    "  connection refused",
+    "  PAY-9   To Do   Nine",
+    "",
+    list.KEYS,
+  })
+  eq(at[4].row, ROWS[1])
+  eq(at[5].row, ROWS[2])
+  eq(at[4].section, state.sections[1])
+  eq(at[11].row, ROWS[1])
+  eq(at[20].row, ROWS[2])
+  eq(vim.tbl_count(at), 5, "a line that is not a row is on no row")
+  eq(marks[1], { 0, 0, #"Docket · /w/repo", "Title" })
+  eq(marks[2], { 2, 0, #"All open tickets (2)", "Title" })
+  eq(marks[3], { 2, #"All open tickets (2) · ", #lines[3], "Comment" })
+  eq(marks[4], { 3, 2, 2 + #"PAY-9", "Identifier" })
+  eq(marks[5], { 3, #"  PAY-9    ", #"  PAY-9    To Do", "DocketLabel" }, "the state column, after the padded identifier")
+  local header_lines = {}
+  for index, st in ipairs(state.sections) do
+    header_lines[index] = heads[st]
+  end
+  eq(header_lines, { 3, 7, 13, 15, 19, 23, 26 }, "each section's header line, which a dropped row's cursor goes to")
+  local groups = {}
+  for _, mark in ipairs(marks) do
+    groups[mark[4]] = (groups[mark[4]] or 0) + 1
+  end
+  eq(groups.ErrorMsg, 4, "each error line")
+  eq(groups.WarningMsg, 1)
+end)
+
+test("list: open shows cached rows at once with their age and refreshes behind them, in a nofile buffer wiped when hidden and unlisted", function()
+  jira.forget()
+  local _, restore_cache = scratch_cache()
+  local restore_clone = stub_clone({ kind = "projects", projects = { "PAY" } }, "git@gitlab.example.test:acme/payments.git")
+  -- The dashboard holds the editor for no client, so nothing reaches the
+  -- blocking form; the state checks go through spawn.run with the searches.
+  local waits, restore_wait = stub_wait(function(argv)
+    error("the dashboard waited on " .. table.concat(argv, " "))
+  end)
+  local runs, restore_run = stub_run(checked({ signed_in = true }, function(argv)
+    local jql = jql_of(argv)
+    if jql:find("assignee = currentUser()", 1, true) then
+      return done(argv, { dash_row("PAY-7", "To Do", "Seven") })
+    end
+    if jql:find("reporter = currentUser()", 1, true) then
+      return done(argv, { dash_row("PAY-8", nil, "Eight"), dash_row("PAY-2", "Done", "Two") })
+    end
+    return done(argv, { dash_row("PAY-10", "In Progress", "Ten"), dash_row("PAY-9", "To Do", "Nine") })
+  end))
+  local notices, restore_notify = stub_notify()
+  local all_key = cache.key("jira", "project IN (PAY)" .. OPEN)
+  -- Written in the order the client answered in, which row.compare would
+  -- invert: the cached rows are shown as they were fetched.
+  cache.write(all_key, {
+    row.new({ source = "jira", id = "PAY-3", state = "To Do", title = "Cached three" }),
+    row.new({ source = "jira", id = "PAY-1", state = "To Do", title = "Cached one" }),
+  }, os.time() - 600)
+
+  local buf = list.open({ root = "/w/repo", bare = true })
+  local before = lines_of(buf)
+  eq(settled(buf), true, "every section answered")
+  local after = lines_of(buf)
+  restore_notify()
+  restore_run()
+  restore_wait()
+  restore_clone()
+
+  eq(vim.api.nvim_get_current_buf(), buf)
+  eq(vim.api.nvim_buf_get_name(buf), list.NAME, "the name the editor keeps verbatim, which no file can take")
+  eq(vim.bo[buf].buftype, "nofile")
+  eq(vim.bo[buf].bufhidden, "wipe")
+  eq(vim.bo[buf].buflisted, false)
+  eq(vim.bo[buf].swapfile, false)
+  eq(vim.bo[buf].modifiable, false)
+  eq(vim.bo[buf].filetype, list.FILETYPE)
+
+  eq(before[1], "Docket · /w/repo")
+  eq(
+    before[3],
+    "All open tickets (2) · 10m ago, checking sign-in",
+    "the cached rows are on screen before any state check answers"
+  )
+  eq(before[4], "  PAY-3   To Do   Cached three", "in the order they were fetched in")
+  eq(before[5], "  PAY-1   To Do   Cached one")
+  eq(before[7], "Assigned to me · checking sign-in", "no cached rows, so neither a count nor an age")
+
+  eq(after[3], "All open tickets (2) · just now", "the count is the rows fetched")
+  eq(after[4], "  PAY-10   In Progress   Ten", "the client's order, which the query asked for; columns aligned")
+  eq(after[5], "  PAY-9    To Do         Nine")
+  eq(after[7], "Assigned to me (1) · just now")
+  eq(after[8], "  PAY-7   To Do   Seven")
+  eq(after[10], "Mine (1) · just now", "the row without a status is left out of the count")
+  eq(after[11], "  PAY-2   Done   Two")
+  eq(after[12]:find("^  warning: .*row: PAY%-8 needs a non%-empty string for state") ~= nil, true, after[12])
+  eq(after[14], "Review requested · error")
+  eq(after[15], "  glab: not signed in; run :Docket login glab", "a backend not signed in names the login command")
+  eq(after[16], "  glab exited 1", "and carries the client's own words")
+  eq(after[17], "  x glab: no token")
+  eq(after[19], "My open reviews · error")
+  eq(after[20], "  glab: not signed in; run :Docket login glab")
+  eq(after[#after], list.KEYS)
+  eq(notices, {})
+
+  eq(#waits, 0, "nothing held the editor")
+  eq(vim.tbl_map(function(call)
+    return table.concat(call.argv, " ")
+  end, vim.tbl_filter(is_status, runs)), { "acli jira auth status", "glab auth status" }, "the state check runs once per backend")
+  local searches = vim.tbl_filter(function(call)
+    return not is_status(call)
+  end, runs)
+  eq(#searches, 3, "one search per Jira section")
+  for _, run in ipairs(searches) do
+    eq(has(run.argv, "--paginate"), true)
+  end
+  eq(#cache.read(all_key).rows, 2, "the fetched rows replace the cached ones")
+
+  local sections = list.state(buf).sections
+  eq(sections[1].def.title, "All open tickets")
+  eq(sections[1].key, all_key, "a JQL query names its own projects, so its rows are the same in every clone")
+  eq(sections[4].def.title, "Review requested")
+  eq(
+    sections[4].key,
+    cache.key("glab", sections[4].def.query, "/w/repo"),
+    "a review client reads the project from the working directory, so the clone is in its key"
+  )
+
+  local r, section = list.row_at(buf, 5)
+  eq(r.id, "PAY-9")
+  eq(section.def.title, "All open tickets")
+  eq(list.row_at(buf, 3), nil)
+  restore_cache()
+end)
+
+test("list: with no backend signed in every section carries the login command and no client is asked for rows", function()
+  jira.forget()
+  local _, restore_cache = scratch_cache()
+  local restore_clone = stub_clone({ kind = "projects", projects = { "PAY" } }, "git@gitlab.example.test:acme/payments.git")
+  local runs, restore_run = stub_run(checked({ signed_in = false }, function(argv)
+    error("no rows are asked of a client that has no account: " .. table.concat(argv, " "))
+  end))
+  local notices, restore_notify = stub_notify()
+
+  local buf = list.open({ root = "/w/repo", bare = true })
+  eq(drained(), true, "the state checks' answers, settled from scheduled callbacks, have landed")
+  local lines = lines_of(buf)
+  restore_notify()
+  restore_run()
+  restore_clone()
+  restore_cache()
+
+  -- No section fetches, so the paint each backend's answer makes is the last
+  -- one that puts these lines on screen.
+  eq(lines, {
+    "Docket · /w/repo",
+    "",
+    "All open tickets · error",
+    "  jira: not signed in; run :Docket login jira",
+    "  acli exited 1",
+    "  ✗ Not authenticated",
+    "",
+    "Assigned to me · error",
+    "  jira: not signed in; run :Docket login jira",
+    "  acli exited 1",
+    "  ✗ Not authenticated",
+    "",
+    "Mine · error",
+    "  jira: not signed in; run :Docket login jira",
+    "  acli exited 1",
+    "  ✗ Not authenticated",
+    "",
+    "Review requested · error",
+    "  glab: not signed in; run :Docket login glab",
+    "  glab exited 1",
+    "  x glab: no token",
+    "",
+    "My open reviews · error",
+    "  glab: not signed in; run :Docket login glab",
+    "  glab exited 1",
+    "  x glab: no token",
+    "",
+    list.KEYS,
+  })
+  eq(vim.tbl_map(function(call)
+    return call.argv[1]
+  end, runs), { "acli", "glab" }, "one state check per backend, and nothing else was asked of a client")
+  eq(notices, {})
+end)
+
+test("list: unbound, the account's rows sit under the binding command, an unknown remote states its reason, and w refuses with the reason", function()
+  jira.forget()
+  local _, restore_cache = scratch_cache()
+  local restore_clone = stub_clone({ kind = "unbound" }, "https://bitbucket.example.test/acme/payments.git")
+  local _, restore_wait = stub_wait(function(argv)
+    if argv[1] == "git" then
+      return done(argv, "worktree /w/repo\nbare\n\n")
+    end
+    return failed(argv, 1, "unexpected: " .. table.concat(argv, " "))
+  end)
+  local _, restore_run = stub_run(checked({ signed_in = true }, function(argv)
+    return done(argv, { dash_row("PAY-7", "To Do", "Seven") })
+  end))
+  local notices, restore_notify = stub_notify()
+  -- Silenced: the launcher's progress line is not what this test reads.
+  local saved_echo = vim.api.nvim_echo
+  vim.api.nvim_echo = function() end
+
+  local buf = commands.dash()
+  eq(settled(buf), true)
+  local lines = lines_of(buf)
+  for _, lhs in ipairs({ "<CR>", "w", "r", "R" }) do
+    eq(vim.fn.maparg(lhs, "n", false, true).buffer, 1, lhs .. " is a buffer-local map")
+  end
+  vim.api.nvim_win_set_cursor(0, { 7, 0 })
+  commands.work_row(buf)
+  vim.api.nvim_win_set_cursor(0, { 3, 0 })
+  commands.work_row(buf)
+  vim.api.nvim_echo = saved_echo
+  restore_notify()
+  restore_run()
+  restore_wait()
+  restore_clone()
+  restore_cache()
+
+  eq(lines[3], "Assigned to me (unbound) (1) · just now")
+  eq(lines[4], "  rows come from every project; bind this repository with")
+  eq(lines[5], "    " .. repo.BIND_COMMAND)
+  eq(lines[6], "  " .. repo.LIST_COMMAND .. " lists the keys")
+  eq(lines[7], "  PAY-7   To Do   Seven")
+  eq(lines[9], "Reviews")
+  eq(lines[10], "  origin is on bitbucket.example.test, which is neither GitLab nor GitHub, so there are no review sections")
+  eq(#notices, 2)
+  eq(notices[1].level, vim.log.levels.ERROR)
+  eq(notices[1].message:find("bound to no Jira project", 1, true) ~= nil, true, notices[1].message)
+  eq(notices[1].message:find(repo.BIND_COMMAND, 1, true) ~= nil, true, "the refusal carries the binding command")
+  eq(notices[2].message, "no item on this line")
+end)
+
+test("commands: :Docket opens the dashboard, <CR> opens the row's item, R refuses a ticket, and outside a clone it says so", function()
+  jira.forget()
+  local _, restore_cache = scratch_cache()
+  local restore_clone = stub_clone({ kind = "projects", projects = { "PAY" } }, "git@github.com:acme/payments.git")
+  -- The dashboard checks the state through spawn.run, and <CR> through
+  -- spawn.wait, as :Docket <id> does.
+  local _, restore_wait = stub_acli({ signed_in = true })
+  local _, restore_run = stub_run(checked({ signed_in = true }, function(argv)
+    if argv[4] == "view" then
+      return done(argv, view_payload())
+    end
+    if jql_of(argv) == "assignee = currentUser()" then
+      return done(argv, { found("TIG-7", { assignee = user("acc-me", "Me Myself") }) })
+    end
+    return done(argv, { dash_row("PAY-3", "To Do", "Three") })
+  end))
+  local notices, restore_notify = stub_notify()
+
+  commands.run({ fargs = {}, bang = false })
+  local buf = vim.api.nvim_get_current_buf()
+  eq(list.state(buf) ~= nil, true, ":Docket made the dashboard current")
+  eq(settled(buf), true)
+  eq(lines_of(buf)[4], "  PAY-3   To Do   Three")
+  eq(lines_of(buf)[12], "Review requested · error")
+  eq(lines_of(buf)[13], "  gh: not signed in; run :Docket login gh")
+  vim.api.nvim_win_set_cursor(0, { 4, 0 })
+  commands.review_row(buf)
+  commands.open_row(buf)
+  vim.wait(1000, function()
+    return vim.b[vim.api.nvim_get_current_buf()].docket ~= nil
+  end)
+  local opened = vim.api.nvim_get_current_buf()
+  restore_notify()
+  restore_run()
+  restore_wait()
+  restore_clone()
+  restore_cache()
+
+  eq(vim.api.nvim_buf_get_name(opened), "docket://jira/PAY-3")
+  eq(vim.api.nvim_buf_is_valid(buf), false, "the dashboard is wiped once hidden")
+  eq(#notices, 1)
+  eq(notices[1].message, "PAY-3 is a ticket; R starts a review on a merge request")
+  eq(notices[1].level, vim.log.levels.ERROR)
+  vim.api.nvim_buf_delete(opened, { force = true })
+
+  local saved_root = repo.root
+  repo.root = function()
+    return nil, "git exited 128\nfatal: not a git repository"
+  end
+  notices, restore_notify = stub_notify()
+  eq(commands.dash(), nil)
+  restore_notify()
+  repo.root = saved_root
+  eq(#notices, 1)
+  eq(notices[1].message:find("the dashboard opens inside a clone; git exited 128", 1, true), 1, notices[1].message)
+end)
+
+-- The dashboard's row under the cursor and the clone it shows, replaced, with
+-- the launcher, the progress line and the redraw that puts it on screen
+-- recorded in the order they ran. Returns what the launcher was asked, the
+-- events, and the restore.
+local function stub_dash_row(r)
+  local saved = { row_at = list.row_at, state = list.state, launch = env.launch, echo = vim.api.nvim_echo, redraw = vim.cmd.redraw }
+  local asked, events = {}, {}
+  list.row_at = function()
+    return r, {}
+  end
+  list.state = function()
+    return { root = "/w/repo", binding = { kind = "projects", projects = { "PROJ" } } }
+  end
+  env.launch = function(opts)
+    asked[#asked + 1] = opts
+    events[#events + 1] = "launch"
+    return nil, "launched no further"
+  end
+  vim.api.nvim_echo = function(chunks, history)
+    events[#events + 1] = { chunks[1][1], history }
+  end
+  vim.cmd.redraw = function()
+    events[#events + 1] = "redraw"
+  end
+  return asked, events, function()
+    list.row_at, list.state, env.launch, vim.api.nvim_echo = saved.row_at, saved.state, saved.launch, saved.echo
+    vim.cmd.redraw = saved.redraw
+  end
+end
+
+test("commands: R on a merge request row launches its branch with the review, after a progress line kept out of the history", function()
+  local asked, events, restore = stub_dash_row({ source = "glab", id = "!4", branch = "feature/x" })
+  local notices, restore_notify = stub_notify()
+  commands.review_row(0)
+  restore_notify()
+  restore()
+  eq(asked, { { root = "/w/repo", binding = { kind = "projects", projects = { "PROJ" } }, branch = "feature/x", review = "!4" } })
+  eq(events, {
+    { "docket: preparing the worktree for feature/x; when git has to ask origin, the editor waits up to 60 s", false },
+    "redraw",
+    "launch",
+  }, "the line is drawn before git holds the editor, and kept out of :messages")
+  eq(notices, { { message = "launched no further", level = vim.log.levels.ERROR } }, "a refusal is the launcher's own words")
+end)
+
+test("commands: w and R refuse a row from a fork, whose branch on origin is somebody else's", function()
+  for _, act in ipairs({ commands.work_row, commands.review_row }) do
+    local asked, events, restore = stub_dash_row({ source = "gh", id = "#12", branch = "main", fork = true })
+    local notices, restore_notify = stub_notify()
+    act(0)
+    restore_notify()
+    restore()
+    eq(asked, {}, "the launcher is not reached")
+    eq(events, {}, "nor is the progress line drawn")
+    eq(notices, {
+      {
+        message = "#12 comes from a fork, so origin's main is not its branch and no worktree is made for it",
+        level = vim.log.levels.ERROR,
+      },
+    })
+  end
+end)
+
+test("list: the dash's name is the editor's verbatim, so a file of that name does not stop it opening", function()
+  -- The editor allows one buffer per name and raises E95 on a second, and a
+  -- name carrying no `://` is resolved against the working directory: this is
+  -- the buffer a file called `docket-dash`, opened, would leave behind.
+  for _, other in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_get_name(other):find("docket%-dash") then
+      vim.api.nvim_buf_delete(other, { force = true })
+    end
+  end
+  local squatter = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_name(squatter, vim.fn.getcwd() .. "/docket-dash")
+  local buf = list.buffer()
+  eq(vim.api.nvim_buf_get_name(buf), list.NAME)
+  vim.api.nvim_buf_delete(squatter, { force = true })
+  vim.api.nvim_buf_delete(buf, { force = true })
+end)
+
+-- Replaces the Jira adapter's rows() with one that records the callback and
+-- answers nothing, so a test decides when each section's answer lands.
+local function stub_jira_rows()
+  local hands, saved = {}, jira.rows
+  jira.rows = function(_, on_done)
+    hands[#hands + 1] = on_done
+  end
+  return hands, function()
+    jira.rows = saved
+  end
+end
+
+local function one_row(id)
+  return { row.new({ source = "jira", id = id, state = "To Do", title = "Ticket " .. id }) }
+end
+
+test("list: an answer from before the dashboard was reopened paints nothing", function()
+  jira.forget()
+  local _, restore_cache = scratch_cache()
+  local restore_clone = stub_clone({ kind = "projects", projects = { "PAY" } }, "https://bitbucket.example.test/acme/payments.git")
+  local _, restore_checks = stub_checks({ signed_in = true })
+  local hands, restore_rows = stub_jira_rows()
+  local notices, restore_notify = stub_notify()
+
+  local buf = list.open({ root = "/w/first", bare = true })
+  eq(drained(), true, "the state check has answered")
+  eq(#hands, 3, "one request per Jira section, none of them answered yet")
+  local again = list.open({ root = "/w/second", bare = true })
+  eq(again, buf, "the same buffer, holding a state of its own")
+  eq(drained(), true)
+  eq(#hands, 3, "the reopened sections join the requests already in flight")
+
+  -- Every paint from here belongs to one of the two states, and only the one
+  -- the buffer holds may paint.
+  local painted, saved_set_lines = 0, vim.api.nvim_buf_set_lines
+  vim.api.nvim_buf_set_lines = function(...)
+    painted = painted + 1
+    return saved_set_lines(...)
+  end
+  for index, hand in ipairs(hands) do
+    hand(one_row("PAY-" .. index))
+  end
+  eq(settled(buf), true)
+  vim.api.nvim_buf_set_lines = saved_set_lines
+  local lines = lines_of(buf)
+  restore_notify()
+  restore_rows()
+  restore_checks()
+  restore_clone()
+  restore_cache()
+
+  eq(painted, 3, "one paint per section answered, and none from the state the reopen replaced")
+  eq(lines[1], "Docket · /w/second")
+  eq(lines[3], "All open tickets (1) · just now")
+  eq(lines[4], "  PAY-1   To Do   Ticket PAY-1")
+  eq(notices, {})
+end)
+
+test("list: r asks the client again, and a repaint replaces the highlights rather than adding to them", function()
+  jira.forget()
+  local _, restore_cache = scratch_cache()
+  local restore_clone = stub_clone({ kind = "projects", projects = { "PAY" } }, "https://bitbucket.example.test/acme/payments.git")
+  local _, restore_checks = stub_checks({ signed_in = true })
+  local asked, saved_rows = 0, jira.rows
+  jira.rows = function(_, on_done)
+    asked = asked + 1
+    on_done(one_row("PAY-" .. asked))
+  end
+  local notices, restore_notify = stub_notify()
+
+  local buf = commands.dash()
+  eq(settled(buf), true)
+  local first = asked
+  local marks = #vim.api.nvim_buf_get_extmarks(buf, list.NS, 0, -1, {})
+  list.render(buf)
+  local repainted = #vim.api.nvim_buf_get_extmarks(buf, list.NS, 0, -1, {})
+  vim.fn.maparg("r", "n", false, true).callback()
+  eq(settled(buf), true)
+  local lines = lines_of(buf)
+  restore_notify()
+  jira.rows = saved_rows
+  restore_checks()
+  restore_clone()
+  restore_cache()
+
+  eq(first, 3, "one request per Jira section")
+  eq(repainted, marks, "the namespace is cleared before the marks are set again")
+  eq(asked, 6, "r asks each section again rather than painting what is on screen")
+  eq(lines[4], "  PAY-4   To Do   Ticket PAY-4", "and shows what the client answered this time")
+  eq(notices, {})
+end)
+
+test("list: a repaint keeps the cursor on its row as rows arrive above it, and on the section's header once the row is gone", function()
+  jira.forget()
+  local _, restore_cache = scratch_cache()
+  local restore_clone = stub_clone({ kind = "projects", projects = { "PAY" } }, "https://bitbucket.example.test/acme/payments.git")
+  local _, restore_checks = stub_checks({ signed_in = true })
+  local hands, restore_rows = stub_jira_rows()
+  local notices, restore_notify = stub_notify()
+  local function rows_of(...)
+    return vim.tbl_map(function(id)
+      return row.new({ source = "jira", id = id, state = "To Do", title = "Ticket " .. id })
+    end, { ... })
+  end
+  local function answer_all(first)
+    local asked = #hands
+    list.refresh(list.buffer())
+    -- The state check's answer is settled from a scheduled callback, and the
+    -- rows are asked for only once it has run.
+    drained()
+    for index = asked + 1, #hands do
+      hands[index](index == asked + 1 and first or rows_of("OPS-1"))
+    end
+    return settled(list.buffer())
+  end
+
+  local buf = list.open({ root = "/w/repo", bare = true })
+  eq(drained(), true)
+  for _, hand in ipairs(hands) do
+    hand(rows_of("PAY-2", "PAY-3"))
+  end
+  eq(settled(buf), true)
+  eq(lines_of(buf)[5], "  PAY-3   To Do   Ticket PAY-3")
+  vim.api.nvim_win_set_cursor(0, { 5, 0 })
+  local answered = answer_all(rows_of("PAY-1", "PAY-2", "PAY-3"))
+  local moved = { vim.api.nvim_win_get_cursor(0)[1], vim.api.nvim_get_current_line() }
+  local answered_again = answer_all(rows_of("PAY-1"))
+  local dropped = { vim.api.nvim_win_get_cursor(0)[1], vim.api.nvim_get_current_line() }
+  restore_notify()
+  restore_rows()
+  restore_checks()
+  restore_clone()
+  restore_cache()
+  eq({ answered, answered_again }, { true, true })
+  eq(moved, { 6, "  PAY-3   To Do   Ticket PAY-3" }, "a row added above moves the row, and the cursor with it")
+  eq(dropped, { 3, "All open tickets (1) · just now" }, "a row gone leaves the cursor where no key acts on a row")
+  eq(notices, {})
+end)
+
+test("list: a restored session's dashboard buffer is taken over rather than named a second time", function()
+  for _, other in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_get_name(other) == list.NAME then
+      vim.api.nvim_buf_delete(other, { force = true })
+    end
+  end
+  -- What :mksession writes for a dashboard on screen.
+  vim.cmd("enew")
+  vim.cmd("file " .. list.NAME)
+  local restored = vim.api.nvim_get_current_buf()
+  local ok, buf = pcall(list.buffer)
+  eq(ok, true, "no E95: " .. tostring(buf))
+  eq(buf, restored)
+  eq(
+    { vim.bo[buf].buftype, vim.bo[buf].bufhidden, vim.bo[buf].buflisted, vim.bo[buf].filetype },
+    { "nofile", "wipe", false, list.FILETYPE }
+  )
+  vim.api.nvim_buf_delete(buf, { force = true })
+end)
+
+test("list: a review adapter whose module fails to load is the section's error, in the registry's words", function()
+  jira.forget()
+  local _, restore_cache = scratch_cache()
+  local restore_clone = stub_clone({ kind = "ignored" }, "git@gitlab.example.test:acme/payments.git")
+  -- A registry of its own, whose glab module raises inside its own require:
+  -- a defect in the module, which is reported whole rather than as a backend
+  -- this build does not carry.
+  local saved_registry, saved_glab = package.loaded["docket.adapters"], package.loaded["docket.adapters.glab"]
+  package.loaded["docket.adapters"] = nil
+  local registry = require("docket.adapters")
+  package.loaded["docket.adapters"] = saved_registry
+  package.loaded["docket.adapters.glab"] = nil
+  package.preload["docket.adapters.glab"] = function()
+    return require("docket.adapters.no_such_helper")
+  end
+  local saved_get = adapters.get
+  adapters.get = registry.get
+  local notices, restore_notify = stub_notify()
+  local buf = list.open({ root = "/w/repo", bare = true })
+  local drained_ok = drained()
+  local lines = lines_of(buf)
+  restore_notify()
+  adapters.get = saved_get
+  package.preload["docket.adapters.glab"] = nil
+  package.loaded["docket.adapters.glab"] = saved_glab
+  restore_clone()
+  restore_cache()
+  eq(drained_ok, true)
+  -- The lines under a section's header, up to the blank line that ends it.
+  local function under(header)
+    local found, inside = {}, false
+    for _, line in ipairs(lines) do
+      if inside and line == "" then
+        break
+      end
+      if inside then
+        found[#found + 1] = line
+      end
+      inside = inside or line == header
+    end
+    return found
+  end
+  local shown = under("Review requested · error")
+  eq(shown[1], "  adapter glab: module 'docket.adapters.no_such_helper' not found:", table.concat(lines, "\n"))
+  eq(#shown > 1, true, "the loader's own lines follow, since this is a defect to read whole")
+  eq(under("My open reviews · error"), shown, "the state check runs once per adapter, and both sections carry it")
+  eq(notices, {})
+end)
+
+test("list: a binding that could not be read is a section's reason, and w on a row refuses with it", function()
+  jira.forget()
+  local _, restore_cache = scratch_cache()
+  local saved = {
+    root = repo.root,
+    binding = repo.binding,
+    remote_url = repo.remote_url,
+    launch = env.launch,
+    status = glab.auth_status,
+    rows = glab.rows,
+  }
+  repo.root = function()
+    return { root = "/w/repo", bare = true }
+  end
+  repo.binding = function()
+    return nil, "git exited 1\nfatal: bad config line 3 in .bare/config"
+  end
+  repo.remote_url = function()
+    return "git@gitlab.example.test:acme/payments.git"
+  end
+  local launched = 0
+  env.launch = function()
+    launched = launched + 1
+    return nil, "the launcher was reached with no binding"
+  end
+  glab.auth_status = function(on_done)
+    local status = { authenticated = true, detail = "✓ Logged in to gitlab.example.test" }
+    if on_done then
+      return on_done(status)
+    end
+    return status
+  end
+  glab.rows = function(_, on_done)
+    on_done({ row.new({ source = "glab", id = "!482", state = "needs review", title = "Bump the pinned version", branch = "topic" }) })
+  end
+  local notices, restore_notify = stub_notify()
+
+  local buf = commands.dash()
+  eq(settled(buf), true)
+  local lines = lines_of(buf)
+  vim.api.nvim_win_set_cursor(0, { 8, 0 })
+  commands.work_row(buf)
+  restore_notify()
+  repo.root, repo.binding, repo.remote_url = saved.root, saved.binding, saved.remote_url
+  env.launch, glab.auth_status, glab.rows = saved.launch, saved.status, saved.rows
+  restore_cache()
+
+  eq(lines[3], "Tickets", "the Jira sections cannot be assembled without the binding")
+  eq(lines[4], "  the repository's Jira binding could not be read: git exited 1")
+  eq(lines[5], "  fatal: bad config line 3 in .bare/config")
+  eq(lines[7], "Review requested (1) · just now", "and the review sections stand")
+  eq(lines[8], "  !482   needs review   Bump the pinned version")
+  eq(launched, 0, "the launcher is never reached, because it reads the binding")
+  eq(#notices, 1)
+  eq(notices[1].message, "git exited 1\nfatal: bad config line 3 in .bare/config", "the reason git gave, verbatim")
+  eq(notices[1].level, vim.log.levels.ERROR)
+end)
+
+-- The headers of the sections the default configuration shows for a clone
+-- bound to PAY whose origin is on GitLab, each followed by ` · ` and `meta`.
+local function headers(meta)
+  return vim.tbl_map(function(title)
+    return title .. " · " .. meta
+  end, { "All open tickets", "Assigned to me", "Mine", "Review requested", "My open reviews" })
+end
+
+-- The lines of `buf` that are section headers, in order.
+local function headers_of(buf)
+  local titles = {}
+  for _, section in ipairs(config.options.sections) do
+    titles[#titles + 1] = section.title
+  end
+  return vim.tbl_filter(function(line)
+    for _, title in ipairs(titles) do
+      if line:sub(1, #title + 1) == title .. " " or line == title then
+        return true
+      end
+    end
+    return false
+  end, lines_of(buf))
+end
+
+-- The dashboard for /w/repo, bound to PAY, with origin on GitLab, and every
+-- call to a client held; the calls are the first return.
+local function held_dash()
+  jira.forget()
+  glab.forget()
+  local _, restore_cache = scratch_cache()
+  local restore_clone = stub_clone({ kind = "projects", projects = { "PAY" } }, "git@gitlab.example.test:acme/payments.git")
+  local waits, restore_wait = stub_wait(function(argv)
+    error("the dashboard held the editor for " .. table.concat(argv, " "))
+  end)
+  local held, answer, restore_run = stub_run_held()
+  local notices, restore_notify = stub_notify()
+  local buf = list.open({ root = "/w/repo", bare = true })
+  return {
+    buf = buf,
+    held = held,
+    answer = answer,
+    waits = waits,
+    notices = notices,
+    restore = function()
+      restore_notify()
+      restore_run()
+      restore_wait()
+      restore_clone()
+      -- The calls held here are never answered, so the cache still has a
+      -- request in flight for each of the dash's keys; a later test that
+      -- opens the same clone joins those and waits on them. clear() moves
+      -- every key on.
+      cache.clear()
+      restore_cache()
+    end,
+  }
+end
+
+-- The held calls from `from` on as `<client> <verb words>`.
+local function held_argv(held, from)
+  return vim.tbl_map(function(call)
+    return table.concat(call.argv, " ", 1, math.min(#call.argv, 4))
+  end, vim.list_slice(held, from or 1))
+end
+
+test("list: the dash paints every section as checking sign-in before any state check answers, and joins one check per backend", function()
+  local dash = held_dash()
+  local ok, err = pcall(function()
+    local first = lines_of(dash.buf)
+    eq(headers_of(dash.buf), headers("checking sign-in"), "painted before open() returned, with nothing answered")
+    eq(first[1], "Docket · /w/repo")
+    eq(drained(), true)
+    eq(held_argv(dash.held), { "acli jira auth status", "glab auth status" }, "three Jira sections and two GitLab ones, one check per backend")
+    eq(dash.held[2].opts.cwd, "/w/repo", "glab's check runs in the clone the dash shows, where its rows run")
+    eq(dash.held[1].opts and dash.held[1].opts.cwd, nil, "acli's verdict is the account's and runs nowhere in particular")
+    -- Jira signed in, GitLab not.
+    dash.answer(1, done(dash.held[1].argv, STATUS_SIGNED_IN))
+    dash.answer(2, failed(dash.held[2].argv, 1, "x glab: no token"))
+    eq(drained(), true)
+    eq(held_argv(dash.held, 3), { "acli jira workitem search", "acli jira workitem search", "acli jira workitem search" }, "Jira's rows are asked for, and GitLab's are not")
+    local lines = lines_of(dash.buf)
+    eq(headers_of(dash.buf), {
+      "All open tickets · fetching",
+      "Assigned to me · fetching",
+      "Mine · fetching",
+      "Review requested · error",
+      "My open reviews · error",
+    })
+    eq(vim.tbl_contains(lines, "  glab: not signed in; run :Docket login glab"), true, table.concat(lines, "\n"))
+    for index = 3, 5 do
+      dash.answer(index, done(dash.held[index].argv, { dash_row("PAY-" .. index, "To Do", "Row " .. index) }))
+    end
+    eq(settled(dash.buf), true)
+    eq(lines_of(dash.buf)[3], "All open tickets (1) · just now")
+    eq(lines_of(dash.buf)[4], "  PAY-3   To Do   Row 3")
+    eq(#dash.waits, 0, "nothing held the editor")
+    eq(dash.notices, {})
+  end)
+  dash.restore()
+  assert(ok, err)
+end)
+
+test("list: a refresh while the state checks are out asks each backend again, and the first round's answers paint nothing", function()
+  local dash = held_dash()
+  local ok, err = pcall(function()
+    eq(drained(), true)
+    list.refresh(dash.buf)
+    eq(drained(), true)
+    eq(held_argv(dash.held), { "acli jira auth status", "glab auth status", "acli jira auth status", "glab auth status" }, "one more check per backend")
+    local painted, saved_set_lines = 0, vim.api.nvim_buf_set_lines
+    vim.api.nvim_buf_set_lines = function(...)
+      painted = painted + 1
+      return saved_set_lines(...)
+    end
+    local set_ok, set_err = pcall(function()
+      dash.answer(1, done(dash.held[1].argv, STATUS_SIGNED_IN))
+      dash.answer(2, done(dash.held[2].argv, "✓ Logged in"))
+      eq(drained(), true)
+      eq(painted, 0, "the first round's answers paint nothing")
+      eq(#dash.held, 4, "and ask for no rows")
+      dash.answer(3, done(dash.held[3].argv, STATUS_SIGNED_IN))
+      dash.answer(4, failed(dash.held[4].argv, 1, "x glab: no token"))
+      eq(drained(), true)
+      eq(painted > 0, true, "the second round's answers paint")
+    end)
+    vim.api.nvim_buf_set_lines = saved_set_lines
+    assert(set_ok, set_err)
+    eq(#dash.held, 7, "the second round asks for Jira's rows")
+    for index = 5, 7 do
+      dash.answer(index, done(dash.held[index].argv, { dash_row("PAY-" .. index, "To Do", "Row " .. index) }))
+    end
+    eq(settled(dash.buf), true)
+    eq(headers_of(dash.buf)[1], "All open tickets (1) · just now")
+    eq(dash.notices, {})
+  end)
+  dash.restore()
+  assert(ok, err)
+end)
+
+test("list: a dash wiped while its state checks are out is left alone when they answer", function()
+  local dash = held_dash()
+  local ok, err = pcall(function()
+    eq(drained(), true)
+    vim.api.nvim_buf_delete(dash.buf, { force = true })
+    dash.answer(1, done(dash.held[1].argv, STATUS_SIGNED_IN))
+    dash.answer(2, done(dash.held[2].argv, "✓ Logged in"))
+    eq(drained(), true)
+    eq(#dash.held, 2, "no rows are asked for")
+    eq(dash.notices, {}, "and nothing raised")
+  end)
+  dash.restore()
+  assert(ok, err)
+end)
+
+test("list: a review section's rows are asked in the clone the dash shows, whichever directory a later state check took", function()
+  local saved_getcwd = vim.fn.getcwd
+  local dash = held_dash()
+  local ok, err = pcall(function()
+    eq(drained(), true)
+    -- Another mode's entry from a tab in another clone, while the dash's
+    -- checks are out.
+    vim.fn.getcwd = function()
+      return "/w/elsewhere"
+    end
+    glab.auth_status(function() end)
+    vim.fn.getcwd = saved_getcwd
+    dash.answer(1, failed(dash.held[1].argv, 1, "✗ Not authenticated"))
+    dash.answer(2, done(dash.held[2].argv, "✓ Logged in"))
+    eq(drained(), true)
+    local lists = vim.tbl_filter(function(call)
+      return call.argv[1] == "glab" and call.argv[2] == "mr"
+    end, dash.held)
+    eq(#lists, 2, "both review sections asked")
+    for _, call in ipairs(lists) do
+      eq(call.opts.cwd, "/w/repo", table.concat(call.argv, " "))
+    end
+    -- `r` after a `:cd` in the dash's tab: the check runs in the dash's
+    -- clone as the rows do, so the state painted is that clone's host's.
+    vim.fn.getcwd = function()
+      return "/w/elsewhere"
+    end
+    local from = #dash.held + 1
+    list.refresh(dash.buf)
+    vim.fn.getcwd = saved_getcwd
+    eq(drained(), true)
+    eq(held_argv(dash.held, from), { "acli jira auth status", "glab auth status" }, "r asks each backend again")
+    eq(dash.held[from + 1].opts.cwd, "/w/repo", "in the clone the dash shows, not the directory the tab moved to")
+  end)
+  vim.fn.getcwd = saved_getcwd
+  dash.restore()
+  glab.forget()
+  assert(ok, err)
+end)
+
+test("list: reopened for another clone while its state checks are out, the dash asks each backend again there, and the first clone's answers paint nothing", function()
+  gh.forget()
+  local dash = held_dash()
+  local ok, err = pcall(function()
+    eq(drained(), true)
+    eq(held_argv(dash.held), { "acli jira auth status", "glab auth status" })
+    -- The clone reopened for is on GitHub, so its review client is gh.
+    repo.remote_url = function()
+      return "git@github.com:acme/other.git"
+    end
+    local again = list.open({ root = "/w/b", bare = true })
+    eq(again, dash.buf, "the same buffer, holding a state of its own")
+    eq(drained(), true)
+    eq(held_argv(dash.held, 3), { "acli jira auth status", "gh auth status --active" }, "a fresh check per backend of the clone reopened for")
+    eq(dash.held[4].opts.cwd, "/w/b", "in that clone")
+    local painted, saved_set_lines = 0, vim.api.nvim_buf_set_lines
+    vim.api.nvim_buf_set_lines = function(...)
+      painted = painted + 1
+      return saved_set_lines(...)
+    end
+    local set_ok, set_err = pcall(function()
+      dash.answer(1, done(dash.held[1].argv, STATUS_SIGNED_IN))
+      dash.answer(2, done(dash.held[2].argv, "✓ Logged in"))
+      eq(drained(), true)
+      eq(painted, 0, "the first clone's answers paint nothing")
+      eq(#dash.held, 4, "and ask for no rows")
+      dash.answer(3, failed(dash.held[3].argv, 1, "✗ Not authenticated"))
+      dash.answer(4, done(dash.held[4].argv, "github.com\n  ✓ Logged in to github.com account me (keyring)\n"))
+      eq(drained(), true)
+      eq(painted > 0, true, "the reopened clone's answers paint")
+    end)
+    vim.api.nvim_buf_set_lines = saved_set_lines
+    assert(set_ok, set_err)
+    local lines = lines_of(dash.buf)
+    eq(lines[1], "Docket · /w/b")
+    eq(vim.tbl_contains(lines, "  jira: not signed in; run :Docket login jira"), true, table.concat(lines, "\n"))
+    local lists = vim.tbl_filter(function(call)
+      return call.argv[1] == "gh" and call.argv[2] == "pr"
+    end, dash.held)
+    eq(#lists, 2, "both review sections ask gh for rows")
+    for _, call in ipairs(lists) do
+      eq(call.opts.cwd, "/w/b", table.concat(call.argv, " "))
+    end
+    eq(#vim.tbl_filter(function(call)
+      return call.argv[1] == "glab"
+    end, dash.held), 1, "glab was asked nothing past the first clone's check")
+    eq(dash.notices, {})
+  end)
+  dash.restore()
+  gh.forget()
+  assert(ok, err)
+end)
+
+test("list: a state check that raises is its sections' error, carrying what it raised, and is asked once", function()
+  local saved, asked = glab.auth_status, 0
+  glab.auth_status = function(_)
+    asked = asked + 1
+    error("glab: the check broke", 0)
+  end
+  local dash = held_dash()
+  local ok, err = pcall(function()
+    dash.answer(1, done(dash.held[1].argv, STATUS_SIGNED_IN))
+    eq(drained(), true)
+    local lines = lines_of(dash.buf)
+    eq(vim.list_slice(headers_of(dash.buf), 4), { "Review requested · error", "My open reviews · error" })
+    local carried = vim.tbl_filter(function(line)
+      return line == "  glab: the check broke"
+    end, lines)
+    eq(#carried, 2, table.concat(lines, "\n"))
+    -- A raise settles the check where it raised, which is before the second
+    -- section joins; settled there and then, the second would ask again.
+    eq(asked, 1, "one check per backend, though it raised")
+  end)
+  glab.auth_status = saved
+  dash.restore()
+  assert(ok, err)
+end)
+
+-- the help tags ---------------------------------------------------------------------------
+
+test("init: the help tags are written beside the file, skipped when current, and a failure is reported once", function()
+  local dir = vim.fn.tempname()
+  vim.fn.mkdir(dir, "p")
+  local help = dir .. "/docket.txt"
+  local source = root .. "/dot_local/share/private_nvim/private_site/pack/docket/start/docket/doc/docket.txt"
+  vim.uv.fs_copyfile(source, help)
+  local notices, restore = stub_notify()
+  -- Read-only first: the reported-once flag is module state, and a success
+  -- after a failure is the order a fixed permission takes.
+  vim.uv.fs_chmod(dir, tonumber("555", 8))
+  local ok, outcome = docket.helptags(help)
+  local again, outcome_again = docket.helptags(help)
+  vim.uv.fs_chmod(dir, tonumber("755", 8))
+  eq(ok, false)
+  eq(outcome:find("E152", 1, true) ~= nil, true, outcome)
+  eq(again, false)
+  eq(outcome_again, outcome)
+  eq(#notices, 1, "reported once")
+  eq(notices[1].level, vim.log.levels.WARN)
+  eq(vim.uv.fs_stat(dir .. "/tags"), nil)
+  eq({ docket.helptags(help) }, { true, "written" })
+  eq(vim.uv.fs_stat(dir .. "/tags") ~= nil, true)
+  eq({ docket.helptags(help) }, { true, "current" })
+  local absent, outcome_absent = docket.helptags(dir .. "/absent/docket.txt")
+  restore()
+  eq(absent, false)
+  eq(outcome_absent:find("E150", 1, true) ~= nil, true, "an absent directory is helptags' own E150: " .. outcome_absent)
+  eq(#notices, 1, "a later failure is not reported again")
+  eq({ docket.helptags() }, { false, "missing" }, "under -u NONE the package is not on the runtime path")
+  eq(vim.uv.fs_stat(vim.fs.dirname(source) .. "/tags"), nil, "nothing is written in the source tree")
+end)
+
+test("init: help_files names the help file and the tags beside it, once they exist", function()
+  local dir = vim.fn.tempname()
+  vim.fn.mkdir(dir, "p")
+  local help = dir .. "/docket.txt"
+  vim.uv.fs_copyfile(root .. "/dot_local/share/private_nvim/private_site/pack/docket/start/docket/doc/docket.txt", help)
+  eq(docket.help_files(help), { help = help })
+  eq({ docket.helptags(help) }, { true, "written" })
+  eq(docket.help_files(help), { help = help, tags = dir .. "/tags" })
+  eq(docket.help_files(), {}, "under -u NONE the package is not on the runtime path")
+end)
+
+test("init: setup takes the options, defines the groups, and keeps them across a colour scheme change", function()
+  local saved = package.loaded["octo"]
+  package.loaded["octo"] = nil
+  local options = docket.setup({ timeouts = { tmux = 1 } })
+  eq(options.timeouts.tmux, 1)
+  eq(options.timeouts.client, 30000)
+  eq(vim.api.nvim_get_hl(0, { name = "DocketEditable", link = true }).link, "NormalFloat")
+  local autocmds = vim.api.nvim_get_autocmds({ group = "docket/highlights", event = "ColorScheme" })
+  eq(#autocmds, 1)
+  vim.api.nvim_set_hl(0, "DocketEditable", {})
+  vim.api.nvim_exec_autocmds("ColorScheme", { group = "docket/highlights" })
+  eq(vim.api.nvim_get_hl(0, { name = "DocketEditable", link = true }).link, "NormalFloat", "defined again")
+  docket.setup({})
+  eq(#vim.api.nvim_get_autocmds({ group = "docket/highlights", event = "ColorScheme" }), 1, "a second setup adds no second autocommand")
+  package.loaded["octo"] = saved
+  config.configure()
+end)
+
+-- the health report -----------------------------------------------------------------------
+
+test("health: each backend's state, with the login command as the fix", function()
+  local report = {}
+  local saved = {}
+  for _, name in ipairs({ "start", "ok", "warn", "error", "info" }) do
+    saved[name] = vim.health[name]
+    vim.health[name] = function(message, advice)
+      report[#report + 1] = { name, message, advice }
+    end
+  end
+  local _, restore_wait = stub_acli({ signed_in = false })
+  health.check()
+  restore_wait()
+  for name, fn in pairs(saved) do
+    vim.health[name] = fn
+  end
+  eq(report[1], { "start", "docket: backends" })
+  eq(report[2][1], "error")
+  eq(report[2][2], "jira: not signed in")
+  eq(report[2][3][1], "run :Docket login jira")
+  eq(report[3], { "error", "glab: not signed in", { "run :Docket login glab", "glab exited 1\nx glab: no token" } })
+  eq(report[4], { "error", "gh: not signed in", { "run :Docket login gh", "gh exited 1\nx gh: no token" } })
+  eq(report[5], { "start", "docket: help" })
+  eq(report[6][1], "error", "under -u NONE the help file is not on the runtime path")
+  eq(report[7], { "start", "docket: configuration" })
+  eq(report[8][2]:find("^sections: All open tickets %(jira%)") ~= nil, true, report[8][2])
+  eq(report[9][2]:find("^cache directory: ") ~= nil, true, report[9][2])
+
+  -- The help file found, with and without the tags beside it: health reads
+  -- init's lookup, so the one lookup is replaced.
+  report = {}
+  local saved_files = docket.help_files
+  for _, name in ipairs({ "start", "ok", "warn", "error", "info" }) do
+    vim.health[name] = function(message, advice)
+      report[#report + 1] = { name, message, advice }
+    end
+  end
+  local _, restore_all = stub_acli({ signed_in = true, glab = true, gh = true })
+  docket.help_files = function()
+    return { help = "/p/doc/docket.txt" }
+  end
+  health.check()
+  docket.help_files = function()
+    return { help = "/p/doc/docket.txt", tags = "/p/doc/tags" }
+  end
+  health.check()
+  docket.help_files = saved_files
+  restore_all()
+  for name, fn in pairs(saved) do
+    vim.health[name] = fn
+  end
+  local helps = vim.tbl_filter(function(entry)
+    return entry[2]:find("/p/doc/", 1, true) ~= nil
+  end, report)
+  eq(helps, {
+    {
+      "warn",
+      "no tags beside /p/doc/docket.txt, so :help docket does not resolve",
+      { "run :lua print(require('docket').helptags()) to write them; it prints false and the reason when they cannot be written" },
+    },
+    { "ok", "help tags beside /p/doc/docket.txt" },
+  })
+end)
+
+-- the plugin file -------------------------------------------------------------------------
+
+test("plugin: the command, the map and the autocommands are declared, and :e reads an item", function()
+  dofile(root .. "/dot_local/share/private_nvim/private_site/pack/docket/start/docket/plugin/docket.lua")
+  eq(vim.g.loaded_docket, true)
+  eq(vim.fn.exists(":Docket"), 2)
+  eq(vim.fn.maparg("<leader>dd", "n"), "<Cmd>Docket<CR>")
+  local events = {}
+  for _, autocmd in ipairs(vim.api.nvim_get_autocmds({ group = "docket" })) do
+    events[autocmd.event] = autocmd.pattern
+  end
+  eq(events, { BufReadCmd = "docket://*", BufWriteCmd = "docket://*", FileType = "docket" })
+
+  jira.forget()
+  local _, restore_wait = stub_acli({ signed_in = true })
+  local _, restore_run = stub_run(function(argv)
+    if argv[4] == "search" then
+      return done(argv, { found("TIG-7", { assignee = user("acc-me", "Me Myself") }) })
+    end
+    return done(argv, view_payload())
+  end)
+  local notices, restore_notify = stub_notify()
+  vim.cmd.edit("docket://jira/TIG-1001")
+  local buf = vim.api.nvim_get_current_buf()
+  vim.wait(1000, function()
+    return vim.b[buf].docket ~= nil
+  end)
+  vim.api.nvim_buf_set_text(buf, 3, 0, 3, 0, { "X" })
+  vim.cmd.write()
+  restore_notify()
+  restore_run()
+  restore_wait()
+  eq(vim.api.nvim_buf_get_name(buf), "docket://jira/TIG-1001")
+  eq(vim.api.nvim_buf_get_lines(buf, 0, 1, false)[1]:find("^TIG%-1001   In Progress   me") ~= nil, true)
+  eq(vim.bo[buf].filetype, "docket")
+  eq(vim.fn.maparg("gx", "n", false, true).buffer, 1, "the item buffer's keymap")
+  eq(vim.fn.maparg("<leader>dw", "n", false, true).buffer, 1)
+  eq(#notices, 1, ":w went through the write command")
+  eq(notices[1].message, "the write path is not part of this build; 1 region(s) still hold their edits")
+  eq(vim.api.nvim_buf_get_lines(buf, 3, 4, false), { "XThe retry loop re-enters" }, "the text is left")
+  eq(vim.bo[buf].modified, true, "and the buffer stays modified")
+
+  -- `:e!` with a read that fails: the state the last read stored goes with
+  -- the text it described, so `:w` says nothing is loaded rather than
+  -- planning a save against regions that are gone.
+  _, restore_wait = stub_acli({ signed_in = true })
+  _, restore_run = stub_run(function(argv)
+    return failed(argv, 1, "Error: Issue does not exist or you do not have permission to see it.")
+  end)
+  notices, restore_notify = stub_notify()
+  vim.cmd("edit!")
+  vim.wait(1000, function()
+    return #notices > 0
+  end)
+  vim.cmd.write()
+  restore_notify()
+  restore_run()
+  restore_wait()
+  eq(vim.b[buf].docket, nil)
+  eq(notices, {
+    {
+      message = "docket://jira/TIG-1001: acli exited 1\nError: Issue does not exist or you do not have permission to see it.",
+      level = vim.log.levels.ERROR,
+    },
+    { message = "nothing loaded in this buffer; :e reads the item", level = vim.log.levels.WARN },
+  })
+  vim.api.nvim_del_user_command("Docket")
+  vim.g.loaded_docket = nil
+  -- Its edits would make a later read of the same item refuse.
+  vim.api.nvim_buf_delete(buf, { force = true })
+end)
+
+-- the GitLab adapter ------------------------------------------------------------------------
+
+-- A user as GitLab returns one on an author, an assignee or `api user`.
+-- UNVERIFIED: the run against the instance printed a note's own field names
+-- and not its `author` object's, and made no `api user` call, so these names
+-- come from GitLab's REST reference. `glab api
+-- projects/:id/merge_requests/<iid>/notes | jq '.[0].author | keys'` settles
+-- the author half.
+local function gl_user(username, name)
+  return {
+    id = #username * 7,
+    username = username,
+    name = name,
+    state = "active",
+    avatar_url = "https://gitlab.example.test/uploads/" .. username .. ".png",
+    web_url = "https://gitlab.example.test/" .. username,
+  }
+end
+
+-- A merge request as `mr list -F json` and `mr view -F json` print one.
+local function merge_request(overrides)
+  return vim.tbl_extend("force", {
+    id = 9001,
+    iid = 482,
+    project_id = 77,
+    title = "Bump the pinned acli",
+    description = "The pin moves to **1.3.36**.\n\nDigests come from the tap.",
+    state = "opened",
+    draft = false,
+    created_at = "2024-05-01T09:00:00.000Z",
+    updated_at = "2024-05-03T10:00:00.000Z",
+    source_branch = "feature/acli.bump",
+    target_branch = "main",
+    author = gl_user("ana", "Ana"),
+    assignees = { gl_user("me", "Me Myself") },
+    reviewers = { gl_user("me", "Me Myself") },
+    web_url = "https://gitlab.example.test/acme/payments/-/merge_requests/482",
+    references = { short = "!482", full = "acme/payments!482" },
+  }, overrides or {})
+end
+
+-- A note as `mr note list -F json` prints one, with every field the run
+-- against the instance recorded; `overrides` set the ones a test is about.
+local function gl_note(id, author, body, overrides)
+  return vim.tbl_extend("force", {
+    attachment = vim.NIL,
+    author = author,
+    body = body,
+    commit_id = vim.NIL,
+    confidential = false,
+    created_at = "2024-05-02T10:00:00.000Z",
+    expires_at = vim.NIL,
+    file_name = vim.NIL,
+    id = id,
+    internal = false,
+    noteable_id = 9001,
+    noteable_iid = 482,
+    noteable_type = "MergeRequest",
+    position = vim.NIL,
+    project_id = 77,
+    resolvable = false,
+    resolved = vim.NIL,
+    resolved_at = vim.NIL,
+    resolved_by = vim.NIL,
+    system = false,
+    title = vim.NIL,
+    type = vim.NIL,
+    updated_at = "2024-05-02T11:00:00.000Z",
+  }, overrides or {})
+end
+
+local DIFF_REFS = { base_sha = string.rep("a", 40), start_sha = string.rep("b", 40), head_sha = string.rep("c", 40) }
+
+local function gl_position(new_line, old_line)
+  return vim.tbl_extend("force", DIFF_REFS, {
+    old_path = "lua/docket/env.lua",
+    new_path = "lua/docket/env.lua",
+    position_type = "text",
+    old_line = old_line or vim.NIL,
+    new_line = new_line or vim.NIL,
+  })
+end
+
+-- The discussions of !482: one GitLab wrote itself, one standalone comment,
+-- one diff thread with a system note inside it, and one resolved thread.
+local function discussions()
+  return {
+    { id = string.rep("0", 40), individual_note = true, notes = { gl_note(1, gl_user("ana", "Ana"), "changed the description", { system = true }) } },
+    { id = string.rep("1", 40), individual_note = true, notes = { gl_note(2, gl_user("ana", "Ana"), "Repros on staging.") } },
+    {
+      id = string.rep("2", 40),
+      individual_note = false,
+      notes = {
+        gl_note(3, gl_user("ana", "Ana"), "Why here?", { type = "DiffNote", resolvable = true, resolved = false, position = gl_position(12) }),
+        gl_note(4, gl_user("me", "Me Myself"), "Because the window sits in it.", { type = "DiffNote", resolvable = true, resolved = false, position = gl_position(12) }),
+        gl_note(5, gl_user("ana", "Ana"), "changed this line in version 2 of the diff", { system = true }),
+      },
+    },
+    {
+      id = string.rep("3", 40),
+      individual_note = false,
+      notes = {
+        gl_note(6, gl_user("me", "Me Myself"), "Squash before merging?", {
+          type = "DiscussionNote",
+          resolvable = true,
+          resolved = true,
+          resolved_at = "2024-05-03T09:00:00.000Z",
+          resolved_by = gl_user("ana", "Ana"),
+        }),
+      },
+    },
+  }
+end
+
+-- glab as the adapter meets it, answering each verb from the fixtures.
+local function glab_answer(overrides)
+  return function(argv, opts)
+    if argv[2] == "api" and argv[3] == "user" then
+      return done(argv, gl_user("me", "Me Myself"))
+    end
+    if argv[2] == "api" then
+      return done(argv, vim.tbl_extend("force", merge_request(), { diff_refs = DIFF_REFS }))
+    end
+    if argv[2] == "mr" and argv[3] == "list" then
+      return done(argv, {
+        merge_request(),
+        merge_request({ iid = 7, title = "Drop the flag", draft = true, source_branch = "drop-flag" }),
+        merge_request({ iid = 9, title = vim.NIL }),
+      })
+    end
+    if argv[2] == "mr" and argv[3] == "view" then
+      return done(argv, merge_request(overrides))
+    end
+    if argv[2] == "mr" and argv[3] == "note" and argv[4] == "list" then
+      return done(argv, discussions())
+    end
+    return done(argv, opts and opts.stdin or "")
+  end
+end
+
+local function stub_glab(overrides)
+  return stub_run(glab_answer(overrides))
+end
+
+-- Every client answer below lands in a fast event, as in the editor.
+
+test("fast events: an item opens from answers that land in a fast event, on Jira and on GitLab", function()
+  jira.forget()
+  glab.forget()
+  local _, restore_wait = stub_acli({ signed_in = true, glab = true })
+  -- A merge request's buffer is named after the project of the clone the
+  -- editor is in, which the open reads off origin.
+  local restore_clone = stub_clone(nil, "git@gitlab.example.test:acme/payments.git")
+  local projects = { glab = "acme/payments" }
+  local jira_answer = function(argv)
+    if argv[4] == "search" then
+      return done(argv, { found("TIG-7", { assignee = user("acc-me", "Me Myself") }) })
+    end
+    return done(argv, view_payload())
+  end
+  local notices, restore_notify = stub_notify()
+  local opened = {}
+  for _, case in ipairs({ { "jira", "TIG-1001", jira_answer }, { "glab", "!482", glab_answer() } }) do
+    -- A buffer an earlier test left may hold edits, which a read refuses.
+    local previous = buffer.named(buffer.name(case[1], case[2], projects[case[1]]))
+    if previous then
+      vim.api.nvim_buf_delete(previous, { force = true })
+    end
+    local _, restore_run = stub_run_fast(case[3])
+    local finished, ok, message
+    local buf = buffer.open(case[1], case[2], function(read_ok, read_message)
+      finished, ok, message = true, read_ok, read_message
+    end)
+    vim.wait(2000, function()
+      return finished
+    end)
+    restore_run()
+    opened[case[1]] = { ok = ok, message = message, title = vim.api.nvim_buf_get_lines(buf, 1, 2, false)[1] }
+    vim.api.nvim_buf_delete(buf, { force = true })
+  end
+  restore_notify()
+  restore_clone()
+  restore_wait()
+  eq(opened.jira, { ok = true, title = "# Retry backoff drops the last attempt" })
+  eq(opened.glab, { ok = true, title = "# Bump the pinned acli" })
+  eq(notices, {})
+end)
+
+test("fast events: the dashboard paints rows whose answers land in a fast event", function()
+  jira.forget()
+  glab.forget()
+  local _, restore_cache = scratch_cache()
+  local restore_clone = stub_clone({ kind = "projects", projects = { "PAY" } }, "git@gitlab.example.test:acme/payments.git")
+  local runs, restore_run = stub_run_fast(checked({ signed_in = true, glab = true }, function(argv)
+    if argv[1] == "glab" then
+      return glab_answer()(argv)
+    end
+    return done(argv, { dash_row("PAY-7", "To Do", "Seven") })
+  end))
+  local notices, restore_notify = stub_notify()
+  local buf = list.open({ root = "/w/repo", bare = true })
+  local answered = settled(buf)
+  local lines = lines_of(buf)
+  restore_notify()
+  restore_run()
+  restore_clone()
+  restore_cache()
+  eq(answered, true, "every section answered")
+  eq(lines[3], "All open tickets (1) · just now")
+  eq(lines[4], "  PAY-7   To Do   Seven")
+  eq(vim.tbl_contains(lines, "Review requested (2) · just now"), true, table.concat(lines, "\n"))
+  eq(vim.tbl_contains(lines, "  !482   opened   Bump the pinned acli"), true, table.concat(lines, "\n"))
+  eq(vim.tbl_map(function(call)
+    return call.argv[1]
+  end, vim.tbl_filter(is_status, runs)), { "acli", "glab" }, "one state check per backend, joined across its sections")
+  eq(notices, {})
+end)
+
+test("glab: passes the contract and declares every review capability; gh declares none and implements none", function()
+  eq(adapters.get("glab"), glab)
+  eq(adapters.verify(glab, "glab"), true)
+  eq(adapters.verify(gh, "gh"), true)
+  eq(gh.capabilities, {})
+  for _, call in ipairs(adapters.OPTIONAL) do
+    eq(gh[call], nil, "gh implements " .. call .. ", which octo.nvim owns")
+  end
+  for _, call in ipairs({ "diff", "threads", "line_comment", "thread_resolve", "submit" }) do
+    eq(adapters.can(glab, call), true, "glab declares " .. call)
+  end
+end)
+
+test("glab: both row queries add --per-page and -F json and normalise to rows carrying the source branch", function()
+  glab.forget()
+  local calls, restore = stub_run(function(argv)
+    return done(argv, { merge_request(), merge_request({ iid = 7, title = "Drop the flag", draft = true, source_branch = "drop-flag" }) })
+  end)
+  local got = {}
+  for _, query in ipairs({ config.defaults.sections[4].query.glab, config.defaults.sections[5].query.glab }) do
+    glab.rows({ query = query }, function(rows, err, warning)
+      got[#got + 1] = { rows = rows, err = err, warning = warning }
+    end)
+  end
+  restore()
+  eq(calls[1].argv, { "glab", "mr", "list", "--reviewer=@me", "--per-page", "100", "-F", "json" })
+  eq(calls[2].argv, { "glab", "mr", "list", "--assignee=@me", "--per-page", "100", "-F", "json" })
+  eq(#got, 2)
+  eq(got[1].err, nil)
+  eq(got[1].warning, nil)
+  local first, second = got[1].rows[1], got[1].rows[2]
+  eq({ first.source, first.id, first.state, first.title, first.branch }, { "glab", "!482", "opened", "Bump the pinned acli", "feature/acli.bump" })
+  eq({ second.id, second.state, second.branch }, { "!7", "draft", "drop-flag" }, "a draft's state is draft")
+  eq(first.target, "main")
+  eq(first.author, { id = "ana", name = "Ana" })
+  eq(first.assignee, { id = "me", name = "Me Myself" })
+  eq(first.url, "https://gitlab.example.test/acme/payments/-/merge_requests/482")
+  eq(glab.branch(first), "feature/acli.bump", "the branch is the row's own")
+  eq(glab.url({ id = "!482" }), first.url, "the address is remembered by iid")
+  eq(row.sort({ second, first })[1].id, "!7")
+end)
+
+test("glab: a row whose source project is not its target's is from a fork; one of the same project, or one whose list left either id out, is not, and the mark survives the cache", function()
+  glab.forget()
+  local _, restore_cache = scratch_cache()
+  local _, restore = stub_run(function(argv)
+    -- A fork's id on either side of its target's: the pair differing is the
+    -- mark, whichever is the larger.
+    return done(argv, {
+      merge_request({ iid = 482, source_branch = "main", source_project_id = 91, target_project_id = 77 }),
+      merge_request({ iid = 15, title = "Older fork", source_branch = "patch-1", source_project_id = 12, target_project_id = 77 }),
+      merge_request({ iid = 7, title = "Drop the flag", source_branch = "drop-flag", source_project_id = 77, target_project_id = 77 }),
+      merge_request({ iid = 9, title = "No target", source_branch = "patch-1", source_project_id = 91 }),
+      merge_request({ iid = 11, title = "No source", source_branch = "patch-1", target_project_id = 77 }),
+      merge_request({ iid = 13, title = "Neither", source_branch = "patch-1" }),
+    })
+  end)
+  local got
+  glab.rows({ query = { "mr", "list", "--assignee=@me" } }, function(rows, err, warning)
+    got = { rows = rows, err = err, warning = warning }
+  end)
+  restore()
+  eq(got.err, nil)
+  eq(got.warning, nil)
+  eq(vim.tbl_map(function(r)
+    return { r.id, r.fork }
+  end, got.rows), { { "!482", true }, { "!15", true }, { "!7" }, { "!9" }, { "!11" }, { "!13" } }, "only a differing pair marks a row")
+  eq(cache.write("fork-rows", got.rows), true)
+  eq(vim.tbl_map(function(r)
+    return r.fork
+  end, cache.read("fork-rows").rows), { true, true }, "the dash renders cached rows, so the mark has to come back off disk")
+  restore_cache()
+end)
+
+test("glab: a row the client returned that cannot be built is named in the warning, and a client that failed is the error", function()
+  glab.forget()
+  local _, restore = stub_run(function(argv)
+    return done(argv, { merge_request(), merge_request({ iid = 9, title = vim.NIL }) })
+  end)
+  local got
+  glab.rows({ query = { "mr", "list", "--assignee=@me" } }, function(rows, err, warning)
+    got = { rows = rows, err = err, warning = warning }
+  end)
+  restore()
+  eq(#got.rows, 1)
+  eq(got.warning, "row: !9 needs a non-empty string for title")
+  _, restore = stub_run(function(argv)
+    return failed(argv, 1, "ERROR: 401 Unauthorized")
+  end)
+  glab.rows({ query = { "mr", "list", "--assignee=@me" } }, function(rows, err)
+    got = { rows = rows, err = err }
+  end)
+  restore()
+  eq(got, { err = "glab exited 1\nERROR: 401 Unauthorized" })
+end)
+
+test("glab: a row's assignee is its assignee and not its reviewer", function()
+  glab.forget()
+  local _, restore = stub_run(function(argv)
+    return done(argv, { merge_request({ assignees = { gl_user("bea", "Bea") }, reviewers = { gl_user("me", "Me Myself") } }) })
+  end)
+  local got
+  glab.rows({ query = { "mr", "list", "--reviewer=@me" } }, function(rows)
+    got = rows
+  end)
+  restore()
+  eq(got[1].assignee, { id = "bea", name = "Bea" })
+end)
+
+test("glab: a section whose every row is refused is the error, not a warning", function()
+  glab.forget()
+  local _, restore = stub_run(function(argv)
+    return done(argv, { merge_request({ iid = 9, title = vim.NIL }), merge_request({ iid = 11, title = vim.NIL }) })
+  end)
+  local got
+  glab.rows({ query = { "mr", "list", "--assignee=@me" } }, function(rows, err, warning)
+    got = { rows, err, warning }
+  end)
+  restore()
+  eq(got[1], nil)
+  eq(got[2], "row: !9 needs a non-empty string for title\nrow: !11 needs a non-empty string for title")
+  eq(got[3], nil)
+end)
+
+test("glab: a row for a closed, a merged and a locked merge request carries that state", function()
+  glab.forget()
+  local _, restore = stub_run(function(argv)
+    return done(argv, {
+      merge_request({ iid = 5, state = "closed" }),
+      merge_request({ iid = 6, state = "merged" }),
+      merge_request({ iid = 8, state = "locked" }),
+    })
+  end)
+  local got
+  glab.rows({ query = { "mr", "list", "--assignee=@me" } }, function(rows)
+    got = rows
+  end)
+  restore()
+  eq(vim.tbl_map(function(r)
+    return r.state
+  end, got), { "closed", "merged", "locked" })
+end)
+
+test("glab: item completion is in row order whatever order the rows arrived in", function()
+  glab.forget()
+  local _, restore = stub_run(function(argv)
+    return done(argv, {
+      merge_request({ iid = 482 }),
+      merge_request({ iid = 7, title = "Drop the flag" }),
+      merge_request({ iid = 33, title = "Third" }),
+    })
+  end)
+  glab.rows({ query = { "mr", "list", "--assignee=@me" } }, function() end)
+  restore()
+  eq(vim.tbl_map(function(candidate)
+    return candidate.id
+  end, glab.complete("item", "")), { "!7", "!33", "!482" })
+end)
+
+test("glab: a section that answers after a login is not shown, and its rows are not remembered", function()
+  glab.forget()
+  local pending = {}
+  local saved = spawn.run
+  spawn.run = function(argv, _, on_done)
+    pending[#pending + 1] = { argv = argv, on_done = on_done }
+  end
+  local got
+  glab.rows({ query = { "mr", "list", "--assignee=@me" } }, function(rows, err)
+    got = { rows, err }
+  end)
+  glab.forget()
+  pending[1].on_done(done(pending[1].argv, { merge_request() }))
+  spawn.run = saved
+  eq(got[1], nil)
+  eq(
+    got[2],
+    "glab: a login ran while this section was in flight, so its rows are not shown; refresh to ask again"
+  )
+  eq(glab.complete("item", ""), {}, "the previous account's titles are not offered")
+  eq(glab.url({ id = "!482" }), nil, "and its addresses are not remembered")
+  eq(glab.auth_fields()[1].default, glab.DEFAULT_HOST, "nor its host")
+end)
+
+test("glab: diff reads both branches from mr view and the three shas from api, decoded here since api has no --jq", function()
+  local calls, restore = stub_glab()
+  local got
+  glab.diff("!482", function(diff, err)
+    got = { diff, err }
+  end)
+  restore()
+  eq(calls[1].argv, { "glab", "mr", "view", "482", "-F", "json" })
+  eq(calls[2].argv, { "glab", "api", "projects/:id/merge_requests/482" })
+  eq(has(calls[2].argv, "--jq"), false, "api has no --jq")
+  eq(got, { { source = "feature/acli.bump", target = "main", refs = DIFF_REFS } })
+end)
+
+test("glab: diff takes the branches from mr view and the shas from api", function()
+  local _, restore = stub_run(function(argv)
+    if argv[2] == "api" then
+      return done(
+        argv,
+        vim.tbl_extend(
+          "force",
+          merge_request({ source_branch = "stale", target_branch = "stale" }),
+          { diff_refs = DIFF_REFS }
+        )
+      )
+    end
+    return done(argv, merge_request())
+  end)
+  local got
+  glab.diff("!482", function(diff)
+    got = diff
+  end)
+  restore()
+  eq(got, { source = "feature/acli.bump", target = "main", refs = DIFF_REFS })
+end)
+
+test("glab: threads leave system notes out, read individual_note, and carry position, resolvable and resolved per note", function()
+  local calls, restore = stub_glab()
+  local got
+  glab.threads("!482", function(threads, err)
+    got = { threads, err }
+  end)
+  restore()
+  eq(calls[1].argv, { "glab", "mr", "note", "list", "482", "-F", "json" })
+  eq(got[2], nil)
+  local threads = got[1]
+  eq(#threads, 3, "the discussion GitLab wrote itself is gone")
+  eq({ threads[1].id, threads[1].individual, #threads[1].notes }, { string.rep("1", 40), true, 1 }, "a standalone comment")
+  eq(threads[1].resolvable, false)
+  eq(threads[1].position, nil)
+  local thread = threads[2]
+  eq({ thread.id, thread.individual, #thread.notes }, { string.rep("2", 40), false, 2 }, "a thread, its system note left out")
+  eq(thread.resolvable, true)
+  eq(thread.resolved, false)
+  eq(thread.position.new_path, "lua/docket/env.lua")
+  eq(thread.position.new_line, 12)
+  eq(thread.position.old_line, nil)
+  eq(thread.position.head_sha, DIFF_REFS.head_sha, "the position is carried as GitLab sent it")
+  -- The fixture writes JSON null for the old line, which decodes to nil.
+  local position = gl_position(12)
+  position.old_line = nil
+  eq(thread.notes[1], {
+    id = "3",
+    author = { id = "ana", name = "Ana" },
+    body = "Why here?",
+    created = "2024-05-02T10:00:00.000Z",
+    updated = "2024-05-02T11:00:00.000Z",
+    type = "DiffNote",
+    resolvable = true,
+    resolved = false,
+    position = position,
+  })
+  eq(thread.notes[2].author.id, "me")
+  eq({ threads[3].resolvable, threads[3].resolved, threads[3].notes[1].type }, { true, true, "DiscussionNote" })
+  eq(threads[3].individual, false, "one note is still a thread when individual_note says so: the flag is read, not the count")
+end)
+
+test("glab: threads take the thread's state and position from the first note", function()
+  local mixed = {
+    {
+      id = string.rep("4", 40),
+      individual_note = false,
+      notes = {
+        gl_note(10, gl_user("ana", "Ana"), "First.", { type = "DiffNote", resolvable = true, resolved = false, position = gl_position(12) }),
+        gl_note(11, gl_user("me", "Me Myself"), "Second.", { type = "DiffNote", resolvable = false, resolved = true, position = gl_position(99) }),
+      },
+    },
+  }
+  local _, restore = stub_run(function(argv)
+    return done(argv, mixed)
+  end)
+  local got
+  glab.threads("!482", function(threads)
+    got = threads
+  end)
+  restore()
+  eq({ got[1].resolvable, got[1].resolved }, { true, false }, "the first note's state, not the last")
+  eq(got[1].position.new_line, 12, "the first note's position")
+  eq({ got[1].notes[2].resolvable, got[1].notes[2].resolved }, { false, true }, "each note keeps its own")
+end)
+
+test("glab: an item holds markdown as text, its comments in discussion order, and never touches adf", function()
+  glab.forget()
+  local touched, saved = 0, {}
+  for _, name in ipairs({ "render", "serialise", "editable" }) do
+    saved[name] = adf[name]
+    adf[name] = function(...)
+      touched = touched + 1
+      return saved[name](...)
+    end
+  end
+  local calls, restore = stub_glab()
+  local got
+  glab.item("!482", function(it, err, me_err)
+    got = { it, err, me_err }
+  end)
+  restore()
+  for name, fn in pairs(saved) do
+    adf[name] = fn
+  end
+  eq(calls[1].argv, { "glab", "api", "user" })
+  eq(calls[2].argv, { "glab", "mr", "view", "482", "-F", "json" })
+  eq(calls[3].argv, { "glab", "mr", "note", "list", "482", "-F", "json" })
+  eq(got[2], nil)
+  eq(got[3], nil)
+  local it = got[1]
+  eq(touched, 0, "a GitLab body is markdown and goes nowhere near adf")
+  eq(it.body, "The pin moves to **1.3.36**.\n\nDigests come from the tap.", "the description is the text glab printed")
+  eq({ it.source, it.id, it.title, it.state, it.url }, { "glab", "!482", "Bump the pinned acli", "opened", merge_request().web_url })
+  eq(it.assignee, { id = "me", name = "Me Myself" })
+  eq(it.reporter, { id = "ana", name = "Ana" })
+  eq(it.me, "me")
+  eq(vim.tbl_map(function(comment)
+    return comment.id
+  end, it.comments), { "2", "3", "4", "6" }, "system notes are gone, the rest in discussion order")
+  eq(it.comments[3].body, "Because the window sits in it.")
+  eq(it.comments[3].updated, "2024-05-02T11:00:00.000Z")
+  eq(it.missing, 0)
+  local regions = item.regions(it)
+  eq(regions[4].editable, true, "the account's own note is editable")
+  eq(regions[2].editable, false)
+  eq(regions[2].reason, "written by Ana")
+end)
+
+test("glab: an item still opens when the identity is unknown, with the reason beside it", function()
+  glab.forget()
+  local _, restore = stub_run(function(argv)
+    if argv[2] == "api" and argv[3] == "user" then
+      return failed(argv, 1, "ERROR: 401 Unauthorized")
+    end
+    if argv[3] == "note" then
+      return done(argv, discussions())
+    end
+    return done(argv, merge_request())
+  end)
+  local got
+  glab.item("!482", function(it, err, me_err)
+    got = { it, err, me_err }
+  end)
+  restore()
+  eq(got[2], nil, "the item opens")
+  eq(got[1].me, nil)
+  eq(got[3], "glab exited 1\nERROR: 401 Unauthorized")
+  eq(item.regions(got[1])[2].editable, false, "every note is read-only for want of an ownership test")
+end)
+
+test("glab: an item read across a login opens read-only with the reason, and no comment reads as the new account's", function()
+  glab.forget()
+  local pending = {}
+  local saved = spawn.run
+  spawn.run = function(argv, _, on_done)
+    pending[#pending + 1] = { argv = argv, on_done = on_done }
+  end
+  local got
+  glab.item("!482", function(it, err, me_err)
+    got = { it, err, me_err }
+  end)
+  -- The identity answers under the account signing out, and the login runs
+  -- before the two reads that follow it land.
+  pending[1].on_done(done(pending[1].argv, gl_user("me", "Me Myself")))
+  glab.forget()
+  pending[2].on_done(done(pending[2].argv, merge_request()))
+  pending[3].on_done(done(pending[3].argv, discussions()))
+  spawn.run = saved
+  eq(got[2], nil, "the item still opens")
+  eq(got[1].me, nil)
+  eq(got[3], "a login ran while the item was read; open it again")
+  local regions = item.regions(got[1])
+  eq(regions[4].editable, false, "the note the previous account wrote is not offered for editing")
+  eq(regions[4].reason, "the account's own identifier is unknown, so no comment can be told from another account's")
+end)
+
+test("glab: whoami asks api user once, joins callers during the query, reports a failure verbatim, and forget drops it", function()
+  glab.forget()
+  local calls, restore = stub_glab()
+  local answers = {}
+  glab.whoami(function(id, err)
+    answers[#answers + 1] = { id, err }
+  end)
+  glab.whoami(function(id, err)
+    answers[#answers + 1] = { id, err }
+  end)
+  restore()
+  eq(answers, { { "me" }, { "me" } })
+  eq(#calls, 1)
+  eq(calls[1].argv, { "glab", "api", "user" })
+
+  local pending = {}
+  local saved = spawn.run
+  spawn.run = function(argv, _, on_done)
+    pending[#pending + 1] = { argv = argv, on_done = on_done }
+  end
+  glab.forget()
+  answers = {}
+  glab.whoami(function(id)
+    answers[#answers + 1] = id
+  end)
+  glab.whoami(function(id)
+    answers[#answers + 1] = id
+  end)
+  eq(#pending, 1, "one query in flight for two callers")
+  pending[1].on_done(done(pending[1].argv, gl_user("me", "Me Myself")))
+  spawn.run = saved
+  eq(answers, { "me", "me" })
+
+  glab.forget()
+  local got
+  _, restore = stub_run(function(argv)
+    return failed(argv, 1, "ERROR: 401 Unauthorized")
+  end)
+  glab.whoami(function(id, err)
+    got = { id, err }
+  end)
+  restore()
+  eq(got, { nil, "glab exited 1\nERROR: 401 Unauthorized" })
+
+  glab.forget()
+  _, restore = stub_run(function(argv)
+    return done(argv, { id = 14 })
+  end)
+  glab.whoami(function(id, err)
+    got = { id, err }
+  end)
+  restore()
+  eq(got[1], nil)
+  eq(got[2]:find("no `username`", 1, true) ~= nil, true, got[2])
+end)
+
+test("glab: an answer landing after forget is not remembered", function()
+  glab.forget()
+  local pending = {}
+  local saved = spawn.run
+  spawn.run = function(argv, _, on_done)
+    pending[#pending + 1] = { argv = argv, on_done = on_done }
+  end
+  local got
+  glab.whoami(function(id, err)
+    got = { id, err }
+  end)
+  glab.forget()
+  pending[1].on_done(done(pending[1].argv, gl_user("old", "Old Account")))
+  spawn.run = saved
+  eq(got[1], nil)
+  eq(got[2]:find("a login ran while the query was in flight", 1, true) ~= nil, true, got[2])
+  local calls, restore = stub_glab()
+  glab.whoami(function(id)
+    got = id
+  end)
+  restore()
+  eq(#calls, 1, "the next caller asks again")
+  eq(got, "me")
+end)
+
+test("whoami: a request that raises is reported and leaves no query in flight, and one waiter that raises answers the rest", function()
+  -- What each client prints for the account `me`.
+  local answers = {
+    jira = { found("TIG-7", { assignee = user("me", "Me Myself") }) },
+    glab = gl_user("me", "Me Myself"),
+    gh = "me\n",
+  }
+  for name, adapter in pairs({ jira = jira, glab = glab, gh = gh }) do
+    adapter.forget()
+    local saved = spawn.run
+    spawn.run = function()
+      error("boom")
+    end
+    local got
+    adapter.whoami(function(id, err)
+      got = { id, err }
+    end)
+    spawn.run = saved
+    eq(got[1], nil, name)
+    eq(got[2]:find("boom", 1, true) ~= nil, true, name .. ": " .. tostring(got[2]))
+
+    -- The slot is free again, so the next caller asks rather than joining a
+    -- query nothing will answer.
+    local calls, restore = stub_run(function(argv)
+      return done(argv, answers[name])
+    end)
+    local answered = false
+    adapter.whoami(function(id)
+      answered = id
+    end)
+    restore()
+    eq(#calls, 1, name .. ": the next caller asks again")
+    eq(answered, "me", name)
+
+    -- Two callers on one query, the first raising: the second is still answered
+    -- and the raise is reported rather than escaping into the exit handler.
+    adapter.forget()
+    local pending = {}
+    spawn.run = function(argv, _, on_done)
+      pending[#pending + 1] = { argv = argv, on_done = on_done }
+    end
+    local second = false
+    adapter.whoami(function()
+      error("the first caller raised")
+    end)
+    adapter.whoami(function(id)
+      second = id
+    end)
+    eq(#pending, 1, name .. ": one query for two callers")
+    local notices, restore_notify = stub_notify()
+    pending[1].on_done(done(pending[1].argv, answers[name]))
+    spawn.run = saved
+    vim.wait(1000, function()
+      return #notices > 0
+    end)
+    restore_notify()
+    eq(second, "me", name .. ": the caller behind the raise is answered")
+    eq(#notices, 1, name .. ": the raise is reported")
+    eq(notices[1].level, vim.log.levels.ERROR, name)
+    eq(notices[1].message:find("the first caller raised", 1, true) ~= nil, true, name .. ": " .. notices[1].message)
+  end
+end)
+
+test("whoami: glab and gh refuse a stale answer, and a caller after a login starts its own query", function()
+  for name, adapter in pairs({ glab = glab, gh = gh }) do
+    local function answer(login)
+      return name == "glab" and gl_user(login, login) or login .. "\n"
+    end
+    adapter.forget()
+    local pending, saved = {}, spawn.run
+    spawn.run = function(argv, _, on_done)
+      pending[#pending + 1] = { argv = argv, on_done = on_done }
+    end
+    local stale, fresh
+    adapter.whoami(function(id, err)
+      stale = { id, err }
+    end)
+    adapter.forget()
+    adapter.whoami(function(id)
+      fresh = id
+    end)
+    eq(#pending, 2, name .. ": a caller after a login starts its own query")
+    pending[1].on_done(done(pending[1].argv, answer("old")))
+    eq(stale[1], nil, name .. ": the answer from before the login is refused")
+    eq(stale[2]:find("a login ran while the query was in flight", 1, true) ~= nil, true, name .. ": " .. tostring(stale[2]))
+    eq(fresh, nil, name .. ": and reaches no caller of the fresh query")
+    local between
+    adapter.whoami(function(id)
+      between = id
+    end)
+    eq(#pending, 2, name .. ": the fresh query is still the one in flight")
+    eq(between, nil, name .. ": and the stale answer was not remembered")
+    pending[2].on_done(done(pending[2].argv, answer("me")))
+    eq({ fresh, between }, { "me", "me" }, name)
+    adapter.whoami(function() end)
+    spawn.run = saved
+    eq(#pending, 2, name .. ": the fresh answer is remembered")
+  end
+end)
+
+test("glab: whoami names the host in context, since api falls back to gitlab.com outside a clone", function()
+  glab.forget()
+  local _, restore_wait = stub_wait(function(argv)
+    return done(argv, "gitlab.example.test\n")
+  end)
+  glab.auth_status()
+  restore_wait()
+  local calls, restore = stub_run(function(argv)
+    return done(argv, gl_user("me", "Me Myself"))
+  end)
+  glab.whoami(function() end)
+  restore()
+  eq(calls[1].argv, { "glab", "api", "user", "--hostname", "gitlab.example.test" })
+
+  glab.forget()
+  calls, restore = stub_run(function(argv)
+    return done(argv, gl_user("me", "Me Myself"))
+  end)
+  glab.whoami(function() end)
+  restore()
+  eq(calls[1].argv, { "glab", "api", "user" }, "with no host known there is nothing to name")
+end)
+
+test("auth_status: a signed-in client's report is the detail, whichever stream it came on", function()
+  local report = "gitlab.example.test\n  \226\156\147 Logged in to gitlab.example.test as me (keyring)\n"
+  local _, restore = stub_wait(function(argv)
+    return { argv = argv, ok = true, code = 0, stdout = "", stderr = report, timed_out = false }
+  end)
+  local status = glab.auth_status()
+  restore()
+  eq(status.authenticated, true)
+  eq(status.detail, vim.trim(report), "glab writes auth status to stderr")
+
+  local gh_report = "github.com\n  \226\156\147 Logged in to github.com account me (keyring)\n  - Token scopes: 'repo'\n"
+  _, restore = stub_wait(function(argv)
+    return { argv = argv, ok = true, code = 0, stdout = "", stderr = gh_report, timed_out = false }
+  end)
+  status = gh.auth_status()
+  restore()
+  eq(status.authenticated, true)
+  eq(status.detail, vim.trim(gh_report), "gh's report reaches the detail whichever stream carries it")
+end)
+
+test("glab and gh pin the directory the mode was entered in, so a tab elsewhere cannot move the project", function()
+  glab.forget()
+  gh.forget()
+  local base = vim.fn.getcwd()
+  local _, restore_wait = stub_wait(function(argv)
+    return done(argv, "")
+  end)
+  glab.auth_status()
+  gh.auth_status()
+  restore_wait()
+  -- A tab moved into another directory is what the launcher makes away from
+  -- tmux, and what a person makes by hand.
+  vim.cmd.tabnew()
+  vim.cmd.tcd(vim.fn.fnameescape(vim.fn.fnamemodify(base, ":h")))
+  local elsewhere = vim.fn.getcwd()
+  local calls, restore = stub_run(function(argv)
+    if argv[1] == "glab" then
+      return done(argv, { merge_request() })
+    end
+    return done(argv, {
+      { number = 12, title = "Add the teardown", state = "OPEN", isDraft = false, headRefName = "teardown", url = "https://github.com/acme/payments/pull/12" },
+    })
+  end)
+  glab.rows({ query = { "mr", "list", "--assignee=@me" } }, function() end)
+  gh.rows({ query = { "pr", "list" } }, function() end)
+  restore()
+  vim.cmd.tabclose()
+  eq(elsewhere ~= base, true, "the tab did move the editor's own directory")
+  eq(calls[1].opts.cwd, base, "glab runs where the mode was entered")
+  eq(calls[2].opts.cwd, base, "gh runs where the mode was entered")
+end)
+
+test("glab: a call that chains several reads runs each in the clone it started in, whatever mode is entered meanwhile", function()
+  glab.forget()
+  -- auth_status() takes the directory every later call runs in; a second
+  -- mode entered in another clone while the first call's reads are in
+  -- flight moves it.
+  local cwd, saved_getcwd = "/w/a", vim.fn.getcwd
+  vim.fn.getcwd = function()
+    return cwd
+  end
+  local _, restore_wait = stub_wait(function(argv)
+    return done(argv, "")
+  end)
+  local pending, saved_run = {}, spawn.run
+  spawn.run = function(argv, opts, on_done)
+    pending[#pending + 1] = { argv = argv, cwd = opts and opts.cwd, on_done = on_done }
+  end
+  local function enter(dir)
+    cwd = dir
+    glab.auth_status()
+  end
+  local function answer(payload)
+    local call = table.remove(pending, 1)
+    call.on_done(done(call.argv, payload))
+    return call
+  end
+  -- Run under pcall, so a failure still puts getcwd back for the tests after.
+  local ok, err = pcall(function()
+    enter("/w/a")
+    glab.item("!12", function() end)
+    enter("/w/b")
+    eq(answer(gl_user("me", "Me Myself")).argv, { "glab", "api", "user" })
+    eq({ pending[1].argv[3], pending[1].cwd }, { "view", "/w/a" }, "item: mr view")
+    answer(merge_request({ iid = 12 }))
+    eq({ pending[1].argv[3], pending[1].cwd }, { "note", "/w/a" }, "item: mr note list")
+    answer(discussions())
+
+    enter("/w/a")
+    glab.diff("!12", function() end)
+    enter("/w/b")
+    answer(merge_request({ iid = 12 }))
+    eq({ pending[1].argv[2], pending[1].cwd }, { "api", "/w/a" }, "diff: the api read")
+    answer(vim.tbl_extend("force", merge_request({ iid = 12 }), { diff_refs = DIFF_REFS }))
+
+    enter("/w/a")
+    glab.submit("!12", { summary = "Looks right.", approve = true }, function() end)
+    enter("/w/b")
+    eq(answer("").argv[3], "note")
+    eq({ pending[1].argv[3], pending[1].cwd }, { "approve", "/w/a" }, "submit: the approval")
+    answer("")
+
+    enter("/w/a")
+    glab.rows({ query = { "mr", "list" } }, function() end)
+    enter("/w/b")
+    glab.rows({ query = { "mr", "list" } }, function() end)
+    eq({ pending[1].cwd, pending[2].cwd }, { "/w/a", "/w/b" }, "a call of one read runs where the mode it belongs to was entered")
+    answer({})
+    answer({})
+  end)
+  spawn.run = saved_run
+  vim.fn.getcwd = saved_getcwd
+  restore_wait()
+  assert(ok, err)
+end)
+
+test("glab: the state is the exit code, the login puts the token on stdin and never in argv, and forget drops the rows", function()
+  glab.forget()
+  local _, restore_run = stub_glab()
+  glab.rows({ query = { "mr", "list", "--assignee=@me" } }, function() end)
+  glab.whoami(function() end)
+  restore_run()
+  eq(glab.complete("item", "4"), { { id = "!482", title = "Bump the pinned acli" } }, "item references come from the rows")
+  eq(glab.complete("item", ""), { { id = "!7", title = "Drop the flag" }, { id = "!482", title = "Bump the pinned acli" } })
+  eq(glab.auth_fields()[1].default, "gitlab.example.test", "a row's web_url names the host when no status has been read")
+
+  -- The status fixture names a host no row carries: with the two the same,
+  -- either source alone satisfies the assertion below.
+  glab.forget()
+  local calls, restore = stub_wait(function(argv)
+    if argv[3] == "status" then
+      return failed(argv, 1, "gitlab.status.test\n  x gitlab.status.test: API call failed\n  ! No token found\n")
+    end
+    return done(argv, "")
+  end)
+  local status = glab.auth_status()
+  eq(status.authenticated, false)
+  eq(status.missing, false)
+  eq(status.detail, "glab exited 1\ngitlab.status.test\n  x gitlab.status.test: API call failed\n  ! No token found\n")
+  eq(glab.auth_fields()[1].name, "hostname")
+  eq(glab.auth_fields()[1].default, "gitlab.status.test", "the host is read off the status output, not off a row's web_url")
+  eq(glab.token_url(), "https://gitlab.status.test/-/user_settings/personal_access_tokens")
+
+  -- Rows again, so the login below has an account's worth of them to drop.
+  local _, restore_rows = stub_glab()
+  glab.rows({ query = { "mr", "list", "--assignee=@me" } }, function() end)
+  restore_rows()
+  eq(glab.complete("item", "4"), { { id = "!482", title = "Bump the pinned acli" } })
+  eq(glab.auth_fields()[1].default, "gitlab.status.test", "a row does not replace a host the status named")
+
+  local result = glab.auth_login("glpat-secret", { hostname = "gitlab.other.test" })
+  eq(result.ok, true)
+  eq(calls[2].argv, { "glab", "auth", "login", "--stdin", "--hostname", "gitlab.other.test" })
+  eq(calls[2].opts.stdin, "glpat-secret\n")
+  for _, word in ipairs(calls[2].argv) do
+    eq(word:find("secret", 1, true), nil, "the token is nowhere in the argument list")
+  end
+  eq(glab.token_url(), "https://gitlab.other.test/-/user_settings/personal_access_tokens", "a login names the host")
+  restore()
+  eq(glab.complete("item", ""), {}, "the previous account's rows are gone")
+  local run_calls, restore_glab = stub_glab()
+  glab.whoami(function() end)
+  restore_glab()
+  eq(#run_calls, 1, "the identity is gone, so whoami asks again")
+
+  _, restore = stub_wait(function(argv)
+    return done(argv, "gitlab.example.test\n  ✓ Logged in to gitlab.example.test as me\n")
+  end)
+  eq(glab.auth_status().authenticated, true)
+  restore()
+  _, restore = stub_wait(function(argv)
+    return { argv = argv, ok = false, code = spawn.MISSING, stdout = "", stderr = "ENOENT: no such file or directory", timed_out = false }
+  end)
+  status = glab.auth_status()
+  restore()
+  eq({ status.authenticated, status.missing }, { false, true })
+end)
+
+test("a failed login leaves the remembered host alone, in both review adapters", function()
+  for name, adapter in pairs({ glab = glab, gh = gh }) do
+    adapter.forget()
+    local _, restore = stub_wait(function(argv)
+      if argv[3] == "status" then
+        return done(argv, name == "glab" and "gitlab.example.test\n" or "github.example.test\n")
+      end
+      return failed(argv, 1, "ERROR: invalid token")
+    end)
+    adapter.auth_status()
+    local before = adapter.token_url()
+    local result = adapter.auth_login("token-wrong", { hostname = name .. ".typo.test" })
+    restore()
+    eq(result.ok, false, name)
+    eq(adapter.token_url(), before, name .. ": a login that failed names no host")
+    eq(adapter.auth_fields()[1].default, before:match("^https://([^/]+)/"), name)
+  end
+end)
+
+test("adapters: auth_status takes its callback, and given one runs the same check through spawn.run and hands on what the blocking form returns", function()
+  eq(adapters.ARITY.auth_status, 2, "the callback and the clone the check is about")
+  for name, module in pairs({ jira = jira, glab = glab, gh = gh }) do
+    eq({ adapters.verify(module, name) }, { true }, name)
+  end
+  local adapter = bare_adapter()
+  adapter.auth_status = taking(1)
+  eq(
+    { adapters.verify(adapter, "x") },
+    { false, "adapter x: auth_status takes 1 parameters and the contract gives it 2" },
+    "an auth_status with its callback alone is refused"
+  )
+  local function missing(argv)
+    return failed(argv, spawn.MISSING, "ENOENT: no such file or directory")
+  end
+  local cases = {
+    {
+      adapter = jira,
+      argv = argv_of("auth", "status"),
+      answers = {
+        function(argv)
+          return done(argv, STATUS_SIGNED_IN)
+        end,
+        function(argv)
+          return failed(argv, 1, "✗ Not authenticated")
+        end,
+        missing,
+      },
+    },
+    {
+      adapter = glab,
+      argv = { "glab", "auth", "status" },
+      cwd = vim.fn.getcwd(),
+      answers = {
+        function(argv)
+          return done(argv, "gitlab.example.test\n  ✓ Logged in to gitlab.example.test as me\n")
+        end,
+        function(argv)
+          return failed(argv, 1, "gitlab.example.test\n  x gitlab.example.test: API call failed\n")
+        end,
+        missing,
+      },
+    },
+    {
+      adapter = gh,
+      argv = { "gh", "auth", "status", "--active" },
+      cwd = vim.fn.getcwd(),
+      answers = {
+        function(argv)
+          return done(argv, "github.com\n  ✓ Logged in to github.com account me (keyring)\n")
+        end,
+        function(argv)
+          return failed(argv, 1, "You are not logged into any GitHub hosts. To log in, run: gh auth login")
+        end,
+        missing,
+      },
+    },
+  }
+  for _, case in ipairs(cases) do
+    for index, answer in ipairs(case.answers) do
+      local label = ("%s answer %d"):format(case.argv[1], index)
+      case.adapter.forget()
+      local waits, restore_wait = stub_wait(answer)
+      local blocking = case.adapter.auth_status()
+      restore_wait()
+      case.adapter.forget()
+      local runs, restore_run = stub_run(answer)
+      local guarded, restore_guard = stub_wait(function(argv)
+        error("the callback form waited on " .. table.concat(argv, " "))
+      end)
+      local got
+      local returned = case.adapter.auth_status(function(status)
+        got = status
+      end)
+      restore_guard()
+      restore_run()
+      eq(returned, nil, label .. ": nothing returned")
+      eq(#guarded, 0, label .. ": spawn.wait was never reached")
+      eq(got, blocking, label .. ": the state the blocking form returns")
+      eq(#runs, 1, label)
+      eq({ runs[1].argv, waits[1].argv }, { case.argv, case.argv }, label .. ": the same command")
+      eq(runs[1].opts and runs[1].opts.cwd, case.cwd, label .. ": the directory the editor is in, for a review client")
+    end
+  end
+
+  -- Given a clone, a review client checks there, and later calls given a bare
+  -- identifier run there too; Jira's verdict is the account's and reads no
+  -- directory. The dashboard passes the root it shows this way.
+  for _, case in ipairs({ { adapter = glab, cwd = "/w/given", later = { "glab", "api", "user" } }, { adapter = gh, cwd = "/w/given", later = { "gh", "api", "user" } }, { adapter = jira } }) do
+    local name = case.adapter == jira and "jira" or case.later[1]
+    case.adapter.forget()
+    local runs, restore_run = stub_run(function(argv)
+      return done(argv, "")
+    end)
+    local guarded, restore_guard = stub_wait(function(argv)
+      error("the callback form waited on " .. table.concat(argv, " "))
+    end)
+    case.adapter.auth_status(function() end, "/w/given")
+    if case.later then
+      case.adapter.whoami(function() end)
+    end
+    restore_guard()
+    restore_run()
+    case.adapter.forget()
+    eq(#guarded, 0, name)
+    eq(runs[1].opts and runs[1].opts.cwd, case.cwd, name .. ": the check runs in the clone given")
+    if case.later then
+      eq(vim.list_slice(runs[2].argv, 1, 3), case.later, name)
+      eq(runs[2].opts.cwd, "/w/given", name .. ": and so does a later call given no directory of its own")
+    end
+  end
+
+  -- What the answer names is kept as the blocking form keeps it.
+  jira.forget()
+  local _, restore = stub_run(function(argv)
+    return done(argv, STATUS_ONLY_SITE)
+  end)
+  jira.auth_status(function() end)
+  restore()
+  eq(jira.url({ id = "TIG-1" }), "https://status-only.atlassian.net/browse/TIG-1", "Jira's site")
+  glab.forget()
+  _, restore = stub_run(cases[2].answers[1])
+  glab.auth_status(function() end)
+  restore()
+  eq(glab.token_url(), "https://gitlab.example.test/-/user_settings/personal_access_tokens", "GitLab's host")
+  gh.forget()
+  local runs
+  runs, restore = stub_run(cases[3].answers[1])
+  gh.auth_status(function() end)
+  gh.auth_status(function() end)
+  restore()
+  eq(runs[2].argv, { "gh", "auth", "status", "--active", "--hostname", "github.com" }, "GitHub's host, which the next check asks about")
+  jira.forget()
+  glab.forget()
+  gh.forget()
+end)
+
+test("adapters: a state check answered after forget() records no host and no site, since it describes the account signed in before", function()
+  local cases = {
+    { adapter = jira, output = STATUS_ONLY_SITE, recorded = function()
+      return jira.url({ id = "TIG-1" })
+    end },
+    { adapter = glab, output = "gitlab.held.test\n  ✓ Logged in to gitlab.held.test as me\n", recorded = glab.token_url },
+    { adapter = gh, output = "github.held.test\n  ✓ Logged in to github.held.test account me\n", recorded = gh.token_url },
+  }
+  local found = {}
+  for _, case in ipairs(cases) do
+    for _, forgotten in ipairs({ false, true }) do
+      case.adapter.forget()
+      local unset = case.recorded()
+      local held, answer, restore = stub_run_held()
+      local got
+      case.adapter.auth_status(function(status)
+        got = status
+      end)
+      if forgotten then
+        case.adapter.forget()
+      end
+      answer(1, done(held[1].argv, case.output))
+      restore()
+      eq(got.authenticated, true, "the answer still reaches the caller")
+      found[#found + 1] = case.recorded() ~= unset
+    end
+    case.adapter.forget()
+  end
+  eq(found, { true, false, true, false, true, false }, "jira, glab and gh: recorded when nothing ran between, and not after a forget()")
+end)
+
+test("glab: a login drops the addresses read under the previous account", function()
+  glab.forget()
+  local _, restore = stub_glab()
+  glab.rows({ query = { "mr", "list", "--assignee=@me" } }, function() end)
+  restore()
+  eq(glab.url({ id = "!482" }), merge_request().web_url)
+  glab.forget()
+  local url, err = glab.url({ id = "!482" })
+  eq(url, nil)
+  eq(err, "!482 has not been read this session, so its address is unknown")
+end)
+
+test("glab: user completion asks the project's users and refuses a query needing encoding", function()
+  local calls, restore = stub_wait(function(argv)
+    return done(argv, { gl_user("ana", "Ana"), { username = "bea" }, { name = "no username" } })
+  end)
+  local found = glab.complete("user", "a")
+  eq(glab.complete("user", "a b"), {}, "a query outside [%w._-] is not sent")
+  eq(glab.complete("user", "a/b"), {})
+  restore()
+  eq(#calls, 1)
+  eq(calls[1].argv, { "glab", "api", "projects/:id/users?search=a" })
+  eq(calls[1].opts.timeout, config.options.timeouts.complete)
+  eq(found, { { id = "ana", title = "Ana" }, { id = "bea", title = "bea" } })
+  local _, restore_fail = stub_wait(function(argv)
+    return failed(argv, 1, "ERROR: 404")
+  end)
+  eq(glab.complete("user", "a"), {})
+  restore_fail()
+  eq(glab.complete("nothing", "a"), {}, "a kind the omnifunc does not ask for answers nothing")
+end)
+
+test("glab: each read names what the client printed instead of a payload", function()
+  glab.forget()
+  local got = {}
+  local _, restore = stub_run(function(argv)
+    if argv[3] == "view" then
+      return failed(argv, 1, "ERROR: 404 Not Found")
+    end
+    return done(argv, gl_user("me", "Me Myself"))
+  end)
+  glab.item("!482", function(it, err)
+    got.view = { it, err }
+  end)
+  restore()
+  eq(got.view, { nil, "glab exited 1\nERROR: 404 Not Found" })
+
+  _, restore = stub_run(function(argv)
+    if argv[2] == "mr" and argv[3] == "list" then
+      return done(argv, { message = "401 Unauthorized" })
+    end
+    return done(argv, gl_user("me", "Me Myself"))
+  end)
+  glab.rows({ query = { "mr", "list", "--assignee=@me" } }, function(rows, err)
+    got.rows = { rows, err }
+  end)
+  restore()
+  eq(
+    got.rows[2],
+    "glab: mr list printed something other than a list of merge requests; run\n  glab mr list --assignee=@me --per-page 100 -F json\nby hand to see what it prints"
+  )
+
+  _, restore = stub_run(function(argv)
+    if argv[3] == "view" then
+      return done(argv, { message = "404" })
+    end
+    return done(argv, gl_user("me", "Me Myself"))
+  end)
+  glab.item("!482", function(it, err)
+    got.empty = { it, err }
+  end)
+  restore()
+  eq(
+    got.empty[2],
+    "glab: mr view 482 printed no merge request; run\n  glab mr view 482 -F json\nby hand to see what it prints"
+  )
+
+  _, restore = stub_run(function(argv)
+    return done(argv, merge_request())
+  end)
+  glab.diff("!482", function(diff, err)
+    got.refs = { diff, err }
+  end)
+  restore()
+  eq(
+    got.refs[2],
+    "glab: the merge request 482 payload carries no `diff_refs`; run\n  glab api projects/:id/merge_requests/482\nby hand to see what it prints"
+  )
+
+  _, restore = stub_run(function(argv)
+    if argv[3] == "note" then
+      return done(argv, { message = "404" })
+    end
+    return done(argv, merge_request())
+  end)
+  glab.threads("!482", function(threads, err)
+    got.threads = { threads, err }
+  end)
+  restore()
+  eq(
+    got.threads[2],
+    "glab: mr note list 482 printed something other than a list of discussions; run\n  glab mr note list 482 -F json\nby hand to see what it prints"
+  )
+end)
+
+test("glab: a section query carrying a space reaches the message as a line a shell accepts", function()
+  glab.forget()
+  local _, restore = stub_run(function(argv)
+    return done(argv, { message = "401" })
+  end)
+  local got
+  glab.rows({ query = { "mr", "list", "--search", "bump the pin" } }, function(rows, err)
+    got = err
+  end)
+  restore()
+  eq(
+    got,
+    "glab: mr list printed something other than a list of merge requests; run\n  glab mr list --search 'bump the pin' --per-page 100 -F json\nby hand to see what it prints"
+  )
+end)
+
+test("glab: the write verbs put the body on stdin and name the merge request before the note", function()
+  local calls, restore = stub_glab()
+  local outcomes = {}
+  local function record(ok, err)
+    outcomes[#outcomes + 1] = { ok, err }
+  end
+  glab.comment_create("!482", "Looks right.\n\nOne nit.", record)
+  glab.comment_update("!482", "4", "Edited.", record)
+  glab.comment_delete("!482", "4", record)
+  glab.body_update("!482", "New description", record)
+  glab.line_comment("!482", { file = "lua/docket/env.lua", line = 12 }, "Here.", record)
+  glab.line_comment("!482", { file = "lua/docket/env.lua", old_line = 7 }, "Gone.", record)
+  glab.line_comment("!482", { file = "lua/docket/env.lua" }, "Whole file.", record)
+  glab.line_comment("!482", { thread = string.rep("2", 40) }, "Agreed.", record)
+  glab.line_comment("!482", {}, "Nowhere.", record)
+  glab.thread_resolve("!482", string.rep("2", 40), record)
+  restore()
+  -- A comment nobody has to resolve: without `--resolvable=false` it opens a
+  -- thread, which blocks the merge on a project that requires every thread
+  -- resolved. `--unique` makes a post repeated after a timeout post nothing
+  -- when the first one landed. A line comment and a reply carry neither flag,
+  -- since glab refuses both beside `--file` and `--reply`.
+  eq(calls[1].argv, { "glab", "mr", "note", "create", "482", "--resolvable=false", "--unique" })
+  eq(calls[1].opts.stdin, "Looks right.\n\nOne nit.\n", "the body is text, on stdin, with the newline a redirection carries")
+  eq(calls[2].argv, { "glab", "mr", "note", "update", "482", "4" })
+  eq(calls[2].opts.stdin, "Edited.\n")
+  eq(calls[3].argv, { "glab", "mr", "note", "delete", "482", "4", "--yes" })
+  eq(calls[4].argv, { "glab", "mr", "update", "482", "--description-file", "-" })
+  eq(calls[4].opts.stdin, "New description\n")
+  eq(calls[5].argv, { "glab", "mr", "note", "create", "482", "--file", "lua/docket/env.lua", "--line", "12" })
+  eq(calls[6].argv, { "glab", "mr", "note", "create", "482", "--file", "lua/docket/env.lua", "--old-line", "7" })
+  eq(calls[7].argv, { "glab", "mr", "note", "create", "482", "--file", "lua/docket/env.lua" })
+  eq(calls[8].argv, { "glab", "mr", "note", "create", "482", "--reply", string.rep("2", 40) })
+  eq(calls[9].argv, { "glab", "mr", "note", "resolve", "482", string.rep("2", 40) })
+  eq(#calls, 9, "a position with neither a file nor a thread spawns nothing")
+  eq(outcomes[9], { false, "a line comment needs a file, or a thread to reply into" })
+  for index, outcome in ipairs(outcomes) do
+    if index ~= 9 then
+      eq(outcome, { true }, ("call %d"):format(index))
+    end
+  end
+  for _, call in ipairs(calls) do
+    for _, word in ipairs(call.argv) do
+      eq(word:find("Looks right", 1, true), nil, "no body in an argument list")
+    end
+  end
+end)
+
+test("glab: states are actions from the merge request's state, state_set runs each verb, and submit posts the summary then approves", function()
+  local calls, restore = stub_glab()
+  local got = {}
+  glab.states("!482", function(states)
+    got.open = states
+  end)
+  restore()
+  eq(calls[1].argv, { "glab", "mr", "view", "482", "-F", "json" })
+  eq(got.open, { { label = "Approve", target = "approve" }, { label = "Merge", target = "merge" }, { label = "Close", target = "close" } })
+  _, restore = stub_glab({ state = "closed" })
+  glab.states("!482", function(states)
+    got.closed = states
+  end)
+  restore()
+  eq(got.closed, { { label = "Reopen", target = "reopen" } })
+  _, restore = stub_glab({ state = "merged" })
+  glab.states("!482", function(states)
+    got.merged = states
+  end)
+  restore()
+  eq(got.merged, {})
+
+  local outcomes = {}
+  local function record(ok, err)
+    outcomes[#outcomes + 1] = { ok, err }
+  end
+  calls, restore = stub_glab()
+  glab.state_set("!482", "approve", record)
+  glab.state_set("!482", "merge", record)
+  glab.state_set("!482", "close", record)
+  glab.state_set("!482", "reopen", record)
+  glab.state_set("!482", "In Progress", record)
+  restore()
+  eq(calls[1].argv, { "glab", "mr", "approve", "482" })
+  eq(calls[2].argv, { "glab", "mr", "merge", "482", "--yes" }, "merge prompts without --yes")
+  eq(calls[3].argv, { "glab", "mr", "close", "482" })
+  eq(calls[4].argv, { "glab", "mr", "reopen", "482" })
+  eq(#calls, 4)
+  eq(outcomes[5][1], false)
+  eq(outcomes[5][2]:find("approve, merge, close, reopen", 1, true) ~= nil, true, outcomes[5][2])
+
+  calls, restore = stub_glab()
+  outcomes = {}
+  glab.submit("!482", { summary = "Two nits, both inline.", approve = true }, record)
+  glab.submit("!482", { approve = true }, record)
+  glab.submit("!482", {}, record)
+  glab.submit("!482", { approve = true, head = DIFF_REFS.head_sha }, record)
+  restore()
+  eq(calls[1].argv, { "glab", "mr", "note", "create", "482", "--resolvable=false", "--unique" }, "the summary is a note nobody has to resolve")
+  eq(calls[1].opts.stdin, "Two nits, both inline.\n")
+  eq(calls[2].argv, { "glab", "mr", "approve", "482" })
+  eq(calls[3].argv, { "glab", "mr", "approve", "482" })
+  eq(calls[4].argv, { "glab", "mr", "approve", "482", "--sha", DIFF_REFS.head_sha }, "the head reviewed pins the approval")
+  eq(#calls, 4, "a verdict of nothing posts nothing")
+  eq(outcomes, { { true }, { true }, { true }, { true } })
+
+  calls, restore = stub_run(function(argv)
+    if argv[3] == "note" then
+      return failed(argv, 1, "ERROR: 403 Forbidden")
+    end
+    return done(argv, "")
+  end)
+  outcomes = {}
+  glab.submit("!482", { summary = "x", approve = true }, record)
+  restore()
+  eq(#calls, 1, "a summary that fails stops before the approval")
+  eq(outcomes, { { false, "glab exited 1\nERROR: 403 Forbidden" } })
+
+  calls, restore = stub_run(function(argv)
+    if argv[3] == "approve" then
+      return failed(argv, 1, "ERROR: 401 Unauthorized")
+    end
+    return done(argv, "")
+  end)
+  outcomes = {}
+  glab.submit("!482", { summary = "x", approve = true }, record)
+  glab.submit("!482", { approve = true }, record)
+  restore()
+  eq(#calls, 3)
+  eq(outcomes[1], {
+    false,
+    "the summary note is posted and the approval is not; approve alone rather than submitting again\nglab exited 1\nERROR: 401 Unauthorized",
+  }, "an approval that failed after the note went out says the note is out")
+  eq(outcomes[2], { false, "glab exited 1\nERROR: 401 Unauthorized" }, "with no note to lose the approval's own message stands")
+end)
+
+test("glab: a locked merge request offers the open actions", function()
+  local _, restore = stub_glab({ state = "locked" })
+  local got
+  glab.states("!482", function(states)
+    got = states
+  end)
+  restore()
+  eq(got, {
+    { label = "Approve", target = "approve" },
+    { label = "Merge", target = "merge" },
+    { label = "Close", target = "close" },
+  })
+end)
+
+test("glab: an identifier that is not a merge request's is refused before any call", function()
+  local calls, restore = stub_glab()
+  local got = {}
+  glab.item("PROJ-1", function(it, err)
+    got.item = { it, err }
+  end)
+  glab.comment_create("PROJ-1", "x", function(ok, err)
+    got.create = { ok, err }
+  end)
+  restore()
+  eq(#calls, 0)
+  eq(got.item[1], nil)
+  eq(got.item[2], "PROJ-1 is not a merge request identifier such as !482")
+  eq(got.create[1], false)
+  eq(glab.url({ id = "!999" }), nil)
+end)
+
+test("glab: every call refuses an identifier that is not a merge request's", function()
+  local calls, restore = stub_glab()
+  local got = {}
+  local function keep(name)
+    return function(first, second)
+      got[name] = { first, second }
+    end
+  end
+  glab.threads("PROJ-1", keep("threads"))
+  glab.diff("PROJ-1", keep("diff"))
+  glab.states("PROJ-1", keep("states"))
+  glab.comment_update("PROJ-1", "4", "x", keep("comment_update"))
+  glab.comment_delete("PROJ-1", "4", keep("comment_delete"))
+  glab.body_update("PROJ-1", "x", keep("body_update"))
+  glab.line_comment("PROJ-1", { file = "a" }, "x", keep("line_comment"))
+  glab.thread_resolve("PROJ-1", "abc", keep("thread_resolve"))
+  glab.state_set("PROJ-1", "approve", keep("state_set"))
+  glab.submit("PROJ-1", { approve = true }, keep("submit"))
+  restore()
+  eq(#calls, 0, "nothing spawned")
+  for name, answer in pairs(got) do
+    eq(answer[2], "PROJ-1 is not a merge request identifier", name)
+  end
+end)
+
+test("identifiers: a number with anything after it is not an identifier", function()
+  eq(commands.source_of("#12abc"), nil)
+  eq(commands.source_of("!482abc"), nil)
+  local calls, restore = stub_glab()
+  local got = {}
+  glab.item("!482abc", function(it, err)
+    got.glab = { it, err }
+  end)
+  gh.item("#12abc", function(it, err)
+    got.gh = { it, err }
+  end)
+  restore()
+  eq(#calls, 0)
+  eq(got.glab[2], "!482abc is not a merge request identifier such as !482")
+  eq(got.gh[2], "#12abc is not a pull request identifier such as #12")
+end)
+
+-- the GitHub adapter ------------------------------------------------------------------------
+
+-- The fields `pr list --json` is asked for, spelled out rather than read off
+-- gh.ROW_FIELDS: a name dropped from that list while rows() still builds from
+-- it is the defect, and an assertion that reads the list cannot see it.
+local GH_FIELDS = "number,title,state,isDraft,headRefName,isCrossRepository,url,updatedAt,author,assignees"
+
+local function pull_request(overrides)
+  return vim.tbl_extend("force", {
+    number = 12,
+    title = "Add the teardown",
+    state = "OPEN",
+    isDraft = false,
+    headRefName = "teardown",
+    url = "https://github.com/acme/payments/pull/12",
+    updatedAt = "2024-05-03T10:00:00Z",
+    author = { id = "MDQ6", is_bot = false, login = "ana", name = "Ana" },
+    assignees = { { id = "MDQ7", login = "me", name = "Me Myself" } },
+  }, overrides or {})
+end
+
+test("gh: both row queries add the field list, rows carry the head branch, and whoami is api user --jq .login", function()
+  gh.forget()
+  local calls, restore = stub_run(function(argv)
+    if argv[2] == "api" then
+      return done(argv, "me\n")
+    end
+    return done(argv, { pull_request(), pull_request({ number = 3, title = "WIP", isDraft = true, state = "OPEN", headRefName = "wip" }) })
+  end)
+  local got = {}
+  for _, query in ipairs({ config.defaults.sections[4].query.gh, config.defaults.sections[5].query.gh }) do
+    gh.rows({ query = query }, function(rows, err, warning)
+      got[#got + 1] = { rows = rows, err = err, warning = warning }
+    end)
+  end
+  local answers = {}
+  gh.whoami(function(id, err)
+    answers[#answers + 1] = { id, err }
+  end)
+  gh.whoami(function(id, err)
+    answers[#answers + 1] = { id, err }
+  end)
+  restore()
+  eq(calls[1].argv, { "gh", "pr", "list", "--search", "review-requested:@me", "--limit", "100", "--json", GH_FIELDS })
+  eq(calls[2].argv, { "gh", "pr", "list", "--assignee", "@me", "--limit", "100", "--json", GH_FIELDS })
+  eq(calls[3].argv, { "gh", "api", "user", "--jq", ".login" })
+  eq(#calls, 3, "one identity query for two callers")
+  eq(answers, { { "me" }, { "me" } })
+  local first, second = got[1].rows[1], got[1].rows[2]
+  eq({ first.source, first.id, first.state, first.title, first.branch }, { "gh", "#12", "open", "Add the teardown", "teardown" })
+  eq({ second.id, second.state, second.branch }, { "#3", "draft", "wip" })
+  eq(first.author, { id = "ana", name = "Ana" })
+  eq(first.url, "https://github.com/acme/payments/pull/12")
+  eq(gh.branch(first), "teardown")
+  eq(gh.url({ id = "#12" }), first.url)
+  eq(gh.token_url(), "https://github.com/settings/tokens")
+
+  local waits, restore_wait = stub_wait(function(argv)
+    if argv[3] == "status" then
+      return failed(argv, 1, "github.com\n  X Failed to log in to github.com account me (keyring)\n")
+    end
+    return done(argv, "")
+  end)
+  eq(gh.auth_status().authenticated, false, "gh exits 1 when an account has trouble")
+  local result = gh.auth_login("ghp_secret", { hostname = "github.com" })
+  eq(result.ok, true)
+  eq(waits[2].argv, { "gh", "auth", "login", "--with-token", "--hostname", "github.com" })
+  eq(waits[2].opts.stdin, "ghp_secret\n")
+  for _, word in ipairs(waits[2].argv) do
+    eq(word:find("secret", 1, true), nil, "the token is nowhere in the argument list")
+  end
+  restore_wait()
+  local runs, restore_run = stub_run(function(argv)
+    return done(argv, "me\n")
+  end)
+  gh.whoami(function() end)
+  restore_run()
+  eq(#runs, 1, "the login dropped the identity")
+end)
+
+test("gh: a row carries its assignee, one that cannot be built is a warning, and none at all is the error", function()
+  gh.forget()
+  local _, restore = stub_run(function(argv)
+    return done(argv, { pull_request(), pull_request({ number = 4, title = vim.NIL }) })
+  end)
+  local got
+  gh.rows({ query = { "pr", "list" } }, function(rows, err, warning)
+    got = { rows, err, warning }
+  end)
+  restore()
+  eq(#got[1], 1)
+  eq(got[1][1].assignee, { id = "me", name = "Me Myself" }, "the assignee is the first of `assignees`, not the author")
+  eq(got[3], "row: #4 needs a non-empty string for title")
+
+  _, restore = stub_run(function(argv)
+    return done(argv, { pull_request({ number = 4, title = vim.NIL }) })
+  end)
+  gh.rows({ query = { "pr", "list" } }, function(rows, err, warning)
+    got = { rows, err, warning }
+  end)
+  restore()
+  eq(got[1], nil, "a section whose every row was refused is the error, not an empty success")
+  eq(got[2], "row: #4 needs a non-empty string for title")
+  eq(got[3], nil)
+
+  _, restore = stub_run(function(argv)
+    return done(argv, { message = "Not Found" })
+  end)
+  gh.rows({ query = { "pr", "list" } }, function(rows, err)
+    got = { rows, err }
+  end)
+  restore()
+  eq(
+    got[2],
+    "gh: pr list printed something other than a list of pull requests; run\n  gh pr list --limit 100 --json "
+      .. GH_FIELDS
+      .. "\nby hand to see what it prints"
+  )
+end)
+
+test("gh: a row is from a fork when isCrossRepository is true, and not when it is false or the list left it out", function()
+  gh.forget()
+  local _, restore = stub_run(function(argv)
+    return done(argv, {
+      pull_request({ headRefName = "main", isCrossRepository = true }),
+      pull_request({ number = 3, title = "Same repository", headRefName = "same", isCrossRepository = false }),
+      pull_request({ number = 4, title = "Unmarked", headRefName = "patch-1" }),
+    })
+  end)
+  local got
+  gh.rows({ query = { "pr", "list" } }, function(rows, err, warning)
+    got = { rows = rows, err = err, warning = warning }
+  end)
+  restore()
+  eq(got.err, nil)
+  eq(got.warning, nil)
+  eq(vim.tbl_map(function(r)
+    return { r.id, r.fork }
+  end, got.rows), { { "#12", true }, { "#3" }, { "#4" } }, "true marks a row; false and absence do not")
+end)
+
+test("gh: a section that answers after a login is not shown, and its addresses and host are not remembered", function()
+  gh.forget()
+  local pending, saved = {}, spawn.run
+  spawn.run = function(argv, _, on_done)
+    pending[#pending + 1] = { argv = argv, on_done = on_done }
+  end
+  local got
+  gh.rows({ query = { "pr", "list" } }, function(rows, err)
+    got = { rows, err }
+  end)
+  gh.forget()
+  pending[1].on_done(done(pending[1].argv, { pull_request({ number = 5, url = "https://ghe.example.test/o/r/pull/5" }) }))
+  spawn.run = saved
+  eq(got, { nil, "gh: a login ran while this section was in flight, so its rows are not shown; refresh to ask again" })
+  eq(gh.url({ id = "#5" }), nil)
+  eq(gh.token_url(), "https://github.com/settings/tokens")
+end)
+
+test("gh: auth status asks about the active account, and about the host in context once one is known", function()
+  gh.forget()
+  local calls, restore = stub_wait(function(argv)
+    return done(argv, "github.com\n  ✓ Logged in to github.com account me (keyring)\n")
+  end)
+  gh.auth_status()
+  gh.auth_status()
+  restore()
+  eq(calls[1].argv, { "gh", "auth", "status", "--active" }, "with no host known, every host")
+  eq(calls[2].argv, { "gh", "auth", "status", "--active", "--hostname", "github.com" }, "then the one the first answer named")
+end)
+
+test("gh: forget drops the addresses and the host a list read", function()
+  gh.forget()
+  local _, restore = stub_run(function(argv)
+    return done(argv, { pull_request({ number = 5, url = "https://ghe.example.test/o/r/pull/5" }) })
+  end)
+  gh.rows({ query = { "pr", "list" } }, function() end)
+  restore()
+  eq({ gh.url({ id = "#5" }), gh.token_url() }, { "https://ghe.example.test/o/r/pull/5", "https://ghe.example.test/settings/tokens" })
+  gh.forget()
+  local url, err = gh.url({ id = "#5" })
+  eq({ url, err }, { nil, "#5 has not been listed this session, so its address is unknown" })
+  eq(gh.token_url(), "https://github.com/settings/tokens", "the host goes with the account")
+  eq(gh.auth_fields()[1].default, gh.DEFAULT_HOST)
+end)
+
+test("gh: an account with no display name is named by its login", function()
+  gh.forget()
+  local _, restore = stub_run(function(argv)
+    return done(argv, {
+      pull_request({
+        author = { id = "MDQ8", is_bot = false, login = "ana", name = "" },
+        assignees = { { id = "MDQ9", login = "bea", name = "" } },
+      }),
+    })
+  end)
+  local got
+  gh.rows({ query = { "pr", "list" } }, function(rows)
+    got = rows
+  end)
+  restore()
+  eq(got[1].author, { id = "ana", name = "ana" })
+  eq(got[1].assignee, { id = "bea", name = "bea" })
+end)
+
+test("gh: an empty login and a client that is not installed are each reported", function()
+  gh.forget()
+  local _, restore = stub_run(function(argv)
+    return done(argv, "\n")
+  end)
+  local got
+  gh.whoami(function(id, err)
+    got = { id, err }
+  end)
+  restore()
+  eq(got[1], nil, "an empty login is not remembered as the identity")
+  eq(got[2], "gh: `api user --jq .login` printed nothing; run `gh api user --jq .login` by hand to see what it prints")
+
+  gh.forget()
+  local _, restore_wait = stub_wait(function(argv)
+    return failed(argv, spawn.MISSING, "ENOENT: no such file or directory")
+  end)
+  local status = gh.auth_status()
+  restore_wait()
+  eq({ status.authenticated, status.missing }, { false, true }, "an absent gh is missing, not signed out")
+  eq(status.detail, "gh: not found\nENOENT: no such file or directory")
+end)
+
+test("gh: an item is handed to octo.nvim, and no item buffer is made for a pull request", function()
+  local edited = {}
+  vim.api.nvim_create_user_command("Octo", function(command)
+    edited[#edited + 1] = command.args
+  end, { nargs = "*" })
+  local got
+  gh.item("#12", function(it, err)
+    got = { it, err, settled = true }
+  end)
+  vim.wait(1000, function()
+    return got ~= nil
+  end)
+  eq(edited, { "pr edit 12" })
+  eq(got, { settled = true }, "no item and no error come back")
+
+  -- A reference carrying the row's address hands the command that address,
+  -- host and all, whatever the host; one whose address names no pull request
+  -- hands the number as the identifier alone does.
+  for _, url in ipairs({
+    "https://github.com/acme/payments/pull/12",
+    "https://ghe.example.test/acme/payments/pull/12",
+  }) do
+    got = nil
+    gh.item({ id = "#12", url = url }, function(it, err)
+      got = { it, err, settled = true }
+    end)
+    vim.wait(1000, function()
+      return got ~= nil
+    end)
+    eq(got, { settled = true }, url)
+    eq(edited[#edited], url, "the address is what the command is handed")
+  end
+  eq(#edited, 3, "one command per reference")
+  got = nil
+  gh.item({ id = "#12", url = "https://github.com/acme/payments/issues/12" }, function(it, err)
+    got = { it, err, settled = true }
+  end)
+  vim.wait(1000, function()
+    return got ~= nil
+  end)
+  eq(got, { settled = true })
+  eq(edited[#edited], "pr edit 12", "an address of another shape names no pull request, so the number goes alone")
+  eq(#edited, 4)
+  gh.item({ id = "PROJ-1", url = "https://github.com/acme/payments/pull/12" }, function(it, err)
+    got = { it, err }
+  end)
+  eq(got, { nil, "PROJ-1 is not a pull request identifier such as #12" }, "the identifier is judged, whatever the address")
+
+  -- Through the command, with the state check first: a `docket://gh/` buffer
+  -- is never made.
+  local _, restore_wait = stub_acli({ gh = true })
+  local notices, restore_notify = stub_notify()
+  local buffers = #vim.api.nvim_list_bufs()
+  eq(commands.item("#12"), nil)
+  vim.wait(1000, function()
+    return #edited == 5
+  end)
+  restore_notify()
+  restore_wait()
+  eq(edited[5], "pr edit 12", ":Docket #12 carries no address, so the number goes alone")
+  eq(buffer.named("docket://gh/#12"), nil)
+  eq(#vim.api.nvim_list_bufs(), buffers, "no buffer was made")
+  eq(notices, {})
+  vim.api.nvim_del_user_command("Octo")
+
+  got = nil
+  gh.item("#12", function(it, err)
+    got = { it, err }
+  end)
+  vim.wait(1000, function()
+    return got ~= nil
+  end)
+  eq(got[1], nil)
+  eq(got[2]:find("octo.nvim is not installed", 1, true), 1, got[2])
+  -- A list teaches the adapter #12's address on github.com, and the reference
+  -- carries another, on another host: the row's own is what is printed, not
+  -- the one url() has cached for the number.
+  local _, restore_list = stub_run(function(argv)
+    return done(argv, { pull_request() })
+  end)
+  local listed
+  gh.rows({ query = { "pr", "list" } }, function(rows)
+    listed = rows
+  end)
+  restore_list()
+  eq(listed[1].url, "https://github.com/acme/payments/pull/12", "the cached address")
+  got = nil
+  gh.item({ id = "#12", url = "https://ghe.example.test/acme/tools/pull/12" }, function(it, err)
+    got = { it, err }
+  end)
+  vim.wait(1000, function()
+    return got ~= nil
+  end)
+  eq(got, {
+    nil,
+    "octo.nvim is not installed, and a pull request opens there; #12 is at https://ghe.example.test/acme/tools/pull/12",
+  }, "the address a row carries is the one printed")
+  gh.item("PROJ-1", function(it, err)
+    got = { it, err }
+  end)
+  eq(got[2], "PROJ-1 is not a pull request identifier such as #12")
+end)
+
+test("gh: a handoff that raises is reported, with the editor's own internals off the message", function()
+  vim.api.nvim_create_user_command("Octo", function()
+    error("E5108: Octo: no repository here", 0)
+  end, { nargs = "*" })
+  local got
+  gh.item("#12", function(it, err)
+    got = { it, err }
+  end)
+  vim.wait(1000, function()
+    return got ~= nil
+  end)
+  eq(got[1], nil)
+  eq(got[2]:find("E5108: Octo: no repository here", 1, true) ~= nil, true, got[2])
+  eq(got[2]:find("stack traceback", 1, true), nil, "the traceback is not the report")
+  eq(got[2]:find("nvim_exec2", 1, true), nil, "nor is the call that ran the command")
+
+  -- Through the command: a handoff nobody can complete is one ERROR notice,
+  -- since there is no item buffer to carry the reason instead.
+  local _, restore_wait = stub_acli({ gh = true })
+  local notices, restore_notify = stub_notify()
+  eq(commands.item("#12"), nil)
+  vim.wait(1000, function()
+    return #notices > 0
+  end)
+  restore_notify()
+  restore_wait()
+  eq(#notices, 1)
+  eq(notices[1].level, vim.log.levels.ERROR)
+  eq(notices[1].message:find("E5108: Octo: no repository here", 1, true) ~= nil, true, notices[1].message)
+  vim.api.nvim_del_user_command("Octo")
+end)
+
+
+test("plugin: :e on a pull request's name hands it to octo.nvim with no error, and the buffer :e made is wiped once octo's takes the window", function()
+  vim.g.loaded_docket = nil
+  dofile(root .. "/dot_local/share/private_nvim/private_site/pack/docket/start/docket/plugin/docket.lua")
+  -- `enew` stands in for the buffer octo.nvim's `pr edit` shows the pull
+  -- request in, in the current window. UNVERIFIED: that octo.nvim takes the
+  -- current window is not observed, and it is what wipes the buffer :e made.
+  local edited = {}
+  vim.api.nvim_create_user_command("Octo", function(command)
+    edited[#edited + 1] = command.args
+    vim.cmd("enew")
+  end, { nargs = "*" })
+  local _, restore_wait = stub_acli({ gh = true })
+  local notices, restore_notify = stub_notify()
+  -- `#` is the alternate file on the command line, so a typed name escapes it.
+  vim.cmd("edit docket://gh/\\#12")
+  local handed = vim.wait(1000, function()
+    return #edited == 1 and buffer.named("docket://gh/#12") == nil
+  end)
+  vim.api.nvim_del_user_command("Octo")
+  vim.cmd("edit docket://gh/\\#13")
+  local left = buffer.named("docket://gh/#13")
+  vim.wait(1000, function()
+    return #notices > 0
+  end)
+  local kept = left and {
+    valid = vim.api.nvim_buf_is_valid(left),
+    bufhidden = vim.bo[left].bufhidden,
+    filetype = vim.bo[left].filetype,
+    listed = vim.bo[left].buflisted,
+    modifiable = vim.bo[left].modifiable,
+    -- Text typed into a `wipe` buffer would make every switch away from it
+    -- E37, with nothing here for `:w` to clear it with.
+    typed = left and pcall(vim.api.nvim_buf_set_lines, left, 0, -1, false, { "typed" }),
+  }
+  vim.cmd("enew")
+  local wiped = left and not vim.api.nvim_buf_is_valid(left)
+  restore_notify()
+  restore_wait()
+  eq(handed, true, "octo was asked, and the buffer :e made is gone")
+  eq(edited, { "pr edit 12" })
+  eq(#notices, 1, vim.inspect(notices))
+  eq(notices[1].level, vim.log.levels.ERROR)
+  eq(notices[1].message:find("octo.nvim is not installed", 1, true), 1, notices[1].message)
+  eq(
+    kept,
+    { valid = true, bufhidden = "wipe", filetype = "", listed = false, modifiable = false, typed = false },
+    "a handoff that failed leaves the bare buffer, set up as no item buffer and taking no text"
+  )
+  eq(wiped, true, "and leaving it wipes it")
+end)
+
+-- the teardown ------------------------------------------------------------------------------
+
+-- What `git worktree list --porcelain` answers for a clone holding one
+-- worktree on each of the branches the teardown tests remove.
+local WORKTREES = table.concat({
+  "worktree /w/repo/bare",
+  "bare",
+  "",
+  "worktree /w/repo/PROJ-1-x",
+  "branch refs/heads/PROJ-1-x",
+  "",
+  "worktree /w/repo/feature-acli.bump",
+  "branch refs/heads/feature/acli.bump",
+  "",
+}, "\n")
+
+-- The launcher's counterpart, inside tmux: every process call recorded, with
+-- tmux answering from `windows` -- the session's windows, the current one
+-- first -- the worktree listing from WORKTREES, a clean tree from `git status`,
+-- and `git wt-rm` from `removal`.
+local function stub_teardown(windows, removal)
+  return stub_wait(function(argv, opts)
+    if argv[1] == "tmux" and argv[2] == "display-message" then
+      return done(argv, windows[1] .. "\n")
+    end
+    if argv[1] == "tmux" and argv[2] == "list-windows" then
+      return done(argv, table.concat(windows, "\n") .. "\n")
+    end
+    if argv[1] == "tmux" then
+      return done(argv, "")
+    end
+    if argv[2] == "worktree" then
+      return done(argv, WORKTREES)
+    end
+    if argv[2] == "status" then
+      return done(argv, "")
+    end
+    return removal(argv, opts)
+  end)
+end
+
+test("teardown: inside tmux the windows present are closed, in order, and then the worktree is removed", function()
+  local saved_tmux = vim.env.TMUX
+  vim.env.TMUX = "/tmp/tmux-1/default,1,0"
+  local calls, restore = stub_teardown({ "dash", "PROJ-1-x", "PROJ-1-x-sh", "other" }, function(argv)
+    return done(argv, "removed PROJ-1-x/\ndeleted branch 'PROJ-1-x'\n")
+  end)
+  local removed, err = env.teardown({ root = "/w/repo", branch = "PROJ-1-x" })
+  restore()
+  vim.env.TMUX = saved_tmux
+  eq(err, nil)
+  eq(removed, { branch = "PROJ-1-x", window = "PROJ-1-x", closed = { "PROJ-1-x", "PROJ-1-x-sh" } })
+  eq(vim.tbl_map(function(call)
+    return call.argv
+  end, calls), {
+    { "git", "worktree", "list", "--porcelain" },
+    { "git", "status", "--porcelain" },
+    { "tmux", "display-message", "-p", "#{window_name}" },
+    { "tmux", "list-windows", "-F", "#{window_name}" },
+    { "tmux", "kill-window", "-t", "=PROJ-1-x" },
+    { "tmux", "kill-window", "-t", "=PROJ-1-x-sh" },
+    { "git", "wt-rm", "PROJ-1-x" },
+  }, "what git wt-rm needs comes first, then both windows, then the worktree")
+  eq(calls[1].opts.cwd, "/w/repo", "the listing runs at the clone's root")
+  eq(calls[2].opts.cwd, "/w/repo/PROJ-1-x", "the clean-tree check runs in the worktree")
+  eq(calls[7].opts.cwd, "/w/repo", "git runs at the clone's root")
+  eq(calls[5].opts.timeout, config.options.timeouts.tmux)
+  eq(calls[7].opts.timeout, config.options.timeouts.git)
+end)
+
+test("teardown: a worktree holding uncommitted work is refused with no window closed, and force skips the check", function()
+  local saved_tmux = vim.env.TMUX
+  vim.env.TMUX = "/tmp/tmux-1/default,1,0"
+  local calls, restore = stub_wait(function(argv)
+    if argv[2] == "worktree" then
+      return done(argv, WORKTREES)
+    end
+    if argv[2] == "status" then
+      return done(argv, " M lua/docket/env.lua\n?? notes.md\n")
+    end
+    error("nothing runs once the worktree is dirty: " .. table.concat(argv, " "))
+  end)
+  local removed, err = env.teardown({ root = "/w/repo", branch = "PROJ-1-x" })
+  restore()
+  eq(removed, nil)
+  eq(
+    err,
+    "/w/repo/PROJ-1-x holds modified or untracked files, which `git wt-rm` refuses; commit them, or pass force = true to discard them along with the folder"
+  )
+  eq(#calls, 2, "no window was closed for a refusal that was coming")
+
+  calls, restore = stub_teardown({ "dash", "PROJ-1-x" }, function(argv)
+    return done(argv, "removed PROJ-1-x/\n")
+  end)
+  removed, err = env.teardown({ root = "/w/repo", branch = "PROJ-1-x", force = true })
+  restore()
+  vim.env.TMUX = saved_tmux
+  eq(err, nil)
+  eq(removed.closed, { "PROJ-1-x" })
+  eq(has(vim.tbl_map(function(call)
+    return call.argv[2]
+  end, calls), "status"), false, "force discards the work, so the check is not made")
+end)
+
+test("teardown: a branch with no worktree here is refused before anything is closed", function()
+  local saved_tmux = vim.env.TMUX
+  vim.env.TMUX = "/tmp/tmux-1/default,1,0"
+  local calls, restore = stub_wait(function(argv)
+    if argv[2] == "worktree" then
+      return done(argv, WORKTREES)
+    end
+    error("nothing runs for a branch with no worktree: " .. table.concat(argv, " "))
+  end)
+  local removed, err = env.teardown({ root = "/w/repo", branch = "PROJ-9-y" })
+  restore()
+  eq(removed, nil)
+  eq(err, "PROJ-9-y has no worktree in /w/repo, so there is nothing to remove")
+  eq(#calls, 1)
+
+  calls, restore = stub_wait(function(argv)
+    return failed(argv, 128, "fatal: not a git repository")
+  end)
+  removed, err = env.teardown({ root = "/w/repo", branch = "PROJ-1-x" })
+  restore()
+  vim.env.TMUX = saved_tmux
+  eq(removed, nil)
+  eq(err, "git exited 128\nfatal: not a git repository")
+  eq(#calls, 1, "a listing that failed stops the teardown")
+end)
+
+test("teardown: a window already gone is not closed again, a review branch's name is flattened, and force reaches git", function()
+  local saved_tmux = vim.env.TMUX
+  vim.env.TMUX = "/tmp/tmux-1/default,1,0"
+  local calls, restore = stub_teardown({ "dash", "feature-acli-bump-sh" }, function(argv)
+    return done(argv, "removed feature-acli.bump/\n")
+  end)
+  local removed, err = env.teardown({ root = "/w/repo", branch = "feature/acli.bump", force = true })
+  restore()
+  vim.env.TMUX = saved_tmux
+  eq(err, nil)
+  eq(removed.closed, { "feature-acli-bump-sh" }, "only the window that was there")
+  eq(removed.window, "feature-acli-bump")
+  eq(calls[4].argv, { "tmux", "kill-window", "-t", "=feature-acli-bump-sh" })
+  eq(calls[5].argv, { "git", "wt-rm", "feature/acli.bump", "--force" }, "git takes the ref, not the window name")
+  eq(#calls, 5, "force skips the clean-tree check")
+end)
+
+test("teardown: a window that cannot be closed stops the removal, and so does running it from either window", function()
+  local saved_tmux = vim.env.TMUX
+  vim.env.TMUX = "/tmp/tmux-1/default,1,0"
+  local calls, restore = stub_wait(function(argv)
+    if argv[2] == "worktree" then
+      return done(argv, WORKTREES)
+    end
+    if argv[2] == "status" then
+      return done(argv, "")
+    end
+    if argv[2] == "display-message" then
+      return done(argv, "dash\n")
+    end
+    if argv[2] == "list-windows" then
+      return done(argv, "dash\nPROJ-1-x\nPROJ-1-x-sh\n")
+    end
+    if argv[2] == "kill-window" then
+      return failed(argv, 1, "server exited unexpectedly")
+    end
+    error("git wt-rm must not run once a window failed to close: " .. table.concat(argv, " "))
+  end)
+  local removed, err = env.teardown({ root = "/w/repo", branch = "PROJ-1-x" })
+  restore()
+  eq(removed, nil)
+  eq(err, "tmux exited 1\nserver exited unexpectedly")
+  eq(#calls, 5, "the first kill failed and nothing followed")
+
+  for _, here in ipairs({ "PROJ-1-x", "PROJ-1-x-sh" }) do
+    calls, restore = stub_wait(function(argv)
+      if argv[2] == "worktree" then
+        return done(argv, WORKTREES)
+      end
+      if argv[2] == "status" then
+        return done(argv, "")
+      end
+      if argv[2] == "display-message" then
+        return done(argv, here .. "\n")
+      end
+      error("nothing runs after the refusal: " .. table.concat(argv, " "))
+    end)
+    removed, err = env.teardown({ root = "/w/repo", branch = "PROJ-1-x" })
+    restore()
+    eq(removed, nil)
+    eq(
+      err,
+      ("this editor runs in tmux window %s, which the teardown closes; run it from another window"):format(here),
+      "the companion window refuses the teardown too"
+    )
+    eq(#calls, 3)
+  end
+
+  -- A tmux that cannot answer either question is an error: with no server the
+  -- current window would read as empty and the listing as no windows at all,
+  -- and the teardown would remove the worktree while both may still sit in it.
+  for _, step in ipairs({ "display-message", "list-windows" }) do
+    calls, restore = stub_wait(function(argv)
+      if argv[2] == "worktree" then
+        return done(argv, WORKTREES)
+      end
+      if argv[2] == "status" then
+        return done(argv, "")
+      end
+      if argv[2] == "display-message" and step == "list-windows" then
+        return done(argv, "dash\n")
+      end
+      if argv[2] == step then
+        return failed(argv, 1, "no server running on /tmp/tmux-1/default")
+      end
+      error("nothing runs once tmux could not answer: " .. table.concat(argv, " "))
+    end)
+    removed, err = env.teardown({ root = "/w/repo", branch = "PROJ-1-x" })
+    restore()
+    eq(removed, nil)
+    eq(err, "tmux exited 1\nno server running on /tmp/tmux-1/default", step)
+  end
+  vim.env.TMUX = saved_tmux
+end)
+
+-- What git-wt-rm prints when `git worktree remove` refuses: its own prefix,
+-- then the failed git argument list, then git's sentence. The refusal reaches
+-- here only through a race, since teardown checks the tree first.
+local WT_RM_REFUSAL = "git-wt-rm: worktree remove /w/repo/PROJ-1-x: fatal: '/w/repo/PROJ-1-x' contains modified or untracked files, use --force to delete it\n"
+
+-- What it prints when the folder went and `git branch -d` refused the branch:
+-- the same prefix and argument list, git's own sentence with its advice, and
+-- then the two lines git-wt-rm adds.
+local WT_RM_BRANCH_KEPT = table.concat({
+  "git-wt-rm: branch -d PROJ-1-x: error: the branch 'PROJ-1-x' is not fully merged",
+  "hint: If you are sure you want to delete it, run 'git branch -D PROJ-1-x'",
+  "hint: Disable this message with \"git config set advice.forceDeleteBranch false\"",
+  "the worktree is gone; once losing the branch is intended:",
+  "    git branch -D PROJ-1-x",
+  "",
+}, "\n")
+
+test("teardown: git wt-rm's refusal is the error verbatim, a branch it kept is a warning, and away from tmux nothing but git runs", function()
+  local saved_tmux = vim.env.TMUX
+  vim.env.TMUX = nil
+  local calls, restore = stub_wait(function(argv)
+    if argv[1] ~= "git" then
+      error("no tmux away from tmux: " .. table.concat(argv, " "))
+    end
+    if argv[2] == "worktree" then
+      return done(argv, WORKTREES)
+    end
+    if argv[2] == "status" then
+      return done(argv, "")
+    end
+    return failed(argv, 1, WT_RM_REFUSAL)
+  end)
+  local removed, err = env.teardown({ root = "/w/repo", branch = "PROJ-1-x" })
+  restore()
+  eq(removed, nil)
+  eq(err, vim.trim(WT_RM_REFUSAL), "no window was closed, so the error is git-wt-rm's own")
+  eq(#calls, 3)
+  eq(calls[3].argv, { "git", "wt-rm", "PROJ-1-x" })
+
+  calls, restore = stub_wait(function(argv)
+    if argv[2] == "worktree" then
+      return done(argv, WORKTREES)
+    end
+    if argv[2] == "status" then
+      return done(argv, "")
+    end
+    return {
+      argv = argv,
+      ok = false,
+      code = 1,
+      stdout = "removed PROJ-1-x/\n",
+      stderr = WT_RM_BRANCH_KEPT,
+      timed_out = false,
+    }
+  end)
+  removed, err = env.teardown({ root = "/w/repo", branch = "PROJ-1-x" })
+  restore()
+  vim.env.TMUX = saved_tmux
+  eq(err, nil)
+  eq(removed.closed, {}, "no windows away from tmux")
+  eq(removed.warning, vim.trim(WT_RM_BRANCH_KEPT))
+  eq(#calls, 3)
+end)
+
+test("teardown: a refusal after both windows were closed says they are gone and the worktree is not", function()
+  local saved_tmux = vim.env.TMUX
+  vim.env.TMUX = "/tmp/tmux-1/default,1,0"
+  local calls, restore = stub_teardown({ "dash", "PROJ-1-x", "PROJ-1-x-sh" }, function(argv)
+    return failed(argv, 1, "git: 'wt-rm' is not a git command. See 'git --help'.\n")
+  end)
+  local removed, err = env.teardown({ root = "/w/repo", branch = "PROJ-1-x" })
+  restore()
+  eq(removed, nil)
+  eq(
+    err,
+    "git: 'wt-rm' is not a git command. See 'git --help'.\nthe tmux windows PROJ-1-x and PROJ-1-x-sh are closed; the worktree is still there"
+  )
+  eq(#calls, 7)
+
+  calls, restore = stub_teardown({ "dash", "PROJ-1-x-sh" }, function(argv)
+    return failed(argv, 1, WT_RM_REFUSAL)
+  end)
+  removed, err = env.teardown({ root = "/w/repo", branch = "PROJ-1-x" })
+  restore()
+  vim.env.TMUX = saved_tmux
+  eq(removed, nil)
+  eq(
+    err,
+    vim.trim(WT_RM_REFUSAL) .. "\nthe tmux window PROJ-1-x-sh is closed; the worktree is still there",
+    "one window closed reads as one"
+  )
+  eq(#calls, 6)
+end)
+
+-- the launcher and the binding -------------------------------------------------------------
+
+test("launcher: a ticket and a review each reuse the worktree already on their branch, and git is not asked to make one", function()
+  local saved_tmux = vim.env.TMUX
+  vim.env.TMUX = "/tmp/tmux-1/default,1,0"
+  local porcelain = table.concat({
+    "worktree /w/repo/.bare",
+    "bare",
+    "",
+    "worktree /w/repo/PROJ-1-old-summary",
+    "branch refs/heads/PROJ-1-old-summary",
+    "",
+    "worktree /w/repo/feature-x",
+    "branch refs/heads/feature/x",
+    "",
+  }, "\n")
+  local calls, restore = stub_wait(function(argv)
+    if argv[1] == "git" and argv[2] == "worktree" then
+      return done(argv, porcelain)
+    end
+    if argv[1] == "tmux" then
+      return done(argv, "")
+    end
+    return failed(argv, 1, "unexpected: " .. table.concat(argv, " "))
+  end)
+  local binding = { kind = "projects", projects = { "PROJ" } }
+  -- The summary was edited after the worktree was made, so the branch it
+  -- would generate now is another one.
+  local ticket_opened, ticket_err = env.launch({ root = "/w/repo", binding = binding, key = "PROJ-1", summary = "an edited summary" })
+  local review_opened, review_err = env.launch({ root = "/w/repo", binding = binding, branch = "feature/x", review = "!4" })
+  restore()
+  vim.env.TMUX = saved_tmux
+  eq({ ticket_err, review_err }, {})
+  eq({ ticket_opened.path, ticket_opened.branch, ticket_opened.window }, { "/w/repo/PROJ-1-old-summary", "PROJ-1-old-summary", "PROJ-1-old-summary" })
+  eq({ review_opened.path, review_opened.branch, review_opened.window }, { "/w/repo/feature-x", "feature/x", "feature-x" })
+  for _, call in ipairs(calls) do
+    eq(call.argv[1] == "git" and call.argv[2] ~= "worktree", false, "only the listing runs git: " .. table.concat(call.argv, " "))
+  end
+  local windows = vim.tbl_filter(function(call)
+    return call.argv[2] == "new-window" and call.argv[4] == "-n"
+  end, calls)
+  eq(windows[1].argv, { "tmux", "new-window", "-S", "-n", "PROJ-1-old-summary", "-c", "/w/repo/PROJ-1-old-summary", "nvim" })
+  eq(windows[2].argv, { "tmux", "new-window", "-S", "-n", "feature-x", "-c", "/w/repo/feature-x", "nvim", "-c", "Docket review !4" })
+end)
+
+test("launcher: a repository bound to its projects refuses another project's key with the command that binds it", function()
+  local calls, restore = stub_wait(function(argv)
+    if argv[2] == "worktree" then
+      return done(argv, "worktree /w/repo/.bare\nbare\n\n")
+    end
+    error("nothing runs for a key from another project: " .. table.concat(argv, " "))
+  end)
+  local opened, err = env.launch({ root = "/w/repo", binding = { kind = "projects", projects = { "PAY", "OPS" } }, key = "TIG-5", summary = "x" })
+  restore()
+  eq(opened, nil)
+  eq(
+    err,
+    "/w/repo is bound to PAY, OPS, not TIG, so no worktree is made for TIG-5 here. If TIG's tickets belong in this repository:\n  git config --add dotfiles.jira.project TIG"
+  )
+  eq(#calls, 1, "the listing alone")
+  -- A binding by a complete query names no project list, so its keys are not checked.
+  calls, restore = stub_wait(function(argv)
+    if argv[2] == "worktree" then
+      return done(argv, "worktree /w/repo/.bare\nbare\n\n")
+    end
+    return failed(argv, 1, "stopped here: " .. table.concat(argv, " "))
+  end)
+  opened, err = env.launch({ root = "/w/repo", binding = { kind = "jql", jql = "filter = 1" }, key = "TIG-5", summary = "x" })
+  restore()
+  eq(err, "stopped here: git wt-add TIG-5-x", "a jql binding reaches git wt-add")
+end)
+
+test("launcher: git killed at the timeout is reported as killed, ahead of the progress it printed", function()
+  local killed = {
+    ok = false,
+    code = spawn.TIMED_OUT,
+    stdout = "",
+    stderr = "Preparing worktree (new branch 'PROJ-1-x')\n",
+    timed_out = true,
+    timeout = 60000,
+  }
+  local _, restore = stub_wait(function(argv)
+    return vim.tbl_extend("force", killed, { argv = argv })
+  end)
+  local path, err = env.add_worktree("/w/repo", "PROJ-1-x")
+  restore()
+  eq(path, nil)
+  eq(err, "git: killed after 60000 ms without exiting\nPreparing worktree (new branch 'PROJ-1-x')\n")
+
+  local saved_tmux = vim.env.TMUX
+  vim.env.TMUX = nil
+  _, restore = stub_wait(function(argv)
+    if argv[2] == "worktree" then
+      return done(argv, WORKTREES)
+    end
+    if argv[2] == "status" then
+      return done(argv, "")
+    end
+    return vim.tbl_extend("force", killed, { argv = argv, stderr = "" })
+  end)
+  local removed
+  removed, err = env.teardown({ root = "/w/repo", branch = "PROJ-1-x" })
+  restore()
+  vim.env.TMUX = saved_tmux
+  eq(removed, nil)
+  eq(err, "git: killed after 60000 ms without exiting", "a git wt-rm that printed nothing is still said to be killed")
+end)
+
+test("binding: jql first, then the projects, then ignore, and a config git cannot read is the error", function()
+  -- Each key answers from `set`; one absent is `git config`'s exit 1 with
+  -- nothing on stderr, which is how it reports a key that is not set.
+  local function stub_config(set)
+    return stub_wait(function(argv)
+      local value = set[argv[#argv]]
+      if value == nil then
+        return failed(argv, 1, "")
+      end
+      return done(argv, value .. "\n")
+    end)
+  end
+  local cases = {
+    { { ["dotfiles.jira.jql"] = "filter = 1", ["dotfiles.jira.project"] = "PAY" }, { kind = "jql", jql = "filter = 1" } },
+    { { ["dotfiles.jira.project"] = "PAY\nOPS", ["dotfiles.jira.ignore"] = "true" }, { kind = "projects", projects = { "PAY", "OPS" } } },
+    { { ["dotfiles.jira.ignore"] = "true" }, { kind = "ignored" } },
+    { { ["dotfiles.jira.ignore"] = "false" }, { kind = "unbound" } },
+    { {}, { kind = "unbound" } },
+  }
+  for _, case in ipairs(cases) do
+    local calls, restore = stub_config(case[1])
+    local binding, err = repo.binding("/w/repo")
+    restore()
+    eq({ binding, err }, { case[2] }, vim.inspect(case[1]))
+    eq(calls[1].opts.cwd, "/w/repo", "git config runs at the clone's root")
+  end
+  local calls, restore = stub_config({})
+  repo.binding("/w/repo")
+  restore()
+  eq(vim.tbl_map(function(call)
+    return call.argv
+  end, calls), {
+    { "git", "config", "--get", "dotfiles.jira.jql" },
+    { "git", "config", "--get-all", "dotfiles.jira.project" },
+    { "git", "config", "--type=bool", "dotfiles.jira.ignore" },
+  })
+  -- Exit 1 with something on stderr is git failing to read the file, not a
+  -- key that is not set.
+  _, restore = stub_wait(function(argv)
+    return failed(argv, 1, "error: bad config line 3 in file .bare/config")
+  end)
+  local binding, err = repo.binding("/w/repo")
+  restore()
+  eq(binding, nil)
+  eq(err, "git exited 1\nerror: bad config line 3 in file .bare/config")
+  eq(repo.LIST_COMMAND, "acli jira project list --paginate", "the listing stops at a page without --paginate")
+end)
+
+-- runner -----------------------------------------------------------------------------------
+
+local passed = 0
+for _, case in ipairs(tests) do
+  local ok, err = pcall(case.body)
+  -- A test that failed before its own restore leaves a stub in spawn and the
+  -- cache wherever it pointed it; the tests after it get the guard and this
+  -- run's own directory again.
+  spawn.run, spawn.wait = unstubbed, unstubbed
+  vim.env.XDG_CACHE_HOME = CACHE_HOME
+  config.options.cache_dir = config.cache_dir()
+  if ok then
+    passed = passed + 1
+    io.stdout:write("ok    ", case.name, "\n")
+  else
+    io.stdout:write("FAIL  ", case.name, "\n      ", tostring(err):gsub("\n", "\n      "), "\n")
+  end
+end
+io.stdout:write(("\n%d/%d passed\n"):format(passed, #tests))
+os.exit(passed == #tests and 0 or 1)

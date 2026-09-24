@@ -20,9 +20,9 @@ python3 tests/check.py
 ```
 
 It needs Python 3.11 or newer (it uses `enum.StrEnum`), `ruff`, `shellcheck`,
-`fish`, `chezmoi`, and a working age key. Homebrew and `uv` are optional: their
-checks are skipped or advisory when absent. It runs on macOS and Linux, performs
-no destructive action, and never runs the `run_*` scripts.
+`fish`, `chezmoi`, and a working age key. Homebrew, `uv` and `nvim` are
+optional: their checks are skipped or advisory when absent. It runs on macOS
+and Linux, performs no destructive action, and never runs the `run_*` scripts.
 
 It:
 
@@ -46,6 +46,17 @@ It:
   filters, listed in `AWK_FILES` -- with `awk -f` on empty input, for the same
   reason: shellcheck refuses awk too, and a filter with a syntax error renders
   every message of its type as an awk complaint;
+- parses every `.lua` file under the roots `LUA_ROOTS` names with
+  `nvim -u NONE -l tests/luagate.lua`, which calls `loadfile` on each path:
+  that compiles without running, so no module is required and nothing it parses
+  runs, and `-u NONE` keeps nvim from loading the configuration it is parsing.
+  The roots are `private_dot_config/nvim/`, which holds `init.lua`, and the
+  docket plugin at
+  `dot_local/share/private_nvim/private_site/pack/docket/start/docket/`. nvim
+  rather than luajit, because nvim is what loads these files and is in the
+  manifest for every target, while luajit is on a Mac only as neovim's
+  dependency. The roots are globbed, so there is no list to add a file to; a
+  host without `nvim` is a warning;
 - hands the rendered ssh config to `ssh -G` and the rendered gitconfig to
   `git config --list`, so the programs that read them are what say whether they
   are valid. ssh rejects a whole config file over one option it does not know,
@@ -53,8 +64,10 @@ It:
 - refuses a compiled binary or a program-written file anywhere in the source. A
   binary is built for one architecture and one OS, and chezmoi copies it
   unchanged to every machine; `BINARY_MAGIC` is the ELF and Mach-O magics and
-  `GENERATED_NAMES` the filenames — `.DS_Store` and the like — that no source
-  directory should carry;
+  `GENERATED_NAMES` the filenames — `.DS_Store`, and `tags`, which neovim's
+  `:helptags` writes beside a help file — that no source directory should
+  carry. The match is on every path component, so a directory named `tags`
+  fails too;
 - checks the Brewfile, skipping it when `brew` is absent. `mas` entries are left
   out of that check: verifying one runs `mas list`, which talks to the App Store
   and hangs until the harness's timeout when there is no network;
@@ -71,7 +84,9 @@ It:
   already fails on a file it names that is missing, and this is the reverse --
   every command under `dot_local/bin/` and every deployed file with a sh, bash,
   awk or python shebang has to appear in a checked list, so a new deployed
-  script cannot be read by nothing and still deploy;
+  script cannot be read by nothing and still deploy. A `.lua` file has no
+  shebang, so the same check asserts that every one in the source sits under one
+  of the roots the Lua gate globs;
 - checks that the Linux target matrix spells the same targets everywhere it
   lives: `linux_distros.TARGET_OF`, the manifest's distro columns, and the
   branches of `.chezmoitemplates/linux-target`. A distro added to the first two
@@ -114,6 +129,26 @@ It:
   floor, since importing proves the syntax and only running the code catches a
   3.10+ stdlib call inside a function body -- while `chezpkg`'s needs
   `tomllib` and runs under the harness's own interpreter;
+- runs the Lua suite, `tests/docket.lua`, under `nvim -u NONE -l`, the
+  interpreter its modules load in. It covers every module of the docket plugin
+  and the plugin file that declares its command; the comment at the top of the
+  file lists them. What needs an editor runs in the `nvim -l` instance itself:
+  the item buffer's region marks under the edits that move them, `o`, `p` and
+  `:put` below a region among them; its write path through to the read that
+  follows a save, a post whose client was killed at its timeout included; the
+  dashboard; a new ticket's draft; the launcher's tabs away from tmux; and a
+  review's tab, its compose windows and its keys, with diffview.nvim stood in
+  for by two user commands. The calls that have to stay in one clone are made
+  from two clones of one project, with a state check in the other clone before
+  each answer. Every process the plugin starts goes through its `spawn`
+  module, and a test that reaches one replaces `spawn.run` or `spawn.wait`
+  with a function that records the argument list and answers from a recorded
+  payload, so no client, git or tmux runs. The tests of `spawn` itself run
+  `sh`, one of them a command that exits while a child it started holds the
+  output, which the timeout has to kill. The buffers and tabs it opens belong
+  to the `nvim -l` instance running it and end with it. It sets its own module
+  path from its location, so `nvim -u NONE -l tests/docket.lua` runs it by
+  hand from any directory. A host without `nvim` is a warning;
 - runs `chezmoi-packages --help` through `uv run --script`, which is how that
   command really runs: its shebang is a PEP 723 script, so uv supplies both the
   interpreter and `tomlkit`. This proves the dependency block resolves and that
