@@ -36,6 +36,7 @@ because the change survives review and disappears at the next write.
 | --- | --- | --- |
 | `private_dot_config/Brewfile` | `brew bundle dump` | never hand-edit; `chezmoi-packages dump` is the only path |
 | `.chezmoidata/packages.toml` | `chezpkg_manifest.py` | never hand-edit; every write rewrites it whole, and hand-written comments are lost — use `note` |
+| `.chezmoidata/acli.toml` | by hand | authored, despite the directory: the `acli` pin and digests the `01` script and `update.fish.tmpl` render; bumping the version is the upgrade path |
 | `private_dot_config/mise/config.toml.tmpl` | rendered from the manifest | change the manifest, not this |
 | `private_dot_config/khard/work/exact_default/` | the `khard` wrapper, via `chezmoi add --encrypt --exact` | one age-encrypted vCard per contact |
 | `~/.config/aerc/filters/colorize`, `wrap` | `run_onchange_…-09` compiles them | the C sources are what this repo tracks; a built filter is one architecture's |
@@ -139,6 +140,51 @@ reads the manifest under a plain interpreter.
 it, so that module alone must stay stdlib-only and 3.9-clean.
 
 `tests/check.py` itself needs 3.11 — it uses `enum.StrEnum`.
+
+## The neovim plugin
+
+`docket`, a neovim plugin for Jira tickets, merge requests and pull requests, is at
+`dot_local/share/private_nvim/private_site/pack/docket/start/docket/`, which deploys to
+`~/.local/share/nvim/site/pack/docket/start/docket/`; neovim loads a package from there
+without it being on the configuration's runtime path. `plugin/docket.lua` declares the
+`:Docket` command, the `<leader>d` maps and the autocommands, and requires a module only
+when one of them runs. `doc/docket.txt` is the reference behind `:help docket`.
+
+The modules under `lua/docket/` import strictly downwards, as the Python families do:
+each imports only modules above it in this table. Each opens with a comment saying what
+it holds and what it imports. `adapters` in the imports column is
+`adapters/init.lua`, the registry, which loads an adapter module by name the first time
+it is asked for, so no row below lists the adapters it loads.
+
+| module | holds | imports |
+| --- | --- | --- |
+| `config.lua` | the defaults: the dashboard's sections, the cache directory, each kind of process's timeout; `configure()` for `setup{}` | nothing local |
+| `row.lua` | the one row shape every adapter normalises to, and its ordering | nothing local |
+| `item.lua` | an item's header fields, body and comments, and each region's descriptor with the ownership half of the editable judgement | nothing local |
+| `adf.lua` | a Jira document tree to lines, text back to a minimal tree, and whether a tree survives that round trip | nothing local |
+| `diff.lua` | the region compare that decides which calls a save makes | nothing local |
+| `flight.lua` | one request in flight per key and the rule for joining it: `new()` returns a join with `join`, `invalidate`, `invalidate_all` and `pending` | nothing local |
+| `highlight.lua` | the `Docket*` groups, what each links to, and `state_group()`, which colours a Jira state by its `category` and a review's by its state word | nothing local |
+| `render.lua` | an item to buffer lines, and the range each region occupies | `adf`, `item` |
+| `spawn.lua` | the only process spawn: `run()` with a callback, `wait()` blocking; both end the command's process group at its timeout | `config` |
+| `repo.lua` | the clone's root, its Jira binding and query assembly, the review client its remote implies and the project path it names, its worktrees | `config`, `spawn` |
+| `env.lua` | the branch and window-name rules, `git wt-add`, the two tmux windows or an editor tab, and `teardown()` | `config`, `repo`, `spawn` |
+| `adapters/init.lua` | the adapter contract, the capability set, and the registry | `row` |
+| `adapters/jira.lua` | Jira, over `acli`; a row and an item carry `category`, the status's `statusCategory.key` | `adf`, `flight`, `item`, `row`, `spawn` |
+| `adapters/glab.lua` | GitLab, over `glab` | `config`, `flight`, `item`, `row`, `spawn` |
+| `adapters/gh.lua` | GitHub's rows, and the handoff of an item to octo.nvim | `env`, `flight`, `row`, `spawn` |
+| `cache.lua` | cached rows on disk and their age, fetched one request per key through `flight` | `config`, `flight`, `row` |
+| `auth.lua` | the login flow; `ready()`, the blocking state check every mode makes first, and `check()`, its callback-taking form, which the dashboard makes | `adapters`, `cache`, `config`, `spawn` |
+| `list.lua` | the dashboard buffer, its sections, and the row under the cursor | `auth`, `cache`, `config`, `highlight`, `item`, `repo` |
+| `buffer.lua` | the item buffer: its read path, its region marks, and the seam the write path fills | `adapters`, `auth`, `diff`, `highlight`, `item`, `render` |
+| `commands.lua` | what `:Docket` dispatches to, and every keymap | `auth`, `buffer`, `config`, `env`, `list`, `repo`, `row` |
+| `init.lua`, required as `docket` | `setup()`: the options, the highlight groups, the help tags; `help_files()`, the one lookup of the help file and its tags | `config`, `highlight` |
+| `health.lua` | `:checkhealth docket` | `adapters`, `auth`, `config`, `init`, `row` |
+
+The adapter contract is written once, above `M.REQUIRED` in `adapters/init.lua`, with
+`M.ARITY` beside it, and `verify()` there holds every adapter to both; it is not
+restated here. The region snapshot a save is planned from is the one `diff.lua`'s
+opening comment describes.
 
 ## Bootstrap scripts
 
