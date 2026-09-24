@@ -1,14 +1,16 @@
--- GitLab, over glab. Imports config, flight, spawn, row and item. The
--- argument lists are written out rather than assembled, so that what runs can
--- be read off this file; every flag is one glab's own `--help` lists. The
--- payload shapes the run against the real instance returned are a discussion,
--- its notes and `diff_refs`; the fields read off `mr list -F json` and `mr
--- view -F json` come from GitLab's REST reference for the merge request object
--- and are unverified here. The parts marked unverified where they are used are
--- the write half of the `note` family, which glab itself marks experimental
--- and which has not been exercised; the identity route, which the instance has
--- not answered; and the user search behind completion, whose endpoint the
--- instance has not printed either.
+-- GitLab, over glab. Imports adapters, config, flight, spawn, row and item;
+-- adapters for ME and NOBODY alone, the two values assign() takes besides a
+-- username. The argument lists are written out rather than assembled, so that
+-- what runs can be read off this file; every flag is one glab's own `--help`
+-- lists. The payload shapes the run against the real instance returned are a
+-- discussion, its notes and `diff_refs`; the fields read off `mr list -F json`
+-- and `mr view -F json` come from GitLab's REST reference for the merge
+-- request object and are unverified here. The parts marked unverified where
+-- they are used are the write half of the `note` family, which glab itself
+-- marks experimental and which has not been exercised; the identity route,
+-- which the instance has not answered; the user search behind completion,
+-- whose endpoint the instance has not printed either; assigning, which has
+-- not been run; and the two project ids a row from a fork is recognised by.
 --
 -- A body here is markdown, not a document tree, so the read-write asymmetry
 -- that constrains the Jira buffer does not exist: a description or a note
@@ -42,6 +44,7 @@
 --
 -- Every callback here arrives in a fast-event context, as spawn.run's do.
 
+local adapters = require("docket.adapters")
 local config = require("docket.config")
 local flight = require("docket.flight")
 local item = require("docket.item")
@@ -58,6 +61,7 @@ M.capabilities = {
   "complete",
   "states",
   "state_set",
+  "assign",
   "diff",
   "threads",
   "line_comment",
@@ -810,8 +814,19 @@ function M.states(id, on_done)
     return on_done(nil, ("%s is not a merge request identifier"):format(shown))
   end
   read({ "mr", "view", iid, "-F", "json" }, function(mr, err)
-    if not mr then
+    if err then
       return on_done(nil, err)
+    end
+    -- JSON `null` decodes to nil with no error, and a scalar would raise at
+    -- `mr.state` inside the callback, which leaves the picker with no answer.
+    if type(mr) ~= "table" or mr.iid == nil then
+      return on_done(
+        nil,
+        ("glab: mr view %s printed no merge request; run\n  glab mr view %s -F json\nby hand to see what it prints"):format(
+          iid,
+          iid
+        )
+      )
     end
     remember(mr)
     if mr.state == "opened" or mr.state == "locked" then
@@ -866,6 +881,57 @@ function M.state_set(id, target, on_done)
     return on_done(false, ("%s is not a merge request identifier"):format(shown))
   end
   act(iid, target, on_done, cwd)
+end
+
+-- A GitLab username as `mr update --assignee` can be given one: its help
+-- reads a leading `!` or `-` as removing that user and `+` as adding, and a
+-- comma as separating several, so none of them reaches the flag.
+local USERNAME = "^[%w._][%w._-]*$"
+
+--- Leaves a merge request with one assignee, or none.
+---
+--- `mr update --assignee <username>` replaces the assignees with that one
+--- user, and `--unassign` removes them all, both from `mr update --help`.
+--- ME is resolved through whoami(), the identity that already decides which
+--- notes are the account's own, rather than handed to glab as `@me`, which its
+--- help does not document for this flag. `--yes` because the same help lists a
+--- confirmation prompt it skips without saying which updates ask; a closed
+--- standard input would otherwise fail such an update rather than hold the
+--- editor. The directory is taken when the call starts, for the reason `root`
+--- states, since the whoami() before the update can take a turn of the loop.
+--- UNVERIFIED: no `mr
+--- update` carrying either flag has been run; `glab mr update <iid>
+--- --assignee <username> --yes` inside the clone, read back with `glab mr view
+--- <iid> -F json`, settles it, and the merge request endpoint through `glab
+--- api --method PUT`, which takes a numeric `assignee_id`, is the fallback.
+---@param id string|table the identifier, or the item's reference
+---@param who string ME, NOBODY, or a username as a person's `id` carries it
+---@param on_done fun(ok: boolean, err: string|nil)
+function M.assign(id, who, on_done)
+  local iid, cwd, shown = subject(id)
+  if not iid then
+    return on_done(false, ("%s is not a merge request identifier"):format(shown))
+  end
+  local function update(flags)
+    glab(vim.list_extend({ "mr", "update", iid }, flags), { cwd = cwd }, function(result)
+      on_done(outcome(result))
+    end)
+  end
+  if who == adapters.NOBODY then
+    return update({ "--unassign", "--yes" })
+  end
+  if who == adapters.ME then
+    return M.whoami(function(me, err)
+      if not me then
+        return on_done(false, err)
+      end
+      update({ "--assignee", me, "--yes" })
+    end)
+  end
+  if type(who) ~= "string" or not who:match(USERNAME) then
+    return on_done(false, ("%s is not a GitLab username"):format(vim.inspect(who)))
+  end
+  update({ "--assignee", who, "--yes" })
 end
 
 --- What the review mode diffs: the source and target branches from `mr view

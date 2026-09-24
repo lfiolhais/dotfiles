@@ -60,11 +60,18 @@ end
 -- editable as it stands: text written back is the same markdown, so none
 -- of the tree's read-only rule applies to it.
 
--- The region's lines: the string split at its newlines or the tree rendered,
--- and one empty line for an empty body, so the region has a line to type
--- into and a range to mark. A line ending in a carriage return loses it, so
--- a body written with CRLF line ends shows no `^M`.
-local function region_lines(body)
+--- A body's lines: the string split at its newlines or the tree rendered,
+--- and one empty line for an empty body, so the region has a line to type
+--- into and a range to mark. A line ending in a carriage return loses it, so
+--- a body written with CRLF line ends shows no `^M`; M.crlf() records that
+--- ending, so a save writes it back.
+---
+--- Public because the write path's conflict check compares a body it has just
+--- read again with the lines the buffer loaded, and those went through here:
+--- compared raw, a CRLF body differs from itself on every save.
+---@param body table|string|nil the tree, the markdown, or nil for no body
+---@return string[] lines
+function M.region_lines(body)
   local lines
   if type(body) == "string" then
     lines = vim.split(body, "\n", { plain = true })
@@ -187,7 +194,7 @@ function M.render(it, opts)
     if reason then
       reason = reason .. "; " .. M.WEB_HINT
     end
-    local body = region_lines(region.body)
+    local body = M.region_lines(region.body)
     local first = #lines + 1
     vim.list_extend(lines, body)
     regions[#regions + 1] = {

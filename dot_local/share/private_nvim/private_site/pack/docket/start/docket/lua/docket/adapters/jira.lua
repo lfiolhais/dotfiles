@@ -1,6 +1,8 @@
--- Jira, over acli. Imports adf, flight, spawn, row and item. Every flag here
--- is one acli's own `--help` lists; the argument lists are written out rather
--- than assembled, so that what runs can be read off this file.
+-- Jira, over acli. Imports adapters, adf, flight, spawn, row and item;
+-- adapters for ME and NOBODY alone, the two values assign() takes besides an
+-- identifier. Every flag here is one acli's own `--help` lists; the argument
+-- lists are written out rather than assembled, so that what runs can be read
+-- off this file.
 --
 -- A work item and its thread arrive in one `view` call, because `view` takes
 -- a field list and `comment` is a field. The thread is never read through
@@ -12,7 +14,8 @@
 -- Writes send a document, never text. Plain text through `--body-file` came
 -- back as one paragraph whatever it held, so each write serialises the
 -- region through adf and hands acli a file holding the tree: `comment create
--- --body-file`, `comment update --body-adf`, `edit --description-file`.
+-- --body-file`, `comment update --body-adf`, and `--description-file` on
+-- `edit` and `create`.
 -- UNVERIFIED: no document has been written yet. `--body-adf` is documented as
 -- taking one. `--body-file` and `--description-file` are documented as taking
 -- "plain text or Atlassian Document Format", and whether they parse a file
@@ -29,7 +32,9 @@
 -- settles it: two paragraphs back means the file was parsed, a comment reading
 -- as JSON means it was not.
 -- `--yes` goes on `transition` and `edit` because both prompt without it,
--- and a prompt behind a pipe is a hang.
+-- and a prompt behind a pipe is a hang. `create` lists no `--yes` and gets
+-- none; spawn gives every client a closed standard input, so a build that did
+-- stop to ask would fail with its own message rather than hold the editor.
 --
 -- The account's own identifier comes from a query, since `auth status` prints
 -- no identifier and `acli jira` has no user command: the assignee on any row
@@ -46,6 +51,7 @@
 --
 -- Every callback here arrives in a fast-event context, as spawn.run's do.
 
+local adapters = require("docket.adapters")
 local adf = require("docket.adf")
 local flight = require("docket.flight")
 local item = require("docket.item")
@@ -62,7 +68,21 @@ M.capabilities = {
   "complete",
   "states",
   "state_set",
+  "assign",
+  "item_create",
 }
+
+-- A work item key, capturing its project. Nothing but this shape reaches a
+-- query or a `--key`: a query reaches acli as written and nothing is ANDed in,
+-- so an identifier that is not a key would run as whatever JQL it holds, and
+-- `--key` takes a comma-separated list, so `TIG-1,TIG-2` would act on both.
+-- The shape is env.KEY_PATTERN's read the other way -- that one captures the
+-- whole key off the front of a branch, this one the project off a bare key --
+-- and the suite asserts the two accept the same identifiers. `%u[%u%d]+`
+-- wants two characters at least, so `A-1` is not a key to either.
+M.KEY = "^(%u[%u%d]+)%-%d+$"
+-- A project key alone, the same prefix; `--project` takes a list as well.
+M.PROJECT = "^%u[%u%d]+$"
 
 -- What `view` is asked for. Its own default list is not `search`'s, so both
 -- are named explicitly.
@@ -733,14 +753,9 @@ end
 ---@param id string the key
 ---@param on_done fun(states: { label: string, target: string }[]|nil, err: string|nil)
 function M.states(id, on_done)
-  -- The project is the key's prefix, and nothing but a key's shape reaches
-  -- the query: a query reaches acli as written and nothing is ANDed in, so
-  -- an identifier that is not a key would run as whatever JQL it holds. The
-  -- shape is env.KEY_PATTERN's read the other way -- that one captures the
-  -- whole key off the front of a branch, this one the prefix off a bare key
-  -- -- and the suite asserts the two accept the same identifiers. `%u[%u%d]+`
-  -- wants two characters at least, so `A-1` is not a key to either.
-  local project = id:match("^(%u[%u%d]+)%-%d+$")
+  -- The project is the key's prefix, and only a key's shape reaches the
+  -- query, for the reason KEY states.
+  local project = id:match(M.KEY)
   if not project then
     return on_done(nil, ("%s is not a work item key, so its project is unknown"):format(id))
   end
@@ -777,6 +792,232 @@ function M.state_set(id, target, on_done)
   acli({ "workitem", "transition", "--key", id, "--status", target, "--yes", "--json" }, nil, function(result)
     on_done(outcome(result))
   end)
+end
+
+-- The `--assignee` value for a person, which `edit --help` and `create --help`
+-- both document as an email address or an account identifier, with `@me` for
+-- the account signed in. `default`, the project's default assignee, is the
+-- other word both take; no identifier Jira issues is that word, so it passes
+-- through like one, and nothing in the contract asks for it. nil and the
+-- reason for anything that is neither ME nor a non-empty identifier. NOBODY is
+-- the caller's to handle, since `edit` spells it `--remove-assignee` and
+-- `create` by leaving the flag out.
+local function assignee_value(who)
+  if who == adapters.ME then
+    return "@me"
+  end
+  if type(who) ~= "string" or who == "" or who == adapters.NOBODY then
+    return nil, ("%s is not a person to assign"):format(vim.inspect(who))
+  end
+  return who
+end
+
+--- Assigns a work item to one person, or to nobody.
+---
+--- `edit --assignee` with `--yes`, which `edit` prompts without, or `edit
+--- --remove-assignee` for NOBODY. ME goes to acli as its own `@me`, so it
+--- works whether or not whoami() can answer -- which is the account with
+--- nothing assigned that most needs it. UNVERIFIED: both flags are in the
+--- `edit --help` the pinned release printed, and no edit carrying either has
+--- been run; `acli jira workitem edit --key <KEY> --assignee @me --yes --json`
+--- on a work item where it does no harm, read back with `acli jira workitem
+--- view <KEY> --fields assignee --json`, settles both at once.
+---@param id string the key
+---@param who string ME, NOBODY, or an `accountId` as a person's `id` carries it
+---@param on_done fun(ok: boolean, err: string|nil)
+function M.assign(id, who, on_done)
+  if type(id) ~= "string" or not id:match(M.KEY) then
+    return on_done(false, ("%s is not a work item key"):format(tostring(id)))
+  end
+  local args = { "workitem", "edit", "--key", id }
+  if who == adapters.NOBODY then
+    args[#args + 1] = "--remove-assignee"
+  else
+    local value, err = assignee_value(who)
+    if not value then
+      return on_done(false, err)
+    end
+    vim.list_extend(args, { "--assignee", value })
+  end
+  vim.list_extend(args, { "--yes", "--json" })
+  acli(args, nil, function(result)
+    on_done(outcome(result))
+  end)
+end
+
+-- The creates in flight, keyed by everything a create sends, so a second
+-- save of the same buffer while the first is running is handed the first's
+-- key rather than making a second work item. Nothing invalidates a key here:
+-- a create that lands after a login has still made a work item, and refusing
+-- its key would invite a second one. The refusal is flight's to require and
+-- is never given.
+local creating = flight.new({
+  refusal = "the create was abandoned; search the project for it before creating it again",
+})
+
+-- The key a create printed, or nil. `project` is the one asked for; a key of
+-- any other project is not this create's.
+--
+-- UNVERIFIED: no create has been run, so what `create --json` prints is
+-- unobserved. It is read three ways, the first that answers winning: an object
+-- carrying `key`, which is what Jira's own create endpoint answers with
+-- beside `id` and `self`; the bulk summary outcome() reads, whose `results`
+-- carry `key`; and, for any other shape, the output as text, where exactly one
+-- distinct key of the project, other than a key the summary itself mentions,
+-- is the answer. Two or more is no answer rather than a guess, because the
+-- buffer reopens at whatever this returns. `acli jira workitem create
+-- --project <KEY> --type Task --summary probe --json`, on a project where a
+-- test work item does no harm, prints which shape it is.
+local function created_key(result, project, summary)
+  local function ours(key)
+    return type(key) == "string" and key:match(M.KEY) == project
+  end
+  -- The decode error is dropped on purpose: output that is not JSON is read
+  -- as text below.
+  local decoded = spawn.decode(result)
+  if type(decoded) == "table" then
+    if ours(decoded.key) then
+      return decoded.key
+    end
+    for _, entry in ipairs(vim.islist(decoded.results) and decoded.results or {}) do
+      if type(entry) == "table" and ours(entry.key) then
+        return entry.key
+      end
+    end
+  end
+  local mentioned = {}
+  for key in summary:gmatch("%f[%w](%u[%u%d]+%-%d+)%f[^%w]") do
+    mentioned[key] = true
+  end
+  local found, distinct = nil, 0
+  local seen = {}
+  for key in result.stdout:gmatch("%f[%w](%u[%u%d]+%-%d+)%f[^%w]") do
+    if ours(key) and not mentioned[key] and not seen[key] then
+      seen[key] = true
+      found, distinct = key, distinct + 1
+    end
+  end
+  return distinct == 1 and found or nil
+end
+
+--- Creates a work item and answers with its key.
+---
+--- `create --project --type --summary --json`, with `--assignee` when one is
+--- asked for and the body as a document through `--description-file`, as
+--- body_update() sends one; a body of blank lines alone sends no description.
+--- `project`, `type` and `summary` are required: Jira's create endpoint
+--- refuses an item without any of them, and what acli does in their absence --
+--- its help also lists `--editor` -- is unobserved. `project` is one project
+--- key, because `--project` takes a list and would make an item in each.
+---
+--- UNVERIFIED: every flag here is read from the `create --help` of acli
+--- 1.3.39, a later release than the pinned 1.3.36, whose own help is not
+--- recorded; no create has been run against a real instance; and whether
+--- `--description-file` parses a document is the question the header leaves
+--- open for `edit`. How the key is read off the output is created_key()'s
+--- note. A create that acli reports as done and whose key cannot be read, and
+--- one killed at the timeout after it was sent, answer with `made` set beside
+--- the error, which names the search that lists the project's newest items:
+--- the item exists, or may, and creating it again would make a second one.
+---@param fields { project: string, type: string, summary: string, assignee: string|nil }
+---@param text string the body region's text
+---@param on_done fun(id: string|nil, err: string|nil, made: boolean|nil)
+function M.item_create(fields, text, on_done)
+  if type(fields) ~= "table" then
+    return on_done(nil, "a work item needs a project, a type and a summary")
+  end
+  local missing = {}
+  for _, name in ipairs({ "project", "type", "summary" }) do
+    if type(fields[name]) ~= "string" or vim.trim(fields[name]) == "" then
+      missing[#missing + 1] = name
+    end
+  end
+  if #missing > 0 then
+    return on_done(nil, ("a work item needs a %s"):format(table.concat(missing, ", a ")))
+  end
+  if not fields.project:match(M.PROJECT) then
+    return on_done(nil, ("%s is not a project key such as PROJ"):format(fields.project))
+  end
+  local args = {
+    "workitem",
+    "create",
+    "--project",
+    fields.project,
+    "--type",
+    fields.type,
+    "--summary",
+    fields.summary,
+    "--json",
+  }
+  if fields.assignee ~= nil and fields.assignee ~= adapters.NOBODY then
+    local value, err = assignee_value(fields.assignee)
+    if not value then
+      return on_done(nil, err)
+    end
+    vim.list_extend(args, { "--assignee", value })
+  end
+  local blank = type(text) ~= "string" or text:match("^%s*$") ~= nil
+  local request = table.concat({
+    fields.project,
+    fields.type,
+    fields.summary,
+    fields.assignee or "",
+    blank and "" or text,
+  }, "\0")
+  creating:join(request, function(settle)
+    local path
+    if not blank then
+      local err
+      path, err = document_file(text)
+      if not path then
+        return settle(nil, err)
+      end
+      vim.list_extend(args, { "--description-file", path })
+    end
+    acli(args, nil, function(result)
+      if path then
+        forget_file(path)
+      end
+      local search = shell_line({
+        "acli",
+        "jira",
+        "workitem",
+        "search",
+        "--jql",
+        ("project = %s ORDER BY created DESC"):format(fields.project),
+        "--fields",
+        "summary",
+        "--json",
+      })
+      local ok, err, unsure = outcome(result)
+      if unsure then
+        return settle(
+          nil,
+          ("%s\nthe create may have reached Jira before acli was killed; creating it again could make a second one. The project's newest work items come first in\n  %s"):format(
+            err,
+            search
+          ),
+          true
+        )
+      end
+      if not ok then
+        return settle(nil, err)
+      end
+      local key = created_key(result, fields.project, fields.summary)
+      if key then
+        return settle(key)
+      end
+      local printed = vim.trim(result.stdout)
+      settle(
+        nil,
+        ("acli reported the work item created and printed no key that can be read, so it cannot be opened here; creating it again would make a second one. The project's newest work items come first in\n  %s%s"):format(
+          search,
+          printed ~= "" and ("\nacli printed:\n" .. printed) or ""
+        ),
+        true
+      )
+    end)
+  end, on_done)
 end
 
 return M

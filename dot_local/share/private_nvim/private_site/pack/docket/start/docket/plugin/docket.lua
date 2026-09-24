@@ -1,10 +1,12 @@
 -- What the docket package declares at startup: the `:Docket` command, the
--- `<leader>d` maps, and the autocommands that route an item buffer's read
--- and write and attach its keymaps. Every body here requires its module on
--- the first use, so this file loads nothing. The configuration's init.lua
--- carries `require('docket').setup{}` alone, which loads init, config and
--- highlight at startup: the options and the highlight groups. The read path,
--- the adapters and every client load at the first command that needs them.
+-- `<leader>dd` map to the dashboard, and the autocommands that route the read
+-- and write of an item buffer and of a new ticket's draft, and attach an item
+-- buffer's keymaps. Every other `<leader>d` key belongs to one kind of buffer
+-- and is set on it, by commands.attach() and commands.attach_dash(). Every body here requires its module on the first use, so this
+-- file loads nothing. The configuration's init.lua carries
+-- `require('docket').setup{}` alone, which loads init, config and highlight
+-- at startup: the options and the highlight groups. The read path, the
+-- adapters and every client load at the first command that needs them.
 
 if vim.g.loaded_docket then
   return
@@ -16,7 +18,7 @@ vim.api.nvim_create_user_command("Docket", function(command)
 end, {
   nargs = "*",
   bang = true,
-  desc = "Docket: the dashboard, an item, login [<backend>], review <id>; ! forces a re-login",
+  desc = "Docket: the dashboard, an item, login [<backend>], review <id>, create [<project>]; ! forces a re-login",
   complete = function(lead, line)
     return require("docket.commands").complete(lead, line)
   end,
@@ -50,6 +52,25 @@ vim.api.nvim_create_autocmd("BufWriteCmd", {
   pattern = "docket://*",
   callback = function(event)
     require("docket.buffer").write(event.buf)
+  end,
+})
+
+-- `docket-new://<source>` is a new ticket's draft: the read fills it with an
+-- empty header, and `:w` creates the item and puts its buffer in the draft's
+-- place.
+vim.api.nvim_create_autocmd("BufReadCmd", {
+  group = group,
+  pattern = "docket-new://*",
+  callback = function(event)
+    require("docket.commands").draft(event.buf)
+  end,
+})
+
+vim.api.nvim_create_autocmd("BufWriteCmd", {
+  group = group,
+  pattern = "docket-new://*",
+  callback = function(event)
+    require("docket.commands").save_draft(event.buf)
   end,
 })
 

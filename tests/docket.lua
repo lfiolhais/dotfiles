@@ -4,19 +4,25 @@
 -- ordering, spawn's failure paths, the document tree's render and serialise,
 -- the item and its regions, the buffer rendering, the highlight groups, the
 -- region compare, the adapter contract, the in-flight join, the cache, the
--- Jira, GitLab and GitHub adapters, the login flow, the item buffer's marks,
--- the dashboard, the commands, the help tags, the health report and the
--- plugin file.
+-- Jira, GitLab and GitHub adapters, the login flow, the item buffer's marks
+-- and its write path, completion, the dashboard, the commands -- a
+-- transition, an assignment and a new ticket's draft among them -- the help
+-- tags, the health report and the plugin file.
 --
 -- No git runs, no client is called, no tmux window opens: every process call
 -- goes through spawn, and the tests that reach one replace spawn.run or
 -- spawn.wait with a function that records the argument list and answers from
 -- a recorded payload. Between tests both raise, so a test that reaches a
--- client without replacing them fails rather than running it. The spawn tests
--- are the exception: they run `sh`, and name a client no machine has. The
+-- client without replacing them fails rather than running it. The tests of
+-- the write path and of the item buffer's keys replace the adapter's own
+-- calls instead, with stub_calls. The spawn tests are the exception: they run
+-- `sh`, and name a client no machine has. So is the test of a `!` filter over
+-- an item buffer's lines, which the editor runs through `sh` with `sort` and
+-- `sed`, both POSIX. The
 -- editor actions exercised are the tabs the launcher opens away from tmux, the
--- item and dashboard buffers, and the scratch buffers the item buffer's marks
--- are tested in, all of which nvim -l can create.
+-- item and dashboard buffers, a new ticket's draft, and the scratch buffers
+-- the item buffer's marks are tested in, all of which nvim -l can create. A
+-- picker is vim.ui.select replaced for the test.
 --
 -- Runs under nvim, the interpreter that loads these modules:
 --
@@ -3169,15 +3175,23 @@ test("buffer: the options that route :w, keep the buffer switchable and out of a
   eq(vim.bo[buf].swapfile, false)
   eq(vim.bo[buf].filetype, "docket")
   eq(vim.bo[buf].modified, false, "the read is not an edit")
-  -- The omnifunc names docket.complete, which is not part of this build, so
-  -- it is left unset: mini.completion would run it after every keystroke.
-  eq(vim.bo[buf].omnifunc, "")
-  eq(vim.b[buf].minicompletion_config, nil)
-  package.loaded[buffer.COMPLETE] = { omnifunc = function() end }
-  buffer.prepare(buf)
-  package.loaded[buffer.COMPLETE] = nil
-  eq(vim.bo[buf].omnifunc, buffer.OMNIFUNC, "set once the module loads")
+  -- docket.complete is part of this build, so the read names its omnifunc
+  -- and makes it mini.completion's fallback.
+  eq(vim.bo[buf].omnifunc, buffer.OMNIFUNC)
   eq(vim.b[buf].minicompletion_config, { fallback_action = "<C-x><C-o>" })
+  -- Where the module does not load, both are left unset: mini.completion
+  -- would run an omnifunc naming a missing module after every keystroke.
+  local bare = vim.api.nvim_create_buf(false, false)
+  local saved_loaded, saved_preload = package.loaded[buffer.COMPLETE], package.preload[buffer.COMPLETE]
+  package.loaded[buffer.COMPLETE] = nil
+  package.preload[buffer.COMPLETE] = function()
+    error("module 'docket.complete' not found")
+  end
+  buffer.prepare(bare)
+  package.loaded[buffer.COMPLETE], package.preload[buffer.COMPLETE] = saved_loaded, saved_preload
+  eq(vim.bo[bare].omnifunc, "", "unset when the module does not load")
+  eq(vim.b[bare].minicompletion_config, nil)
+  vim.api.nvim_buf_delete(bare, { force = true })
 
   -- A buffer `:e docket://…` makes is listed, and the read unlists it. It
   -- turns undo off for the lines it sets and back on after, so the edits
@@ -3229,6 +3243,31 @@ test("buffer: a line added below a region's last line by o, a linewise p or :put
     eq(added(command, 5, "body"), { body, 1 }, command .. " on the body's last line")
     eq(added(command, 11, "10002"), { comment, 1 }, command .. " on the buffer's last line")
   end
+  -- A new comment, whose line is the buffer's last, and whose region the
+  -- author line compose() appends does not join.
+  for _, command in ipairs({ "normal! osecond", 'normal! "ap' }) do
+    local buf = loaded_buffer()
+    vim.api.nvim_set_current_buf(buf)
+    vim.fn.setreg("a", "second\n", "l")
+    local row = buffer.compose(buf)
+    vim.api.nvim_buf_set_text(buf, row - 1, 0, row - 1, 0, { "first" })
+    vim.cmd(command)
+    local plan = buffer.plan(buf)
+    vim.api.nvim_buf_delete(buf, { force = true })
+    eq(vim.tbl_map(function(call)
+      return { call.kind, call.text }
+    end, plan.calls), { { diff.COMMENT_CREATE, "first\nsecond" } }, command .. " on a new comment's line")
+  end
+end)
+
+test("buffer: a comment opened below the last region leaves that region where it ended", function()
+  local buf = loaded_buffer()
+  local before = ranges(buf)["10002"]
+  local row = buffer.compose(buf)
+  eq(ranges(buf)["10002"], before, "the author line compose() appends is not the last comment's")
+  eq(ranges(buf)[diff.NEW], { row - 1, row })
+  eq(buffer.current(buf)["10002"].lines, { "Fix is in review." })
+  vim.api.nvim_buf_delete(buf, { force = true })
 end)
 
 test("buffer: undo right after the read leaves the buffer as the read left it", function()
@@ -3346,6 +3385,457 @@ test("buffer: deleting every line of a region leaves an empty range, which the s
   eq(ranges(buf)["10002"], { 9, 10 }, "the region after it moved up with the text")
 end)
 
+-- The item buffer's edit operations. Each test makes an edit the way a
+-- person would, with the keys or the Ex command, and asserts what :w would
+-- then plan: each call with its text, each region skipped and each refusal.
+-- The body and the account's own comment are two lines each, out of order,
+-- so that a sort or a filter over either changes it. The lines, numbered as
+-- the commands below number them:
+--
+--    1  PROJ-142   In Progress   me   updated 2h ago
+--    2  # Retry backoff drops the last attempt
+--    3
+--    4  charlie                  body
+--    5  alpha                    body
+--    6
+--    7  ana   3 days ago
+--    8  Repros on staging.       10001, ana's
+--    9
+--   10  me   yesterday
+--   11  zulu                     10002, the account's own
+--   12  bravo                    10002
+local function unsorted_buffer()
+  local buf = loaded_buffer({
+    body = doc(paragraph(text("charlie"), { type = "hardBreak" }, text("alpha"))),
+    comments = {
+      { id = 10001, author = { id = "acc-ana", name = "ana" }, created = "2024-04-30T12:00:00.000+0000", body = doc(paragraph(text("Repros on staging."))) },
+      {
+        id = 10002,
+        author = { id = "acc-me", name = "Me Myself" },
+        created = "2024-05-02T09:00:00.000+0000",
+        body = doc(paragraph(text("zulu"), { type = "hardBreak" }, text("bravo"))),
+      },
+    },
+  })
+  vim.api.nvim_set_current_buf(buf)
+  return buf
+end
+
+-- A plan as the tests below compare it: each call as `{ kind, id, text }`,
+-- then each region skipped and each refusal as the save reports it.
+local function listed(plan)
+  local found = {}
+  for _, call in ipairs(plan.calls) do
+    found[#found + 1] = { call.kind, call.id, call.text }
+  end
+  for _, entry in ipairs(plan.skipped) do
+    found[#found + 1] = ("%s: %s"):format(entry.id, entry.reason)
+  end
+  for _, entry in ipairs(plan.refused) do
+    found[#found + 1] = ("%s: refused: %s"):format(entry.id, entry.reason)
+  end
+  return found
+end
+
+-- What :w would do after `edit` runs in `buf`, which is then deleted.
+local function planned_in(buf, edit)
+  vim.api.nvim_set_current_buf(buf)
+  edit(buf)
+  local plan = buffer.plan(buf)
+  vim.api.nvim_buf_delete(buf, { force = true })
+  return listed(plan)
+end
+
+-- The same, in a fresh unsorted_buffer().
+local function planned_after(edit)
+  return planned_in(unsorted_buffer(), edit)
+end
+
+-- The edit as the keys that make it, from line `row`.
+local function keys(row, typed)
+  return function()
+    vim.api.nvim_win_set_cursor(0, { row, 0 })
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(typed, true, false, true), "x", false)
+  end
+end
+
+-- The same, as an Ex command.
+local function ex(command)
+  return function()
+    vim.cmd(command)
+  end
+end
+
+-- Runs fn as an undo block of its own, as each command typed separately is.
+local function own_block(fn)
+  vim.cmd("let &g:undolevels = &g:undolevels")
+  fn()
+  vim.cmd("let &g:undolevels = &g:undolevels")
+end
+
+-- The keys, typed where the cursor is, as their own undo block.
+local function typed(sequence)
+  own_block(function()
+    vim.cmd("silent normal! " .. vim.api.nvim_replace_termcodes(sequence, true, false, true))
+  end)
+end
+
+-- The refusal for a line no region holds.
+local function stray(row, line)
+  return ('%s: refused: line %d, "%s", is outside every region, where a save sends nothing; move it into a region, or u undoes the edit that put it there'):format(
+    diff.OUTSIDE,
+    row,
+    line
+  )
+end
+
+-- The refusal for a line gone from outside the regions.
+local function gone(line)
+  return ('%s: refused: "%s" is no longer outside the regions, so an edit deleted it or moved it into one, and a save cannot tell which; u undoes that edit'):format(
+    diff.OUTSIDE,
+    line
+  )
+end
+
+local NOTHING = {}
+
+test("buffer edits: o and O on a region's first and last lines put the new line inside it", function()
+  eq(planned_after(keys(4, "onew<Esc>")), { { diff.BODY_UPDATE, "body", "charlie\nnew\nalpha" } }, "o on the first line")
+  eq(planned_after(keys(5, "onew<Esc>")), { { diff.BODY_UPDATE, "body", "charlie\nalpha\nnew" } }, "o on the last line")
+  eq(planned_after(keys(4, "Onew<Esc>")), { { diff.BODY_UPDATE, "body", "new\ncharlie\nalpha" } }, "O on the first line")
+  eq(planned_after(keys(5, "Onew<Esc>")), { { diff.BODY_UPDATE, "body", "charlie\nnew\nalpha" } }, "O on the last line")
+  -- The comment ends the buffer, so its end sits past the last line.
+  eq(planned_after(keys(11, "Onew<Esc>")), { { diff.COMMENT_UPDATE, "10002", "new\nzulu\nbravo" } }, "O on a comment's first line")
+  eq(planned_after(keys(12, "onew<Esc>")), { { diff.COMMENT_UPDATE, "10002", "zulu\nbravo\nnew" } }, "o on the buffer's last line")
+end)
+
+test("buffer edits: p, P and :put of one line and of several, below and above a region's last line, put them inside it", function()
+  local function put(lines, command, row)
+    return function()
+      vim.fn.setreg("a", lines, "l")
+      vim.api.nvim_win_set_cursor(0, { row or 5, 0 })
+      vim.cmd(command)
+    end
+  end
+  local one, several = { "one" }, { "one", "two" }
+  eq(planned_after(put(one, 'normal! "ap')), { { diff.BODY_UPDATE, "body", "charlie\nalpha\none" } }, "p of one line")
+  eq(planned_after(put(several, 'normal! "ap')), { { diff.BODY_UPDATE, "body", "charlie\nalpha\none\ntwo" } }, "p of several")
+  eq(planned_after(put(one, 'normal! "aP')), { { diff.BODY_UPDATE, "body", "charlie\none\nalpha" } }, "P of one line")
+  eq(planned_after(put(several, 'normal! "aP')), { { diff.BODY_UPDATE, "body", "charlie\none\ntwo\nalpha" } }, "P of several")
+  eq(planned_after(put(one, "5put a")), { { diff.BODY_UPDATE, "body", "charlie\nalpha\none" } }, ":put of one line")
+  eq(planned_after(put(several, "5put a")), { { diff.BODY_UPDATE, "body", "charlie\nalpha\none\ntwo" } }, ":put of several")
+  eq(planned_after(put(one, "5put! a")), { { diff.BODY_UPDATE, "body", "charlie\none\nalpha" } }, ":put! of one line")
+  eq(planned_after(put(several, "5put! a")), { { diff.BODY_UPDATE, "body", "charlie\none\ntwo\nalpha" } }, ":put! of several")
+  eq(planned_after(put(several, 'normal! "aP', 4)), { { diff.BODY_UPDATE, "body", "one\ntwo\ncharlie\nalpha" } }, "P above the first line")
+  eq(planned_after(put(several, 'normal! "ap', 12)), { { diff.COMMENT_UPDATE, "10002", "zulu\nbravo\none\ntwo" } }, "p below the buffer's last line")
+end)
+
+test("buffer edits: dd then p swaps a region's lines, and from its last line carries that line out, which refuses the save", function()
+  eq(planned_after(keys(4, "ddp")), { { diff.BODY_UPDATE, "body", "alpha\ncharlie" } }, "from the first line")
+  -- dd leaves the cursor on the blank line after the body, and p puts the
+  -- line below that, where no region reaches.
+  eq(planned_after(keys(5, "ddp")), { stray(6, "alpha") }, "from the last line")
+  -- At the end of the buffer dd leaves the cursor on the line above, and p
+  -- puts the line back where it was.
+  eq(planned_after(keys(12, "ddp")), NOTHING, "from the buffer's last line")
+end)
+
+test("buffer edits: :sort over a region's lines sends them sorted", function()
+  eq(planned_after(ex("4,5sort")), { { diff.BODY_UPDATE, "body", "alpha\ncharlie" } })
+  eq(planned_after(ex("11,12sort")), { { diff.COMMENT_UPDATE, "10002", "bravo\nzulu" } }, "the comment that ends the buffer")
+end)
+
+test("buffer edits: :sort over a range crossing a region's boundary takes blank lines in, and refuses the save when it takes an author line or the title", function()
+  eq(planned_after(ex("4,6sort")), { { diff.BODY_UPDATE, "body", "alpha\ncharlie" } }, "with the blank line after")
+  eq(planned_after(ex("3,5sort")), { { diff.BODY_UPDATE, "body", "alpha\ncharlie" } }, "with the blank line before")
+  -- The body, the blank line and the next author line: the body and ana's
+  -- comment now both start where the sort put its first line.
+  local recover = "u undoes that edit; otherwise yank the text, then :e! reads the item again"
+  eq(planned_after(ex("4,7sort")), {
+    ("10001: refused: its text runs into body's, so which lines are whose is lost; %s"):format(recover),
+    ("body: refused: its text runs into 10001's, so which lines are whose is lost; %s"):format(recover),
+    gone("ana   3 days ago"),
+  }, "into the next comment's author line")
+  eq(planned_after(ex("2,5sort")), { gone("# Retry backoff drops the last attempt") }, "with the title above")
+  eq(planned_after(ex("10,12sort")), { gone("me   yesterday") }, "with the comment's own author line")
+end)
+
+test("buffer edits: J joining a region's last line to the line after keeps its text, and so does joining the line after that", function()
+  eq(planned_after(keys(5, "J")), NOTHING, "with the blank line after")
+  -- The second J joins the author line onto the body's last line; the end of
+  -- the body's mark stays where the author line begins.
+  eq(planned_after(keys(5, "JJ")), NOTHING, "and then with the author line")
+  eq(planned_after(keys(10, "J")), NOTHING, "an author line joined with the comment below it")
+  eq(planned_after(keys(4, "J")), { { diff.BODY_UPDATE, "body", "charlie alpha" } }, "the region's own two lines")
+end)
+
+test("buffer edits: text typed where a J joined an author line onto the comment below it is an edit to the author line, and refuses the save", function()
+  -- J leaves the cursor on the space it inserts, so `i` types in front of it,
+  -- at the end of the author line's words, and `a` types after it.
+  eq(planned_after(keys(10, "JiX<Esc>")), { stray(10, "me   yesterdayX") }, "at the end of the author line's words")
+  eq(planned_after(keys(10, "JaY<Esc>")), { stray(10, "me   yesterday Y") }, "after the space J inserts")
+  eq(planned_after(keys(10, "gJiX<Esc>")), { stray(10, "me   yesterdayX") }, "where gJ joined the two with no space")
+  eq(planned_after(keys(10, "JiX<CR><Esc>")), { stray(10, "me   yesterdayX") }, "and broken onto a line of its own after")
+  -- The same on the author line compose() writes above a new comment.
+  local buf = unsorted_buffer()
+  local row = buffer.compose(buf)
+  vim.api.nvim_buf_set_lines(buf, row - 1, row, false, { "hello" })
+  eq(planned_in(buf, keys(row - 1, "JiX<Esc>")), { stray(row - 1, "me   not postedX") }, "a comment not yet posted")
+end)
+
+test("buffer edits: a J of an author line onto a comment whose first line was edited, or opened above, still sends the comment", function()
+  local function after(first, second)
+    return function()
+      keys(first[1], first[2])()
+      keys(second[1], second[2])()
+    end
+  end
+  eq(
+    planned_after(after({ 11, "iX<Esc>" }, { 10, "J" })),
+    { { diff.COMMENT_UPDATE, "10002", "Xzulu\nbravo" } },
+    "text typed at the start of the comment's first line is the comment's"
+  )
+  eq(
+    planned_after(after({ 11, "Onew<Esc>" }, { 10, "J" })),
+    { { diff.COMMENT_UPDATE, "10002", "new\nzulu\nbravo" } },
+    "a line opened above the comment's first line is the comment's"
+  )
+  local buf = unsorted_buffer()
+  local row = buffer.compose(buf)
+  vim.api.nvim_buf_set_lines(buf, row - 1, row, false, { "hello" })
+  eq(planned_in(buf, keys(row - 1, "J")), { { diff.COMMENT_CREATE, diff.NEW, "hello" } }, "a comment not yet posted")
+  -- The body's head is at the title's end, not on the blank line between,
+  -- which a `dd` removes: on that line it would fall to the body's first
+  -- column and move with the text typed there, and the title's `J` would
+  -- then read that text as the title's and refuse the save.
+  eq(
+    planned_after(function()
+      keys(3, "dd")()
+      keys(3, "iX<Esc>")()
+      keys(2, "J")()
+    end),
+    { { diff.BODY_UPDATE, "body", "Xcharlie\nalpha" } },
+    "text typed at the start of the body, with the blank line above it deleted, then the title joined onto it"
+  )
+end)
+
+test("buffer: each region's head sits at the end of the nearest line above its first line that holds text, one per region, and compose() replaces an emptied comment's", function()
+  local function heads(buf)
+    local found = {}
+    for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, buffer.HEADS, 0, -1, {})) do
+      found[#found + 1] = { mark[2], mark[3] }
+    end
+    return found
+  end
+  local buf = loaded_buffer()
+  local by_region = {}
+  for key, known in pairs(vim.b[buf].docket.marks) do
+    local at = vim.api.nvim_buf_get_extmark_by_id(buf, buffer.HEADS, known.head, {})
+    by_region[known.id] = { at[1], at[2] }
+  end
+  eq(by_region, { body = { 1, 38 }, ["10001"] = { 6, 16 }, ["10002"] = { 9, 14 } }, "the title's end above the body, and each author line's end")
+  eq(#heads(buf), 3)
+  buffer.populate(buf, ticket({ comments = {}, total = 0 }), { now = NOW })
+  eq(heads(buf), { { 1, 38 } }, "a populate clears the heads of the item read before")
+  local row = buffer.compose(buf)
+  eq(#heads(buf), 2, "a composed comment has a head of its own")
+  vim.api.nvim_buf_set_lines(buf, row - 3, row, false, {})
+  buffer.compose(buf)
+  eq(#heads(buf), 2, "compose() over an emptied comment drops its head with its marks")
+  vim.api.nvim_buf_delete(buf, { force = true })
+end)
+
+test("buffer edits: gq on a region sends it reflowed, and over a comment's paragraph leaves its author line outside", function()
+  local function gq(row, width)
+    return function()
+      vim.bo.textwidth = width
+      keys(row, "gqip")()
+    end
+  end
+  eq(planned_after(gq(4, 79)), { { diff.BODY_UPDATE, "body", "charlie alpha" } }, "the body")
+  -- A comment's paragraph starts at its author line, which has no blank line
+  -- between it and the comment.
+  eq(planned_after(gq(11, 79)), { { diff.COMMENT_UPDATE, "10002", "zulu bravo" } }, "the author line joined in")
+  eq(planned_after(gq(11, 10)), { { diff.COMMENT_UPDATE, "10002", "zulu bravo" } }, "the author line broken apart")
+end)
+
+test("buffer edits: cc on one line of a region sends that line changed", function()
+  eq(planned_after(keys(5, "ccomega<Esc>")), { { diff.BODY_UPDATE, "body", "charlie\nomega" } })
+  eq(planned_after(keys(4, "ccomega<Esc>")), { { diff.BODY_UPDATE, "body", "omega\nalpha" } })
+end)
+
+test("buffer edits: :m inside a region sends the new order, out of it into another sends both, and out to where no region reaches refuses the save", function()
+  eq(planned_after(ex("4m5")), { { diff.BODY_UPDATE, "body", "alpha\ncharlie" } }, "the first line below the last")
+  eq(planned_after(ex("5m3")), { { diff.BODY_UPDATE, "body", "alpha\ncharlie" } }, "the last line above the first")
+  eq(planned_after(ex("4m11")), {
+    { diff.COMMENT_UPDATE, "10002", "zulu\ncharlie\nbravo" },
+    { diff.BODY_UPDATE, "body", "alpha" },
+  }, "into the account's comment")
+  eq(planned_after(ex("4m6")), { stray(6, "charlie") }, "below the blank line after the region")
+  eq(planned_after(ex("12m0")), { stray(1, "bravo") }, "above the header")
+  -- The blank line above the body and its first line, moved below the next
+  -- comment: the mark's start goes with them and its end stays.
+  eq(planned_after(ex("3,4m9")), {
+    "body: refused: an edit moved its first line below its last, so its mark no longer spans its text; u undoes that edit; otherwise yank the text, then :e! reads the item again",
+    stray(3, "alpha"),
+  }, "the start below the end")
+end)
+
+test("buffer edits: ! through a filter over a region's lines sends what the filter printed", function()
+  local shell = vim.o.shell
+  vim.o.shell = "sh"
+  local sorted = planned_after(ex("4,5!sort"))
+  -- sed's idiom for printing lines last first, which tac does where it is
+  -- installed.
+  local reversed = planned_after(ex([[4,5!sed -n '1\!G;h;$p']]))
+  local comment = planned_after(ex([[11,12!sed -n '1\!G;h;$p']]))
+  vim.o.shell = shell
+  eq(sorted, { { diff.BODY_UPDATE, "body", "alpha\ncharlie" } }, "sort")
+  eq(reversed, { { diff.BODY_UPDATE, "body", "alpha\ncharlie" } }, "reversed")
+  eq(comment, { { diff.COMMENT_UPDATE, "10002", "bravo\nzulu" } }, "the comment that ends the buffer, reversed")
+end)
+
+test("buffer edits: a region emptied where the next one starts is emptied, not overlapping, and the author line deleted with it refuses the save", function()
+  -- ana's comment, the blank line after it and the next author line: the
+  -- emptied mark and the next region's start are then one position.
+  eq(planned_after(ex("silent 8,10d")), { "10001: empty; nothing sent", gone("me   yesterday") })
+end)
+
+test("buffer edits: deleting every line of a region and then undo sends nothing, and the mark is where it was", function()
+  local buf = unsorted_buffer()
+  vim.cmd("4,5d")
+  eq(buffer.plan(buf).skipped, { { id = "body", reason = "empty; nothing sent" } }, "emptied until the undo")
+  vim.cmd("silent undo")
+  eq(ranges(buf).body, { 3, 5 })
+  eq(buffer.plan(buf), { calls = {}, skipped = {}, refused = {} })
+  vim.api.nvim_buf_delete(buf, { force = true })
+  eq(planned_after(ex("11,12d | silent undo")), NOTHING, "the comment that ends the buffer")
+end)
+
+test("buffer edits: deleting every line of a region and then putting them back with P sends nothing, and other lines put there are sent", function()
+  eq(planned_after(keys(4, "2ddP")), NOTHING, "the same lines back")
+  eq(planned_after(keys(4, "2ddkp")), NOTHING, "with p from the line above")
+  eq(planned_after(keys(11, "2ddp")), NOTHING, "the comment that ends the buffer")
+  eq(planned_after(function()
+    keys(4, "2dd")()
+    vim.fn.setreg("a", { "one", "two", "three" }, "l")
+    vim.cmd('silent normal! "aP')
+  end), { { diff.BODY_UPDATE, "body", "one\ntwo\nthree" } }, "other lines")
+end)
+
+test("buffer edits: typing on the blank line after a region puts the text inside it, with and without <CR>, and after another account's it is refused", function()
+  eq(planned_after(keys(6, "iafter<Esc>")), { { diff.BODY_UPDATE, "body", "charlie\nalpha\nafter" } }, "without <CR>")
+  eq(planned_after(keys(6, "iafter<CR><Esc>")), { { diff.BODY_UPDATE, "body", "charlie\nalpha\nafter" } }, "<CR> after it")
+  eq(planned_after(keys(6, "i<CR>after<Esc>")), { { diff.BODY_UPDATE, "body", "charlie\nalpha\n\nafter" } }, "<CR> before it")
+  -- Only a join's blank is dropped at a line's end, where one sits between
+  -- a region and the text after it; the spaces typed here are the text.
+  eq(planned_after(keys(6, "iafter  <Esc>")), { { diff.BODY_UPDATE, "body", "charlie\nalpha\nafter  " } }, "trailing spaces typed")
+  eq(planned_after(keys(9, "iafter<Esc>")), { "10001: refused: written by ana; " .. render.WEB_HINT }, "after ana's comment")
+  -- The blank line above the body is the title's, and no region reaches it.
+  eq(planned_after(keys(3, "ibefore<Esc>")), { stray(3, "before") }, "on the blank line before a region")
+end)
+
+test("buffer edits: text typed at the start of an author line whose blank line above is gone is outside every region, and refuses the save", function()
+  -- The end of the region above sits where the author line starts and takes
+  -- in what is typed there; the region's edge stays in front of it.
+  eq(planned_after(keys(6, "ddIoops <Esc>")), { stray(6, "oops ana   3 days ago") }, "the blank line deleted")
+  eq(planned_after(keys(6, "JIoops <Esc>")), { stray(6, "oops ana   3 days ago") }, "the blank line joined")
+  eq(planned_after(function()
+    keys(4, "capomega<Esc>")()
+    keys(5, "iX<Esc>")()
+  end), { stray(5, "Xana   3 days ago") }, "the body rewritten with cap, which takes the blank line with it")
+  eq(planned_after(ex("silent 6d | 6s/^/> /")), { stray(6, "> ana   3 days ago") }, ":s at the start of the line")
+  -- Below ana's comment it is refused as text outside, not as an edit to hers.
+  eq(planned_after(keys(9, "ddIhello <Esc>")), { stray(9, "hello me   yesterday") }, "the account's own author line")
+  -- Nor does it go into the comment above the one compose() opened.
+  local buf = unsorted_buffer()
+  local row = buffer.compose(buf)
+  eq(planned_in(buf, keys(row - 2, "ddIhello <Esc>")), {
+    "new: empty; nothing sent",
+    stray(row - 2, "hello me   not posted"),
+  }, "the author line compose() wrote")
+end)
+
+test("buffer edits: a join at a region's end or start keeps the region's own spaces, and only the space J inserts is dropped", function()
+  local function edges()
+    return loaded_buffer({
+      body = "first\nhard break  ",
+      comments = {
+        {
+          id = 10002,
+          author = { id = "acc-me", name = "Me Myself" },
+          created = "2024-05-02T09:00:00.000+0000",
+          body = "    indented code\nplain",
+        },
+      },
+      total = 1,
+    })
+  end
+  --    4  first
+  --    5  hard break␣␣           the body, ending in two spaces
+  --    6
+  --    7  me   yesterday
+  --    8  ␣␣␣␣indented code      10002, indented
+  --    9  plain
+  eq(planned_in(edges(), keys(5, "gJgJ")), NOTHING, "the body's last line onto the author line, with gJ")
+  eq(planned_in(edges(), keys(5, "JJ")), NOTHING, "the same with J, which inserts no space after trailing spaces")
+  eq(planned_in(edges(), keys(7, "gJ")), NOTHING, "the author line onto an indented comment, with gJ")
+  -- J takes the joined line's indentation off, as it does inside a region.
+  eq(planned_in(edges(), keys(7, "J")), { { diff.COMMENT_UPDATE, "10002", "indented code\nplain" } }, "the same with J")
+  -- A comment opening with one space, which is the region's own: a gJ leaves
+  -- the head where the start is, and nothing there is the space a J inserts.
+  local function spaced()
+    return loaded_buffer({
+      comments = {
+        {
+          id = 10002,
+          author = { id = "acc-me", name = "Me Myself" },
+          created = "2024-05-02T09:00:00.000+0000",
+          body = " one space\nplain",
+        },
+      },
+      total = 1,
+    })
+  end
+  eq(planned_in(spaced(), keys(7, "gJ")), NOTHING, "the author line onto a comment opening with one space, with gJ")
+  eq(
+    planned_in(spaced(), keys(7, "gJAX<Esc>")),
+    { { diff.COMMENT_UPDATE, "10002", " one spaceX\nplain" } },
+    "and typed at its end, the space is still the comment's"
+  )
+end)
+
+test("buffer: an empty range overlaps nothing, whether it sits where another region starts or inside one", function()
+  local buf = vim.api.nvim_create_buf(false, false)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "head", "", "one", "two", "", "tail" })
+  local function mark(id, from, to)
+    vim.api.nvim_buf_set_extmark(buf, buffer.REGIONS, from[1], from[2], { id = id, end_row = to[1], end_col = to[2] })
+  end
+  mark(1, { 2, 0 }, { 4, 0 })
+  mark(2, { 2, 0 }, { 2, 0 })
+  mark(3, { 3, 0 }, { 3, 0 })
+  vim.b[buf].docket = { marks = { ["1"] = { id = "whole" }, ["2"] = { id = "at_start" }, ["3"] = { id = "inside" } } }
+  local current, frame = buffer.current(buf)
+  vim.api.nvim_buf_delete(buf, { force = true })
+  eq(current, { whole = { lines = { "one", "two" } }, at_start = { lines = {} }, inside = { lines = {} } })
+  eq(frame, { { row = 1, text = "head" }, { row = 6, text = "tail" } })
+end)
+
+test("buffer: a region whose ends cross on one line reads as empty, and the frame reads that line once", function()
+  local buf = vim.api.nvim_create_buf(false, false)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "head", "ab x cd" })
+  -- The start, part-way along before one space and a word, moves past the
+  -- space; the end, part-way along before text, moves back to the edge at
+  -- the start of the line.
+  vim.api.nvim_buf_set_extmark(buf, buffer.REGIONS, 1, 2, { id = 1, end_row = 1, end_col = 4 })
+  vim.api.nvim_buf_set_extmark(buf, buffer.EDGES, 1, 0, { id = 1 })
+  vim.b[buf].docket = { marks = { ["1"] = { id = "crossed", edge = 1 } } }
+  local current, frame = buffer.current(buf)
+  vim.api.nvim_buf_delete(buf, { force = true })
+  eq(current, { crossed = { lines = {} } })
+  eq(frame, { { row = 1, text = "head" }, { row = 2, text = "ab x cd" } })
+end)
+
 test("buffer: an edit in another account's region is refused before any call", function()
   local buf = loaded_buffer()
   vim.api.nvim_buf_set_text(buf, 7, 0, 7, 0, { "not mine: " })
@@ -3356,16 +3846,38 @@ test("buffer: an edit in another account's region is refused before any call", f
   eq(plan.refused[1].reason, "written by ana; " .. render.WEB_HINT)
 end)
 
-test("buffer: the write command sends nothing, reports the plan, and leaves the text", function()
+test("buffer: the write command starts a write that reports through on_done, and says why when it sends nothing", function()
   local buf = loaded_buffer()
   vim.api.nvim_buf_set_text(buf, 3, 0, 3, 0, { "X" })
+  -- The check read is held, so the write is still in flight when write()
+  -- returns; its answer is then a failure, which writes nothing.
+  local held
+  local saved_item = jira.item
+  jira.item = function(_, on_done)
+    held = on_done
+  end
   local notices, restore = stub_notify()
-  local sent, message = buffer.write(buf)
+  local finished
+  local sent, message = buffer.write(buf, function(ok, reported)
+    finished = { ok, reported }
+  end)
+  local pending_notices, writing_then = vim.deepcopy(notices), buffer.writing(buf)
+  held(nil, "acli exited 1")
+  vim.wait(1000, function()
+    return finished ~= nil
+  end)
+  jira.item = saved_item
   restore()
-  eq(sent, false)
-  eq(message, "the write path is not part of this build; 1 region(s) still hold their edits")
+  eq(sent, true, "the edit starts a write")
+  eq(message, nil)
+  eq(pending_notices, {}, "nothing is reported until the client answers")
+  eq(writing_then, true)
+  eq(finished[1], false)
+  eq(finished[2]:find("nothing written, because the item could not be read to check it for changes:\nacli exited 1", 1, true) ~= nil, true, finished[2])
+  eq(buffer.writing(buf), false, "the failure ends the write")
   eq(#notices, 1)
   eq(vim.api.nvim_buf_get_lines(buf, 3, 4, false), { "XThe retry loop re-enters" })
+  eq(vim.bo[buf].modified, true)
   -- BufWriteCmd discards what the write command returns, so the notice is
   -- the only report `:w` makes on a buffer nothing was read into.
   local empty = vim.api.nvim_create_buf(false, false)
@@ -3769,7 +4281,7 @@ test("commands: gx opens the adapter's url, and completion offers the subcommand
   restore_notify()
   vim.ui.open = saved_open
   eq(notices, { { message = "vim.ui.open: no handler found", level = vim.log.levels.WARN } })
-  eq(commands.complete("", "Docket "), { "login", "review" })
+  eq(commands.complete("", "Docket "), { "create", "login", "review" })
   eq(commands.complete("r", "Docket r"), { "review" })
   eq(commands.complete("", "Docket login "), row.SOURCES)
   eq(commands.complete("g", "Docket! login g"), { "glab", "gh" })
@@ -4020,13 +4532,14 @@ test("cache: rows round-trip with the moment they were written, under a private 
   eq(bit.band(vim.uv.fs_stat(dir).mode, 511), 448, "0700")
   local decoded = vim.json.decode(table.concat(vim.fn.readfile(cache.path(key)), "\n"))
   eq(decoded.key, key, "the key is inside the file")
+  eq(decoded.format, 2, "and so is the format, which the read below holds it to")
   eq(#vim.fn.glob(dir .. "/*.tmp", false, true), 0, "no temporary file left")
   cache.drop(key)
   eq(cache.read(key), nil, "dropped")
   restore()
 end)
 
-test("cache: an absent directory, one that cannot be written, and a file that is not JSON are each a miss", function()
+test("cache: an absent directory, one that cannot be written, a file that is not JSON, and one of another format are each a miss", function()
   local dir, restore = scratch_cache()
   local key = "jira q"
   config.options.cache_dir = dir .. "/absent/deeper"
@@ -4055,16 +4568,29 @@ test("cache: an absent directory, one that cannot be written, and a file that is
   eq(cache.read(key), nil, "not JSON")
   vim.fn.writefile({ "[1, 2]" }, cache.path(key))
   eq(cache.read(key), nil, "JSON of the wrong shape")
-  vim.fn.writefile({ vim.json.encode({ key = "jira other", written = 1, rows = ROWS }) }, cache.path(key))
+  -- The format is spelled out rather than read off the module: a file of
+  -- the shape the module writes today is what has to be read, and one of
+  -- another shape, or of none, has to be a miss, so that a row cached under
+  -- an older shape is fetched again rather than shown without a field the
+  -- current shape carries.
+  vim.fn.writefile({ vim.json.encode({ format = 2, key = key, written = 1, rows = ROWS }) }, cache.path(key))
+  eq(cache.read(key), { rows = ROWS, written = 1 }, "a file of the current format is read")
+  vim.fn.writefile({ vim.json.encode({ key = key, written = 1, rows = ROWS }) }, cache.path(key))
+  eq(cache.read(key), nil, "a file of no format")
+  vim.fn.writefile({ vim.json.encode({ format = 1, key = key, written = 1, rows = ROWS }) }, cache.path(key))
+  eq(cache.read(key), nil, "a file of another format")
+  vim.fn.writefile({ vim.json.encode({ format = "2", key = key, written = 1, rows = ROWS }) }, cache.path(key))
+  eq(cache.read(key), nil, "a format that is not a number")
+  vim.fn.writefile({ vim.json.encode({ format = 2, key = "jira other", written = 1, rows = ROWS }) }, cache.path(key))
   eq(cache.read(key), nil, "another key's rows under this key's name")
-  vim.fn.writefile({ vim.json.encode({ key = key, written = "1", rows = ROWS }) }, cache.path(key))
+  vim.fn.writefile({ vim.json.encode({ format = 2, key = key, written = "1", rows = ROWS }) }, cache.path(key))
   eq(cache.read(key), nil, "a written moment that is not a number")
-  vim.fn.writefile({ '{"key":"jira q","written":1,"rows":{"PAY-1":{"id":"PAY-1"}}}' }, cache.path(key))
+  vim.fn.writefile({ '{"format":2,"key":"jira q","written":1,"rows":{"PAY-1":{"id":"PAY-1"}}}' }, cache.path(key))
   eq(cache.read(key), nil, "rows as an object, which ipairs reads as none at all")
-  vim.fn.writefile({ vim.json.encode({ key = key, written = 1, rows = { { source = "jira", id = "PAY-1" } } }) }, cache.path(key))
+  vim.fn.writefile({ vim.json.encode({ format = 2, key = key, written = 1, rows = { { source = "jira", id = "PAY-1" } } }) }, cache.path(key))
   eq(cache.read(key), nil, "a row with none of the fields the dashboard renders")
   local unknown = vim.tbl_extend("force", ROWS[1], { source = "bitbucket" })
-  vim.fn.writefile({ vim.json.encode({ key = key, written = 1, rows = { ROWS[1], unknown } }) }, cache.path(key))
+  vim.fn.writefile({ vim.json.encode({ format = 2, key = key, written = 1, rows = { ROWS[1], unknown } }) }, cache.path(key))
   eq(cache.read(key), nil, "one row from no adapter, which would kill the render inside :Docket")
   cache.clear()
   eq(#vim.fn.glob(dir .. "/*.json", false, true), 0, "clear removes every row file")
@@ -4238,6 +4764,29 @@ test("cache: an answer landing after its key was dropped is neither written nor 
   deliver(ROWS)
   eq(got[1], ROWS, "the next request answers as usual")
   eq(cache.read(key).rows, ROWS)
+  restore()
+end)
+
+test("cache: a write to an item drops the keys whose rows hold it, and every answer in flight, which may predate it", function()
+  local _, restore = scratch_cache()
+  cache.write("jira holding", ROWS)
+  cache.write("jira other", { row.new({ source = "jira", id = "PAY-11", state = "To Do", title = "Eleven" }) })
+  local deliver
+  local got
+  cache.fetch("jira no file yet", function(hand)
+    deliver = hand
+  end, function(rows, err)
+    got = { rows, err }
+  end)
+  local dropped = cache.drop_item("jira", "PAY-10")
+  -- The search started before the write answers with the item as it was.
+  deliver({ row.new({ source = "jira", id = "PAY-10", state = "To Do", title = "Ten" }) })
+  eq(dropped, { "jira holding" })
+  eq(cache.read("jira holding"), nil)
+  eq(cache.read("jira other") ~= nil, true, "a key whose rows do not hold it is kept")
+  eq(got[1], nil, "the answer in flight is not shown")
+  eq(tostring(got[2]):find("dropped while the request was in flight", 1, true) ~= nil, true, got[2])
+  eq(cache.read("jira no file yet"), nil, "nor written")
   restore()
 end)
 
@@ -4715,6 +5264,8 @@ end)
 
 test("commands: w and R refuse a row from a fork, whose branch on origin is somebody else's", function()
   for _, act in ipairs({ commands.work_row, commands.review_row }) do
+    -- The row carries no address, so nothing says the clone is the fork the
+    -- branch lives in, and no git runs before the refusal.
     local asked, events, restore = stub_dash_row({ source = "gh", id = "#12", branch = "main", fork = true })
     local notices, restore_notify = stub_notify()
     act(0)
@@ -5423,13 +5974,21 @@ test("plugin: the command, the map and the autocommands are declared, and :e rea
   eq(vim.fn.maparg("<leader>dd", "n"), "<Cmd>Docket<CR>")
   local events = {}
   for _, autocmd in ipairs(vim.api.nvim_get_autocmds({ group = "docket" })) do
-    events[autocmd.event] = autocmd.pattern
+    events[autocmd.event] = events[autocmd.event] or {}
+    table.insert(events[autocmd.event], autocmd.pattern)
   end
-  eq(events, { BufReadCmd = "docket://*", BufWriteCmd = "docket://*", FileType = "docket" })
+  for _, patterns in pairs(events) do
+    table.sort(patterns)
+  end
+  eq(events, {
+    BufReadCmd = { "docket-new://*", "docket://*" },
+    BufWriteCmd = { "docket-new://*", "docket://*" },
+    FileType = { "docket" },
+  })
 
   jira.forget()
   local _, restore_wait = stub_acli({ signed_in = true })
-  local _, restore_run = stub_run(function(argv)
+  local run_calls, restore_run = stub_run(function(argv)
     if argv[4] == "search" then
       return done(argv, { found("TIG-7", { assignee = user("acc-me", "Me Myself") }) })
     end
@@ -5443,6 +6002,12 @@ test("plugin: the command, the map and the autocommands are declared, and :e rea
   end)
   vim.api.nvim_buf_set_text(buf, 3, 0, 3, 0, { "X" })
   vim.cmd.write()
+  -- The write answers later: it reads the item to check the body, sends it,
+  -- and reads the item again.
+  local writing_then = buffer.writing(buf)
+  vim.wait(1000, function()
+    return not buffer.writing(buf)
+  end)
   restore_notify()
   restore_run()
   restore_wait()
@@ -5451,10 +6016,15 @@ test("plugin: the command, the map and the autocommands are declared, and :e rea
   eq(vim.bo[buf].filetype, "docket")
   eq(vim.fn.maparg("gx", "n", false, true).buffer, 1, "the item buffer's keymap")
   eq(vim.fn.maparg("<leader>dw", "n", false, true).buffer, 1)
-  eq(#notices, 1, ":w went through the write command")
-  eq(notices[1].message, "the write path is not part of this build; 1 region(s) still hold their edits")
-  eq(vim.api.nvim_buf_get_lines(buf, 3, 4, false), { "XThe retry loop re-enters" }, "the text is left")
-  eq(vim.bo[buf].modified, true, "and the buffer stays modified")
+  eq(writing_then, true, ":w went through the write command")
+  eq(notices, { { message = "body: written", level = vim.log.levels.INFO } })
+  local edits = vim.tbl_filter(function(call)
+    return call.argv[4] == "edit"
+  end, run_calls)
+  eq(#edits, 1, "one body update")
+  eq(vim.list_slice(edits[1].argv, 1, 9), argv_of("workitem", "edit", "--key", "TIG-1001", "--yes", "--json", "--description-file"))
+  eq(vim.api.nvim_buf_get_lines(buf, 3, 4, false), { "The retry loop re-enters" }, "the buffer holds what the client read back")
+  eq(vim.bo[buf].modified, false, "and the read after the write clears modified")
 
   -- `:e!` with a read that fails: the state the last read stored goes with
   -- the text it described, so `:w` says nothing is loaded rather than
@@ -7863,6 +8433,2076 @@ test("binding: jql first, then the projects, then ignore, and a config git canno
   eq(binding, nil)
   eq(err, "git exited 1\nerror: bad config line 3 in file .bare/config")
   eq(repo.LIST_COMMAND, "acli jira project list --paginate", "the listing stops at a page without --paginate")
+end)
+
+-- phase 6: the write path, completion, transitions, assignment, create
+
+-- What stub_calls answers with to keep a call's callback for the test to
+-- answer later, through the record's `release`.
+local HOLD = {}
+
+-- Replaces calls on an adapter module with recorders, and hands back the
+-- calls and the restore. Each call is recorded as `{ name, args }` and
+-- answered with what `answers[name]` returns for its arguments, delivered
+-- from a libuv timer: that is the fast-event context spawn.run's callbacks
+-- arrive in, so a caller that touches the editor there without scheduling
+-- fails here as it would in the editor. The registry hands back the module
+-- itself, so a caller reaching the adapter through adapters.get() meets the
+-- recorders too.
+local function stub_calls(adapter, answers)
+  local calls, saved = {}, {}
+  for name, answer in pairs(answers) do
+    saved[name] = adapter[name]
+    adapter[name] = function(...)
+      local args = { n = select("#", ...), ... }
+      local on_done = args[args.n]
+      local record = { name = name, args = vim.list_slice(args, 1, args.n - 1) }
+      calls[#calls + 1] = record
+      local function deliver(...)
+        local values = { n = select("#", ...), ... }
+        local timer = vim.uv.new_timer()
+        timer:start(1, 0, function()
+          timer:close()
+          on_done(unpack(values, 1, values.n))
+        end)
+      end
+      if answer == HOLD then
+        record.release = deliver
+      else
+        deliver(answer(unpack(args, 1, args.n - 1)))
+      end
+    end
+  end
+  return calls, function()
+    for name, fn in pairs(saved) do
+      adapter[name] = fn
+    end
+  end
+end
+
+local function names(calls)
+  return vim.tbl_map(function(call)
+    return call.name
+  end, calls)
+end
+
+-- Runs the write command and waits for its on_done, which a write that
+-- sends nothing calls before returning.
+local function write_and_wait(buf)
+  local finished
+  local started, message = buffer.write(buf, function(ok, reported)
+    finished = { ok = ok, message = reported }
+  end)
+  vim.wait(2000, function()
+    return finished ~= nil
+  end)
+  return finished, started, message
+end
+
+local function contains(text, part)
+  return type(text) == "string" and text:find(part, 1, true) ~= nil
+end
+
+-- The two comments ticket() carries, each with an `updated`, which is what
+-- the conflict check compares a comment by when both the load and the
+-- re-read carry one.
+local function stamped(overrides)
+  local comments = {
+    {
+      id = 10001,
+      author = { id = "acc-ana", name = "ana" },
+      created = "2024-04-30T12:00:00.000+0000",
+      updated = "2024-04-30T12:00:00.000+0000",
+      body = doc(paragraph(text("Repros on staging."))),
+    },
+    {
+      id = 10002,
+      author = { id = "acc-me", name = "Me Myself" },
+      created = "2024-05-02T09:00:00.000+0000",
+      updated = "2024-05-02T09:00:00.000+0000",
+      body = doc(paragraph(text("Fix is in review."))),
+    },
+  }
+  for index, fields in pairs(overrides or {}) do
+    comments[index] = vim.tbl_extend("force", comments[index] or {}, fields)
+  end
+  return comments
+end
+
+-- A comment the account posted, as the read after the post returns it.
+local function posted(id, body, updated)
+  return {
+    id = id,
+    author = { id = "acc-me", name = "Me Myself" },
+    created = "2024-05-04T10:00:00.000+0000",
+    updated = updated or "2024-05-04T10:00:00.000+0000",
+    body = doc(paragraph(text(body))),
+  }
+end
+
+test("write: no edit makes no call and clears modified, and an edit to the header, the title or an author line is refused, since none is sent", function()
+  local buf = loaded_buffer()
+  local calls, restore = stub_calls(jira, {
+    item = function()
+      return ticket()
+    end,
+    body_update = function()
+      return true
+    end,
+    comment_update = function()
+      return true
+    end,
+  })
+  local notices, restore_notify = stub_notify()
+  local untouched = write_and_wait(buf)
+  vim.api.nvim_buf_set_text(buf, 0, 0, 0, 0, { "X" })
+  vim.api.nvim_buf_set_text(buf, 1, 2, 1, 2, { "Y" })
+  vim.api.nvim_buf_set_text(buf, 9, 0, 9, 0, { "Z" })
+  local modified_then = vim.bo[buf].modified
+  local header, started, message = write_and_wait(buf)
+  restore_notify()
+  restore()
+  eq(untouched, { ok = true, message = "nothing changed" })
+  eq(notices[1], { message = "nothing changed", level = vim.log.levels.INFO })
+  eq(modified_then, true)
+  local refusal = 'outside the regions: refused: line 1, "XPROJ-142   In Progress   me   updated 2h ago", is outside every region, where a save sends nothing; move it into a region, or u undoes the edit that put it there'
+  eq({ started, message }, { false, refusal }, "the first line changed is named")
+  eq(header, { ok = false, message = refusal })
+  eq(vim.bo[buf].modified, true, "the edit is still in the buffer, unsent")
+  eq(#calls, 0, "no call, not even the check read")
+  eq(notices[2], { message = refusal, level = vim.log.levels.WARN })
+end)
+
+test("write: a changed body is checked, sent once, read back, and the item's cached rows are dropped", function()
+  local _, restore_cache = scratch_cache()
+  local holding = cache.key("jira", "project IN (PROJ)" .. OPEN)
+  local elsewhere = cache.key("jira", "project IN (PAY)" .. OPEN)
+  cache.write(holding, { row.new({ source = "jira", id = "PROJ-142", state = "In Progress", title = "Retry" }) })
+  cache.write(elsewhere, { row.new({ source = "jira", id = "PAY-9", state = "To Do", title = "Nine" }) })
+  local buf = loaded_buffer()
+  vim.api.nvim_buf_set_text(buf, 3, 0, 3, 0, { "X" })
+  local backend = ticket().body
+  local calls, restore = stub_calls(jira, {
+    item = function()
+      return ticket({ body = backend })
+    end,
+    body_update = function(_, sent)
+      backend = adf.serialise(sent)
+      return true
+    end,
+  })
+  local notices, restore_notify = stub_notify()
+  local finished, started = write_and_wait(buf)
+  restore_notify()
+  restore()
+  local held, kept = cache.read(holding), cache.read(elsewhere)
+  restore_cache()
+  eq(started, true)
+  eq(names(calls), { "item", "body_update", "item" }, "the check read, the one call, the read that follows it")
+  eq(calls[2].args, { "PROJ-142", "XThe retry loop re-enters\nbefore the final attempt." })
+  eq(finished, { ok = true, message = "body: written" })
+  eq(notices, { { message = "body: written", level = vim.log.levels.INFO } })
+  eq(vim.bo[buf].modified, false)
+  eq(buffer.writing(buf), false)
+  eq(vim.api.nvim_buf_get_lines(buf, 3, 4, false), { "XThe retry loop re-enters" }, "populated from the read after the write")
+  eq(held, nil, "the key whose rows hold the item is dropped")
+  eq(kept ~= nil, true, "a key whose rows do not is kept")
+end)
+
+test("write: a body changed since the load is not written, and the message names the yank and :e!", function()
+  local buf = loaded_buffer()
+  vim.api.nvim_buf_set_text(buf, 3, 0, 3, 0, { "X" })
+  local calls, restore = stub_calls(jira, {
+    item = function()
+      return ticket({ body = doc(paragraph(text("Somebody rewrote the description."))) })
+    end,
+    body_update = function()
+      return true
+    end,
+  })
+  local notices, restore_notify = stub_notify()
+  local finished = write_and_wait(buf)
+  restore_notify()
+  restore()
+  eq(names(calls), { "item" }, "the check read alone")
+  eq(finished.ok, false)
+  eq(contains(finished.message, "body: changed since it was loaded"), true, finished.message)
+  eq(contains(finished.message, "Yank"), true, "the yank that keeps the text: " .. finished.message)
+  eq(contains(finished.message, ":e!"), true, "the reload command: " .. finished.message)
+  eq(notices[1].level, vim.log.levels.WARN)
+  eq(vim.bo[buf].modified, true)
+  eq(vim.api.nvim_buf_get_lines(buf, 3, 4, false), { "XThe retry loop re-enters" }, "the edit is kept")
+end)
+
+test("write: the item's own update time and a colleague's new comment are not a conflict on the body", function()
+  local buf = loaded_buffer()
+  vim.api.nvim_buf_set_text(buf, 3, 0, 3, 0, { "X" })
+  local comments = ticket().comments
+  comments[#comments + 1] = {
+    id = "10003",
+    author = { id = "acc-ana", name = "ana" },
+    created = "2024-05-09T10:00:00.000+0000",
+    body = doc(paragraph(text("Any news?"))),
+  }
+  local calls, restore = stub_calls(jira, {
+    item = function()
+      return ticket({ updated = "2024-05-09T10:00:00.000+0000", comments = comments })
+    end,
+    body_update = function()
+      return true
+    end,
+  })
+  local _, restore_notify = stub_notify()
+  local finished = write_and_wait(buf)
+  restore_notify()
+  restore()
+  eq(names(calls), { "item", "body_update", "item" })
+  eq(finished.ok, true, finished.message)
+end)
+
+test("write: a comment is compared by its own updated when both reads carry one, and by its text otherwise", function()
+  local _, restore_notify = stub_notify()
+  -- Its `updated` moved: somebody edited it, whatever it says now.
+  local buf = loaded_buffer({ comments = stamped() })
+  vim.api.nvim_buf_set_text(buf, 10, 0, 10, 0, { "Y" })
+  local moved_calls, restore = stub_calls(jira, {
+    item = function()
+      return ticket({ comments = stamped({ [2] = { updated = "2024-05-05T09:00:00.000+0000" } }) })
+    end,
+    comment_update = function()
+      return true
+    end,
+  })
+  local moved = write_and_wait(buf)
+  restore()
+  local moved_modified = vim.bo[buf].modified
+
+  -- The same stamp and a different text: the stamp decides, so it is sent.
+  buf = loaded_buffer({ comments = stamped() })
+  vim.api.nvim_buf_set_text(buf, 10, 0, 10, 0, { "Y" })
+  local same_calls
+  same_calls, restore = stub_calls(jira, {
+    item = function()
+      return ticket({ comments = stamped({ [2] = { body = doc(paragraph(text("Reads differently now."))) } }) })
+    end,
+    comment_update = function()
+      return true
+    end,
+  })
+  local same = write_and_wait(buf)
+  restore()
+
+  -- No `updated` on either read: the text decides.
+  buf = loaded_buffer()
+  vim.api.nvim_buf_set_text(buf, 10, 0, 10, 0, { "Y" })
+  local changed = vim.deepcopy(ticket().comments)
+  changed[2].body = doc(paragraph(text("Reads differently now.")))
+  local text_calls
+  text_calls, restore = stub_calls(jira, {
+    item = function()
+      return ticket({ comments = changed })
+    end,
+    comment_update = function()
+      return true
+    end,
+  })
+  local by_text = write_and_wait(buf)
+  restore()
+
+  -- The comment is gone from the re-read.
+  buf = loaded_buffer()
+  vim.api.nvim_buf_set_text(buf, 10, 0, 10, 0, { "Y" })
+  local gone_calls
+  gone_calls, restore = stub_calls(jira, {
+    item = function()
+      return ticket({ comments = { ticket().comments[1] } })
+    end,
+    comment_update = function()
+      return true
+    end,
+  })
+  local gone = write_and_wait(buf)
+  restore()
+  restore_notify()
+  eq(names(moved_calls), { "item" })
+  eq(moved.ok, false)
+  eq(contains(moved.message, "10002: edited since it was loaded"), true, moved.message)
+  eq(contains(moved.message, "Yank"), true, moved.message)
+  eq(contains(moved.message, ":e!"), true, moved.message)
+  eq(moved_modified, true)
+  eq(names(same_calls), { "item", "comment_update", "item" })
+  eq(same_calls[2].args, { "PROJ-142", "10002", "YFix is in review." })
+  eq(same.ok, true, same.message)
+  eq(names(text_calls), { "item" })
+  eq(by_text.ok, false)
+  eq(contains(by_text.message, "10002: changed since it was loaded"), true, by_text.message)
+  eq(names(gone_calls), { "item" })
+  eq(contains(gone.message, "10002: not among the comments the client returned now"), true, gone.message)
+end)
+
+-- A merge request, !482, with `body` and `comments`, read by the account
+-- `me`, as the GitLab adapter's item() answers one.
+local function crlf_merge(body, comments)
+  return item.new({ source = "glab", id = "!482", title = "Bump the pinned acli", body = body, comments = comments or {}, me = "me" })
+end
+
+-- A comment of the account's own on it.
+local function own_note(id, body)
+  return {
+    id = id,
+    author = { id = "me", name = "Me Myself" },
+    created = "2024-05-02T09:00:00.000Z",
+    updated = "2024-05-02T09:00:00.000Z",
+    body = body,
+  }
+end
+
+-- A buffer holding a merge request as the read command leaves it, under the
+-- name an open from a clone of acme/payments gives it. The body is lines 3
+-- onwards, 0-based.
+local function merge_buffer(it)
+  local name = buffer.name("glab", "!482", "acme/payments")
+  local previous = buffer.named(name)
+  if previous then
+    vim.api.nvim_buf_delete(previous, { force = true })
+  end
+  local buf = vim.api.nvim_create_buf(false, false)
+  vim.api.nvim_buf_set_name(buf, name)
+  buffer.populate(buf, it, { now = NOW })
+  return buf
+end
+
+test("render: a body's line ends are CRLF only when every break between its lines is, and each region records it", function()
+  for _, body in ipairs({ "a\r\nb", "a\r\nb\r\n", "a\r\nb\n" }) do
+    eq(render.crlf(body), true, vim.inspect(body) .. ", whatever ends the body")
+  end
+  eq(render.crlf("a\r\n"), true, "a final CRLF that is the body's only line break is its only evidence of the ending")
+  for _, body in ipairs({ "a\n", "a\nb", "a\r\nb\nc", "a\nb\r\n", "\nb", "abc", "" }) do
+    eq(render.crlf(body), false, vim.inspect(body))
+  end
+  eq(render.crlf(nil), false, "no body")
+  eq(render.crlf(doc(paragraph(text("a"), { type = "hardBreak" }, text("b")))), false, "a tree has no line ends")
+  local _, regions = render.render(crlf_merge("x\r\ny", { own_note(7, "a\r\nb"), own_note(8, "c\nd") }), { now = NOW })
+  eq(vim.tbl_map(function(region)
+    return { region.id, region.crlf }
+  end, regions), { { "body", true }, { "7", true }, { "8" } }, "an LF region carries no field at all")
+  eq({ regions[1].lines, regions[2].lines }, { { "x", "y" }, { "a", "b" } }, "the buffer holds the lines without their carriage returns")
+end)
+
+test("write: a CRLF body saved unchanged sends nothing, and an edit is compared as LF and sent with CRLF, also after the read that follows it", function()
+  eq(render.region_lines("x\r\ny"), { "x", "y" })
+  local buf = merge_buffer(crlf_merge("x\r\ny"))
+  -- The check before each save reads the body as it was loaded; the read
+  -- after the first ends it with the LF glab's write appends.
+  local reads = { "x\r\ny", "Xx\r\ny\n", "Xx\r\ny\n", "YXx\r\ny\n" }
+  local calls, restore = stub_calls(glab, {
+    item = function()
+      return crlf_merge(table.remove(reads, 1))
+    end,
+    body_update = function()
+      return true
+    end,
+  })
+  local _, restore_notify = stub_notify()
+  local unchanged = write_and_wait(buf)
+  local sent = {}
+  vim.api.nvim_buf_set_text(buf, 3, 0, 3, 0, { "X" })
+  local plan = buffer.plan(buf)
+  local first = write_and_wait(buf)
+  sent[#sent + 1] = calls[#calls - 1].args
+  vim.api.nvim_buf_set_text(buf, 3, 0, 3, 0, { "Y" })
+  local second = write_and_wait(buf)
+  sent[#sent + 1] = calls[#calls - 1].args
+  restore_notify()
+  restore()
+  eq(unchanged, { ok = true, message = "nothing changed" })
+  eq(plan.calls, { { kind = diff.BODY_UPDATE, id = "body", text = "Xx\ny", crlf = true } }, "the plan's text is the buffer's LF")
+  eq(first.ok, true, first.message)
+  eq(second.ok, true, second.message)
+  eq(names(calls), { "item", "body_update", "item", "item", "body_update", "item" }, "neither save is refused as somebody else's change")
+  eq(sent, { { "!482", "Xx\r\ny" }, { "!482", "YXx\r\ny" } }, "each save puts the CRLF back")
+  eq(vim.api.nvim_buf_get_lines(buf, 3, 5, false), { "YXx", "y" }, "and the buffer shows no ^M")
+  vim.api.nvim_buf_delete(buf, { force = true })
+end)
+
+test("write: an LF body and one mixing both endings are sent with LF, and a CRLF comment is sent with CRLF", function()
+  local function sent(it, row)
+    local buf = merge_buffer(it)
+    vim.api.nvim_buf_set_text(buf, row, 0, row, 0, { "X" })
+    local plan = buffer.plan(buf)
+    local calls, restore = stub_calls(glab, {
+      item = function()
+        return it
+      end,
+      body_update = function()
+        return true
+      end,
+      comment_update = function()
+        return true
+      end,
+    })
+    local _, restore_notify = stub_notify()
+    local finished = write_and_wait(buf)
+    restore_notify()
+    restore()
+    vim.api.nvim_buf_delete(buf, { force = true })
+    eq(finished.ok, true, finished.message)
+    eq(#calls, 3, "the check, the update and the read after it")
+    return { plan = plan.calls, args = calls[2].args }
+  end
+  eq(
+    sent(crlf_merge("x\ny"), 3),
+    { plan = { { kind = diff.BODY_UPDATE, id = "body", text = "Xx\ny" } }, args = { "!482", "Xx\ny" } },
+    "an LF body, as it always was"
+  )
+  eq(
+    sent(crlf_merge("x\r\ny\nz"), 3),
+    { plan = { { kind = diff.BODY_UPDATE, id = "body", text = "Xx\ny\nz" } }, args = { "!482", "Xx\ny\nz" } },
+    "a mixed body is written with LF"
+  )
+  eq(
+    sent(crlf_merge("x", { own_note(7, "a\r\nb") }), 6),
+    { plan = { { kind = diff.COMMENT_UPDATE, id = "7", text = "Xa\nb", crlf = true } }, args = { "!482", "7", "Xa\r\nb" } },
+    "a comment's CRLF is its own"
+  )
+end)
+
+test("compose: a new comment is a region at the end, typed on the line it returns, and one at a time", function()
+  local buf = loaded_buffer()
+  vim.api.nvim_set_current_buf(buf)
+  local count = vim.api.nvim_buf_line_count(buf)
+  local row = buffer.compose(buf)
+  eq(row, count + 3, "a blank line, the author line, and the line typed on")
+  eq(vim.api.nvim_win_get_cursor(0), { row, 0 })
+  eq(vim.api.nvim_buf_get_lines(buf, row - 2, row - 1, false), { "me" .. render.SEPARATOR .. "not posted" })
+  eq(vim.bo[buf].modified, false, "an empty comment is not an edit")
+  eq(buffer.compose(buf), row, "a second compose goes to the one already open")
+  eq(vim.api.nvim_buf_line_count(buf), count + 3)
+  local plan = buffer.plan(buf)
+  eq(plan.calls, {})
+  eq(plan.skipped, { { id = "new", reason = "empty; nothing sent" } })
+end)
+
+test("compose: a new comment whose line was deleted is replaced, and the author lines it leaves are outside the regions as the save expects", function()
+  local buf = loaded_buffer()
+  vim.api.nvim_set_current_buf(buf)
+  local row = buffer.compose(buf)
+  vim.api.nvim_buf_set_lines(buf, row - 1, row, false, {})
+  eq(buffer.plan(buf), { calls = {}, skipped = { { id = "new", reason = "empty; nothing sent" } }, refused = {} })
+  local again = buffer.compose(buf)
+  eq(again, row + 2, "below a blank line and an author line of its own")
+  vim.api.nvim_buf_set_text(buf, again - 1, 0, again - 1, 0, { "Second try." })
+  eq(buffer.plan(buf), { calls = { { kind = diff.COMMENT_CREATE, id = "new", text = "Second try." } }, skipped = {}, refused = {} })
+  -- An edit to the author line compose() wrote is an edit outside every
+  -- region like any other.
+  vim.api.nvim_buf_set_text(buf, again - 2, 0, again - 2, 0, { "X" })
+  local refused = buffer.plan(buf).refused
+  eq(#refused, 1)
+  eq(refused[1].id, diff.OUTSIDE)
+  eq(refused[1].reason:match("^line %d+"), ("line %d"):format(again - 1))
+  eq(
+    #vim.api.nvim_buf_get_extmarks(buf, buffer.EDGES, 0, -1, {}),
+    #vim.api.nvim_buf_get_extmarks(buf, buffer.REGIONS, 0, -1, {}),
+    "the replaced comment's edge goes with its mark"
+  )
+end)
+
+test("compose: u takes a new comment out and the save is what it was before, a redo is refused as overlapping until u, and compose() opens one afresh", function()
+  local buf = unsorted_buffer()
+  local function now()
+    return listed(buffer.plan(buf))
+  end
+  local function compose()
+    local row
+    own_block(function()
+      row = buffer.compose(buf)
+    end)
+    return row
+  end
+  vim.api.nvim_win_set_cursor(0, { 4, 0 })
+  typed("Aedit<Esc>")
+  local edited = { diff.BODY_UPDATE, "body", "charlieedit\nalpha" }
+  compose()
+  typed("u")
+  local undone = now()
+  typed("<C-r>")
+  local redone = now()
+  typed("u")
+  local undone_again = now()
+  local row = compose()
+  typed("Anote<Esc>")
+  local composed = now()
+  -- The body edit undone too: the empty comment is all that is left.
+  typed("uuu")
+  local back = now()
+  vim.api.nvim_buf_delete(buf, { force = true })
+  eq(undone, { edited, "new: empty; nothing sent" }, "u after compose()")
+  local recover = "u undoes that edit; otherwise yank the text, then :e! reads the item again"
+  eq(redone, {
+    ("10002: refused: its text runs into new's, so which lines are whose is lost; %s"):format(recover),
+    ("new: refused: its text runs into 10002's, so which lines are whose is lost; %s"):format(recover),
+    gone("me   not posted"),
+  }, "<C-r> puts the lines back where both ranges end, the author line inside them")
+  eq(undone_again, undone, "u after the redo")
+  eq(row, 15, "compose() again opens the comment where the first one was")
+  eq(composed, { edited, { diff.COMMENT_CREATE, "new", "note" } }, "compose() again, and a comment typed")
+  eq(back, { "new: empty; nothing sent" }, "undone back to the read")
+end)
+
+test("compose: a new comment whose lines are all gone is withdrawn, and what is put or undone back where it was is the last comment's", function()
+  -- A line put below the last comment after u takes compose() out.
+  local buf = unsorted_buffer()
+  own_block(function()
+    buffer.compose(buf)
+  end)
+  typed("u")
+  vim.fn.setreg("a", "one\n", "l")
+  vim.api.nvim_win_set_cursor(0, { 12, 0 })
+  typed('"ap')
+  local put = listed(buffer.plan(buf))
+  -- compose() then opens another rather than going to the one withdrawn.
+  local row = buffer.compose(buf)
+  vim.api.nvim_buf_delete(buf, { force = true })
+  eq(put, { { diff.COMMENT_UPDATE, "10002", "zulu\nbravo\none" }, "new: empty; nothing sent" }, "a line put")
+  eq(row, 16, "compose() after it")
+  -- The last comment rewritten, then compose(), then both undone: the undo
+  -- puts the comment's lines back where the new one's range sits.
+  buf = unsorted_buffer()
+  vim.api.nvim_win_set_cursor(0, { 10, 0 })
+  typed("capR<Esc>")
+  own_block(function()
+    buffer.compose(buf)
+  end)
+  typed("uu")
+  eq(planned_in(buf, function() end), { "new: empty; nothing sent" }, "undone back to the read")
+end)
+
+test("compose: gq over a new comment takes its author line in and leaves it outside, and the comment is sent reflowed", function()
+  local buf = unsorted_buffer()
+  local row = buffer.compose(buf)
+  vim.api.nvim_buf_set_lines(buf, row - 1, row, false, { "one", "two" })
+  vim.bo[buf].textwidth = 79
+  eq(planned_in(buf, keys(row, "gqip")), { { diff.COMMENT_CREATE, "new", "one two" } })
+end)
+
+test("compose: the author line compose() wrote, deleted, is no change, and moved into a region by a sort refuses the save", function()
+  local function composed(edit)
+    local buf = unsorted_buffer()
+    local row = buffer.compose(buf)
+    vim.api.nvim_buf_set_lines(buf, row - 1, row, false, { "note" })
+    return planned_in(buf, function()
+      edit(row)
+    end)
+  end
+  eq(composed(function(row)
+    vim.cmd(("silent %dd"):format(row - 1))
+  end), { { diff.COMMENT_CREATE, "new", "note" } }, "deleted")
+  -- The author line and the comment's line, sorted last first: the range
+  -- collapses where the author line began and takes both lines in.
+  eq(composed(function(row)
+    vim.cmd(("silent %d,%dsort!"):format(row - 1, row))
+  end), { gone("me   not posted") }, "sorted into the comment")
+end)
+
+test("write: a new comment is posted without a check, and the read after it names the comment it became", function()
+  local buf = loaded_buffer()
+  vim.api.nvim_set_current_buf(buf)
+  local row = buffer.compose(buf)
+  vim.api.nvim_buf_set_text(buf, row - 1, 0, row - 1, 0, { "A new note." })
+  local comments = ticket().comments
+  comments[#comments + 1] = posted("10003", "A new note.", "2024-05-04T11:00:00.000+0000")
+  local calls, restore = stub_calls(jira, {
+    item = function()
+      return ticket({ comments = comments })
+    end,
+    comment_create = function()
+      return true
+    end,
+  })
+  local _, restore_notify = stub_notify()
+  local finished = write_and_wait(buf)
+  restore_notify()
+  restore()
+  eq(names(calls), { "comment_create", "item" }, "a post replaces nothing, so nothing is checked first")
+  eq(calls[1].args, { "PROJ-142", "A new note." })
+  eq(finished, { ok = true, message = "new: posted as 10003" })
+  eq(buffer.snapshot(buf).regions.new, nil)
+  eq(buffer.snapshot(buf).regions["10003"].lines, { "A new note." })
+  eq(vim.b[buf].docket.stamps["10003"], "2024-05-04T11:00:00.000+0000")
+  eq(vim.bo[buf].modified, false)
+end)
+
+test("write: a second :w before the read that follows a post is refused, so the comment is posted once", function()
+  local buf = loaded_buffer()
+  vim.api.nvim_set_current_buf(buf)
+  local row = buffer.compose(buf)
+  vim.api.nvim_buf_set_text(buf, row - 1, 0, row - 1, 0, { "Once." })
+  local comments = ticket().comments
+  comments[#comments + 1] = posted("10003", "Once.")
+  local calls, restore = stub_calls(jira, { comment_create = HOLD, item = HOLD })
+  local notices, restore_notify = stub_notify()
+  local finished
+  buffer.write(buf, function(ok, message)
+    finished = { ok = ok, message = message }
+  end)
+  local in_flight = buffer.writing(buf)
+  local before_post = { buffer.write(buf) }
+  local composed = { buffer.compose(buf) }
+  calls[1].release(true)
+  -- The post has answered and the read after it has not.
+  vim.wait(2000, function()
+    return #calls == 2
+  end)
+  local before_read = { buffer.write(buf) }
+  local still = buffer.writing(buf)
+  calls[2].release(ticket({ comments = comments }))
+  vim.wait(2000, function()
+    return finished ~= nil
+  end)
+  local after = buffer.plan(buf)
+  restore_notify()
+  restore()
+  eq(in_flight, true)
+  eq(before_post[1], false)
+  eq(contains(before_post[2], "a write is still in flight"), true, before_post[2])
+  eq(composed[1], nil)
+  eq(contains(composed[2], "a write is still in flight"), true, composed[2])
+  eq(still, true, "the write lasts until the read that names the comment has landed")
+  eq(before_read[1], false)
+  eq(contains(before_read[2], "a write is still in flight"), true, before_read[2])
+  eq(names(calls), { "comment_create", "item" }, "exactly one create")
+  eq(finished, { ok = true, message = "new: posted as 10003" })
+  eq(after.calls, {}, "and nothing is left to post")
+  eq(notices[#notices].message, "new: posted as 10003")
+end)
+
+test("write: a post whose read then fails holds the region read-only rather than posting it again", function()
+  local buf = loaded_buffer()
+  vim.api.nvim_set_current_buf(buf)
+  local row = buffer.compose(buf)
+  vim.api.nvim_buf_set_text(buf, row - 1, 0, row - 1, 0, { "A new note." })
+  local calls, restore = stub_calls(jira, {
+    item = function()
+      return nil, "acli exited 1\nError: the service is unavailable"
+    end,
+    comment_create = function()
+      return true
+    end,
+  })
+  local notices, restore_notify = stub_notify()
+  local finished = write_and_wait(buf)
+  local modified = vim.bo[buf].modified
+  local unedited = buffer.plan(buf)
+  vim.api.nvim_buf_set_text(buf, row - 1, 0, row - 1, 0, { "More: " })
+  local edited = buffer.plan(buf)
+  local composed = { buffer.compose(buf) }
+  restore_notify()
+  restore()
+  eq(names(calls), { "comment_create", "item" })
+  eq(finished.ok, true)
+  eq(contains(finished.message, "new: posted"), true, finished.message)
+  eq(contains(finished.message, "could not be read after the write"), true, finished.message)
+  eq(notices[1].level, vim.log.levels.WARN)
+  eq(modified, false)
+  eq(unedited.calls, {}, "a second :w posts nothing")
+  eq(edited.calls, {})
+  eq(edited.refused, { { id = "new", reason = buffer.POSTED } })
+  eq(composed[1], nil)
+  eq(contains(composed[2], buffer.POSTED), true, composed[2])
+end)
+
+test("write: a partial failure reports each region, keeps the buffer dirty with its text, and :w sends what is left", function()
+  local buf = loaded_buffer()
+  vim.api.nvim_buf_set_text(buf, 3, 0, 3, 0, { "X" })
+  vim.api.nvim_buf_set_text(buf, 10, 0, 10, 0, { "Y" })
+  local backend = ticket().body
+  local calls, restore = stub_calls(jira, {
+    item = function()
+      return ticket({ body = backend })
+    end,
+    body_update = function(_, sent)
+      backend = adf.serialise(sent)
+      return true
+    end,
+    comment_update = function()
+      return false, "acli exited 1\nError: comment 10002 is locked"
+    end,
+  })
+  local notices, restore_notify = stub_notify()
+  local finished = write_and_wait(buf)
+  restore_notify()
+  restore()
+  -- The plan is in identifier order, so the comment goes before the body.
+  eq(names(calls), { "item", "comment_update", "body_update", "item" }, "a failure does not stop the calls after it")
+  eq(finished.ok, false)
+  eq(contains(finished.message, "body: written"), true, finished.message)
+  eq(contains(finished.message, "10002: acli exited 1\nError: comment 10002 is locked"), true, finished.message)
+  eq(notices[1].level, vim.log.levels.ERROR)
+  eq(vim.bo[buf].modified, true)
+  eq(vim.api.nvim_buf_get_lines(buf, 3, 4, false), { "XThe retry loop re-enters" })
+  eq(vim.api.nvim_buf_get_lines(buf, 10, 11, false), { "YFix is in review." })
+  eq(buffer.plan(buf).calls, { { kind = diff.COMMENT_UPDATE, id = "10002", text = "YFix is in review." } })
+end)
+
+test("write: text typed while a post is in flight is kept, and the region takes the new comment's identifier", function()
+  local buf = loaded_buffer()
+  vim.api.nvim_set_current_buf(buf)
+  local row = buffer.compose(buf)
+  vim.api.nvim_buf_set_text(buf, row - 1, 0, row - 1, 0, { "A new note." })
+  local comments = ticket().comments
+  comments[#comments + 1] = posted("10003", "A new note.")
+  local calls, restore = stub_calls(jira, {
+    comment_create = HOLD,
+    item = function()
+      return ticket({ comments = comments })
+    end,
+  })
+  local _, restore_notify = stub_notify()
+  local finished
+  buffer.write(buf, function(ok, message)
+    finished = { ok = ok, message = message }
+  end)
+  local last = #vim.api.nvim_buf_get_lines(buf, row - 1, row, false)[1]
+  vim.api.nvim_buf_set_text(buf, row - 1, last, row - 1, last, { " And more." })
+  calls[1].release(true)
+  vim.wait(2000, function()
+    return finished ~= nil
+  end)
+  restore_notify()
+  restore()
+  eq(finished.ok, true)
+  eq(contains(finished.message, "new: posted as 10003"), true, finished.message)
+  eq(contains(finished.message, ":w sends those edits"), true, finished.message)
+  eq(vim.bo[buf].modified, true)
+  local sends = { { kind = diff.COMMENT_UPDATE, id = "10003", text = "A new note. And more." } }
+  eq(buffer.plan(buf).calls, sends)
+  -- The region keeps its edge under its new identifier: joined onto the
+  -- author line of a comment opened below it, it still holds its own text.
+  buffer.compose(buf)
+  vim.api.nvim_win_set_cursor(0, { row, 0 })
+  vim.cmd("silent normal! JJ")
+  eq(buffer.plan(buf).calls, sends, "joined onto the next author line")
+end)
+
+test("write: a body whose words are unchanged and that gained a mark on the web is refused, not flattened", function()
+  local buf = loaded_buffer()
+  vim.api.nvim_buf_set_text(buf, 3, 0, 3, 0, { "X" })
+  local coloured = doc(paragraph(
+    text("The retry loop re-enters", { { type = "textColor", attrs = { color = "#bf2600" } } }),
+    { type = "hardBreak" },
+    text("before the final attempt.")
+  ))
+  local calls, restore = stub_calls(jira, {
+    item = function()
+      return ticket({ body = coloured })
+    end,
+    body_update = function()
+      return true
+    end,
+  })
+  local _, restore_notify = stub_notify()
+  local finished = write_and_wait(buf)
+  restore_notify()
+  restore()
+  eq(names(calls), { "item" }, "nothing is written")
+  eq(finished.ok, false)
+  eq(contains(finished.message, "body: now carries a text node with a textColor mark"), true, finished.message)
+  eq(vim.bo[buf].modified, true)
+end)
+
+test("write: a region the read after a write finds holding what cannot be written back is read-only there", function()
+  -- The post is held while the body is edited, so the buffer is settled in
+  -- place rather than read afresh.
+  local buf = loaded_buffer()
+  vim.api.nvim_set_current_buf(buf)
+  local row = buffer.compose(buf)
+  vim.api.nvim_buf_set_text(buf, row - 1, 0, row - 1, 0, { "see https://x.test" })
+  local carded = {
+    id = "10003",
+    author = { id = "acc-me", name = "Me Myself" },
+    created = "2024-05-04T10:00:00.000+0000",
+    updated = "2024-05-04T10:00:00.000+0000",
+    body = doc(paragraph(text("see "), { type = "inlineCard", attrs = { url = "https://x.test" } })),
+  }
+  local comments = ticket().comments
+  comments[#comments + 1] = carded
+  local calls, restore = stub_calls(jira, {
+    comment_create = HOLD,
+    item = function()
+      return ticket({ comments = comments })
+    end,
+  })
+  local _, restore_notify = stub_notify()
+  local finished
+  buffer.write(buf, function(ok, message)
+    finished = { ok = ok, message = message }
+  end)
+  vim.api.nvim_buf_set_text(buf, 3, 0, 3, 0, { "typed meanwhile " })
+  calls[1].release(true)
+  vim.wait(2000, function()
+    return finished ~= nil
+  end)
+  restore_notify()
+  restore()
+  local settled = buffer.snapshot(buf).regions["10003"]
+  eq(contains(finished.message, "new: posted as 10003"), true, finished.message)
+  eq(settled.editable, false)
+  eq(settled.reason, "carries an inlineCard node, which a write would replace by its flattened text; " .. render.WEB_HINT)
+  vim.api.nvim_buf_set_text(buf, row - 1, 0, row - 1, 0, { "More " })
+  eq(buffer.plan(buf).refused, { { id = "10003", reason = settled.reason } }, "an edit to it is refused rather than flattening the card")
+
+  -- The same for a comment the write replaced.
+  buf = loaded_buffer({ comments = stamped() })
+  vim.api.nvim_buf_set_text(buf, 10, 0, 10, #"Fix is in review.", { "see https://x.test" })
+  local replaced = stamped({ [2] = { updated = "2024-05-05T08:00:00.000+0000", body = carded.body } })
+  local reads = 0
+  calls, restore = stub_calls(jira, {
+    comment_update = HOLD,
+    item = function()
+      reads = reads + 1
+      return ticket({ comments = reads == 1 and stamped() or replaced })
+    end,
+  })
+  _, restore_notify = stub_notify()
+  finished = nil
+  buffer.write(buf, function(ok, message)
+    finished = { ok = ok, message = message }
+  end)
+  vim.wait(2000, function()
+    return #calls == 2
+  end)
+  vim.api.nvim_buf_set_text(buf, 3, 0, 3, 0, { "typed meanwhile " })
+  calls[2].release(true)
+  vim.wait(2000, function()
+    return finished ~= nil
+  end)
+  restore_notify()
+  restore()
+  eq(contains(finished.message, "10002: written"), true, finished.message)
+  eq(buffer.snapshot(buf).regions["10002"].editable, false, "the comment written is judged as the read found it")
+end)
+
+test("write: a comment updated beside a failed call takes its new stamp, so the retry sends the next edit rather than refusing it", function()
+  local buf = loaded_buffer({ comments = stamped() })
+  vim.api.nvim_buf_set_text(buf, 3, 0, 3, 0, { "X" })
+  vim.api.nvim_buf_set_text(buf, 10, 0, 10, 0, { "Y" })
+  local updated = "2024-05-05T08:00:00.000+0000"
+  local after_update = stamped({ [2] = { updated = updated, body = doc(paragraph(text("YFix is in review."))) } })
+  local reads = 0
+  local calls, restore = stub_calls(jira, {
+    item = function()
+      reads = reads + 1
+      return ticket({ comments = reads == 1 and stamped() or after_update })
+    end,
+    body_update = function()
+      return false, "acli exited 1\nError: the description is locked"
+    end,
+    comment_update = function()
+      return true
+    end,
+  })
+  local _, restore_notify = stub_notify()
+  local first = write_and_wait(buf)
+  local after_first = #calls
+  vim.api.nvim_buf_set_text(buf, 10, 0, 10, 0, { "Z" })
+  local second = write_and_wait(buf)
+  restore_notify()
+  restore()
+  eq(first.ok, false)
+  eq(vim.b[buf].docket.stamps["10002"] ~= nil, true)
+  eq(names(vim.list_slice(calls, after_first + 1)), { "item", "comment_update", "body_update", "item" }, "the retry sends the comment's second edit")
+  eq(contains(second.message, "10002: edited since it was loaded"), false, second.message)
+end)
+
+test("write: the comment a post became is the account's own, and the last of the account's holding the text", function()
+  local buf = loaded_buffer()
+  vim.api.nvim_set_current_buf(buf)
+  local row = buffer.compose(buf)
+  vim.api.nvim_buf_set_text(buf, row - 1, 0, row - 1, 0, { "Agreed." })
+  local comments = ticket().comments
+  -- New comments holding the same words: a colleague's, one of the
+  -- account's own posted from elsewhere, the post, and a colleague's after it.
+  local function colleague(id)
+    return {
+      id = id,
+      author = { id = "acc-ana", name = "ana" },
+      created = "2024-05-04T09:00:00.000+0000",
+      body = doc(paragraph(text("Agreed."))),
+    }
+  end
+  comments[#comments + 1] = colleague("10003")
+  comments[#comments + 1] = posted("10004", "Agreed.")
+  comments[#comments + 1] = posted("10005", "Agreed.")
+  comments[#comments + 1] = colleague("10006")
+  local _, restore = stub_calls(jira, {
+    item = function()
+      return ticket({ comments = comments })
+    end,
+    comment_create = function()
+      return true
+    end,
+  })
+  local _, restore_notify = stub_notify()
+  local finished = write_and_wait(buf)
+  restore_notify()
+  restore()
+  eq(finished, { ok = true, message = "new: posted as 10005" })
+end)
+
+test("write: a new comment whose line was deleted is opened afresh, and what is typed there is posted", function()
+  local buf = loaded_buffer()
+  vim.api.nvim_set_current_buf(buf)
+  local row = buffer.compose(buf)
+  vim.api.nvim_buf_set_lines(buf, row - 1, row, false, {})
+  local again = buffer.compose(buf)
+  vim.api.nvim_buf_set_text(buf, again - 1, 0, again - 1, 0, { "Second try." })
+  local plan = buffer.plan(buf)
+  eq(plan.calls, { { kind = diff.COMMENT_CREATE, id = diff.NEW, text = "Second try." } })
+  eq(plan.skipped, {})
+end)
+
+test("write: a post killed at its timeout is looked for in the read after it, and held read-only when it is not there", function()
+  local function post(found)
+    local buf = loaded_buffer()
+    vim.api.nvim_set_current_buf(buf)
+    local row = buffer.compose(buf)
+    vim.api.nvim_buf_set_text(buf, row - 1, 0, row - 1, 0, { "Once." })
+    local comments = ticket().comments
+    if found then
+      comments[#comments + 1] = posted("10003", "Once.")
+    end
+    local calls, restore = stub_calls(jira, {
+      comment_create = function()
+        return false, "acli: killed after 30000 ms without exiting", true
+      end,
+      item = function()
+        return ticket({ comments = comments })
+      end,
+    })
+    local notices, restore_notify = stub_notify()
+    local finished = write_and_wait(buf)
+    local again = write_and_wait(buf)
+    restore_notify()
+    restore()
+    return { finished = finished, again = again, calls = names(calls), level = notices[1].level, buf = buf, row = row }
+  end
+  local landed = post(true)
+  eq(landed.calls, { "comment_create", "item" }, "the read after it runs")
+  eq(landed.finished, { ok = true, message = "new: posted as 10003; the client was killed at its timeout after sending it" })
+  eq(landed.again.message, "nothing changed")
+  local lost = post(false)
+  eq(lost.calls, { "comment_create", "item" }, "and no second post")
+  eq(lost.finished.ok, false)
+  eq(lost.level, vim.log.levels.WARN)
+  eq(
+    lost.finished.message,
+    "new: acli: killed after 30000 ms without exiting\nwhether the comment was posted is unknown, so it is held read-only rather than posted again"
+  )
+  eq(lost.again.message, "nothing changed", "a second :w posts nothing")
+  vim.api.nvim_buf_set_text(lost.buf, lost.row - 1, 0, lost.row - 1, 0, { "More " })
+  eq(buffer.plan(lost.buf).refused, { { id = diff.NEW, reason = buffer.POSTED } })
+end)
+
+test("write: text typed into a post whose read fails is named for yanking, and text typed elsewhere is left for :w", function()
+  local function run(typed_row)
+    local buf = loaded_buffer()
+    vim.api.nvim_set_current_buf(buf)
+    local row = buffer.compose(buf)
+    vim.api.nvim_buf_set_text(buf, row - 1, 0, row - 1, 0, { "A note." })
+    local calls, restore = stub_calls(jira, {
+      comment_create = HOLD,
+      item = function()
+        return nil, "acli exited 1\nError: the service is unavailable"
+      end,
+    })
+    local _, restore_notify = stub_notify()
+    local finished
+    buffer.write(buf, function(ok, message)
+      finished = { ok = ok, message = message }
+    end)
+    vim.api.nvim_buf_set_text(buf, typed_row or (row - 1), 0, typed_row or (row - 1), 0, { "typed " })
+    calls[1].release(true)
+    vim.wait(2000, function()
+      return finished ~= nil
+    end)
+    local after = write_and_wait(buf)
+    restore_notify()
+    restore()
+    return finished.message, after.message
+  end
+  local into_post, refused = run(nil)
+  eq(
+    contains(into_post, "the buffer changed while the write ran; the posted comment is read-only until the item is read again, so yank what was typed into it before :e!"),
+    true,
+    into_post
+  )
+  eq(contains(into_post, ":w sends those edits"), false, into_post)
+  eq(refused, "new: refused: " .. buffer.POSTED)
+  eq(buffer.POSTED, "posted; the comment it became is known once the item is read again: :e reads it when nothing is unsaved, and otherwise yank what to keep before :e!")
+  local elsewhere = run(3)
+  eq(contains(elsewhere, "the buffer changed while the write ran; :w sends those edits"), true, elsewhere)
+end)
+
+test("write: an emptied region is put back by the read after another region is sent", function()
+  local buf = loaded_buffer()
+  vim.api.nvim_buf_set_text(buf, 3, 0, 3, 0, { "X" })
+  vim.api.nvim_buf_set_lines(buf, 10, 11, false, { "" })
+  local backend = ticket().body
+  local _, restore = stub_calls(jira, {
+    item = function()
+      return ticket({ body = backend })
+    end,
+    body_update = function(_, sent)
+      backend = adf.serialise(sent)
+      return true
+    end,
+  })
+  local _, restore_notify = stub_notify()
+  local finished = write_and_wait(buf)
+  restore_notify()
+  restore()
+  eq(finished, { ok = true, message = "body: written\n10002: empty; nothing sent" })
+  eq(vim.bo[buf].modified, false)
+  eq(vim.api.nvim_buf_get_lines(buf, 10, 11, false), { "Fix is in review." })
+end)
+
+test("write: :e! while the check read is out, or while the read after a post is, sends nothing more and says so", function()
+  local buf = loaded_buffer()
+  vim.api.nvim_buf_set_text(buf, 3, 0, 3, 0, { "X" })
+  local calls, restore = stub_calls(jira, {
+    item = HOLD,
+    body_update = function()
+      return true
+    end,
+  })
+  local _, restore_notify = stub_notify()
+  local finished
+  buffer.write(buf, function(ok, message)
+    finished = { ok = ok, message = message }
+  end)
+  -- What :e! does: the edits are gone and the buffer is read again.
+  vim.bo[buf].modified = false
+  buffer.populate(buf, ticket(), { now = NOW })
+  calls[1].release(ticket())
+  vim.wait(2000, function()
+    return finished ~= nil
+  end)
+  restore()
+  eq(names(calls), { "item" }, "the discarded edit is not sent")
+  eq(finished.ok, false)
+  eq(contains(finished.message, "closed or read again"), true, finished.message)
+
+  buf = loaded_buffer()
+  vim.api.nvim_set_current_buf(buf)
+  local row = buffer.compose(buf)
+  vim.api.nvim_buf_set_text(buf, row - 1, 0, row - 1, 0, { "A note." })
+  local comments = ticket().comments
+  comments[#comments + 1] = posted("10003", "A note.")
+  calls, restore = stub_calls(jira, {
+    comment_create = function()
+      return true
+    end,
+    item = HOLD,
+  })
+  finished = nil
+  buffer.write(buf, function(ok, message)
+    finished = { ok = ok, message = message }
+  end)
+  vim.wait(2000, function()
+    return #calls == 2
+  end)
+  vim.bo[buf].modified = false
+  buffer.populate(buf, ticket({ comments = comments }), { now = NOW })
+  local reloaded = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  calls[2].release(ticket({ comments = comments }))
+  vim.wait(2000, function()
+    return finished ~= nil
+  end)
+  restore_notify()
+  restore()
+  eq(names(calls), { "comment_create", "item" })
+  eq(contains(finished.message, "the buffer was closed or read again while the write ran, so it was left as it is"), true, finished.message)
+  eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), reloaded, "the buffer :e! read is left as it is")
+end)
+
+test("write: an edit in another account's region refuses the whole save before any call", function()
+  local buf = loaded_buffer()
+  vim.api.nvim_buf_set_text(buf, 3, 0, 3, 0, { "X" })
+  vim.api.nvim_buf_set_text(buf, 7, 0, 7, 0, { "not mine: " })
+  local calls, restore = stub_calls(jira, {
+    item = function()
+      return ticket()
+    end,
+    body_update = function()
+      return true
+    end,
+    comment_update = function()
+      return true
+    end,
+  })
+  local notices, restore_notify = stub_notify()
+  local finished, started, message = write_and_wait(buf)
+  restore_notify()
+  restore()
+  eq(started, false)
+  eq(message, "10001: refused: written by ana; " .. render.WEB_HINT)
+  eq(finished, { ok = false, message = message })
+  eq(notices, { { message = message, level = vim.log.levels.WARN } })
+  eq(#calls, 0, "not even the check read")
+  eq(vim.bo[buf].modified, true)
+end)
+
+test("complete: the trigger rule, and where each trigger's completion starts", function()
+  local complete = require("docket.complete")
+  local cases = {
+    { "see @an", { "user", "an", 5 } },
+    { "ana@exa", {} },
+    { "see !48", { "item", "48", 4 } },
+    { "done!", {} },
+    { "PROJ-1", { "item", "PROJ-1", 0 } },
+    { "(PROJ-", { "item", "PROJ-", 1 } },
+    { "xPROJ-1", {} },
+    { "A-1", {} },
+    { "@PROJ-1", { "user", "PROJ-1", 1 } },
+    { "plain words", {} },
+  }
+  for _, case in ipairs(cases) do
+    eq({ complete.trigger(case[1]) }, case[2], case[1])
+  end
+end)
+
+test("complete: ordinary typing answers NONE and asks nothing; a trigger is answered, then served from the cache", function()
+  local complete = require("docket.complete")
+  complete.clear()
+  local waits, restore_wait = stub_wait(function(argv)
+    return done(argv, { gl_user("ana", "Ana"), gl_user("andre", "Andre") })
+  end)
+  local runs, restore_run = stub_run(function(argv)
+    return done(argv, {})
+  end)
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.b[buf].docket = { source = "glab", id = "!482" }
+  vim.api.nvim_set_current_buf(buf)
+  -- The cursor sits on the character after the text, since in normal mode
+  -- it cannot sit past the last one.
+  local function at(line)
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, { line .. " " })
+    vim.api.nvim_win_set_cursor(0, { 1, #line })
+  end
+  at("hello world")
+  local ordinary = complete.omnifunc(1, "")
+  local ordinary_waits = #waits
+  at("see @an")
+  local start = complete.omnifunc(1, "")
+  local items = complete.omnifunc(0, "an")
+  local asked = #waits
+  local again = complete.omnifunc(1, "")
+  local items_again = complete.omnifunc(0, "an")
+  local mismatch_start = complete.omnifunc(1, "")
+  local mismatch = complete.omnifunc(0, "somebody else")
+  vim.b[buf].docket = nil
+  local unloaded = complete.omnifunc(1, "")
+  restore_run()
+  restore_wait()
+  eq(complete.NONE, -3, "-3 cancels silently; -1 starts completion at the cursor and asks a second time")
+  eq(ordinary, complete.NONE)
+  eq(ordinary_waits, 0, "ordinary typing spawns nothing")
+  eq(start, 5, "the name after the @ is replaced, and the @ kept")
+  eq(items, { { word = "ana", menu = "Ana" }, { word = "andre", menu = "Andre" } })
+  eq(asked, 1)
+  eq(waits[1].argv, { "glab", "api", "projects/:id/users?search=an" })
+  eq({ again, items_again }, { 5, items })
+  eq(#waits, 1, "the repeat is answered from the cache")
+  eq(mismatch_start, 5)
+  eq(mismatch, {}, "a base that is not the text the first call found gets nothing")
+  eq(unloaded, complete.NONE, "a buffer with no item")
+  eq(#runs, 0)
+  vim.api.nvim_buf_delete(buf, { force = true })
+end)
+
+test("complete: an item reference keeps only what continues the text typed, and an empty answer is NONE", function()
+  local complete = require("docket.complete")
+  complete.clear()
+  local asked = {}
+  local saved = jira.complete
+  jira.complete = function(kind, query)
+    asked[#asked + 1] = { kind, query }
+    if kind == "user" then
+      return {}
+    end
+    return { { id = "PROJ-1", title = "One" }, { id = "PROJ-142", title = "Retry" }, { id = "PAY-1", title = "Pay" } }
+  end
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.b[buf].docket = { source = "jira", id = "PROJ-142" }
+  vim.api.nvim_set_current_buf(buf)
+  local function at(line)
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, { line .. " " })
+    vim.api.nvim_win_set_cursor(0, { 1, #line })
+  end
+  at("see PROJ-1")
+  local start = complete.omnifunc(1, "")
+  local items = complete.omnifunc(0, "PROJ-1")
+  at("see !48")
+  local bang = complete.omnifunc(1, "")
+  at("ask @an")
+  local user_start = complete.omnifunc(1, "")
+  jira.complete = saved
+  eq(start, 4)
+  eq(items, { { word = "PROJ-1", menu = "One" }, { word = "PROJ-142", menu = "Retry" } })
+  eq(bang, complete.NONE, "a Jira key does not continue `!48`, so nothing is offered")
+  eq(user_start, complete.NONE, "Jira offers no user")
+  eq(asked, { { "item", "PROJ-1" }, { "item", "48" }, { "user", "an" } })
+  vim.api.nvim_buf_delete(buf, { force = true })
+end)
+
+test("adapters: assign and item_create are in the contract, with the two values a person can be besides an identifier", function()
+  eq(vim.tbl_contains(adapters.OPTIONAL, "assign"), true)
+  eq(vim.tbl_contains(adapters.OPTIONAL, "item_create"), true)
+  eq({ adapters.ARITY.assign, adapters.ARITY.item_create }, { 3, 3 })
+  eq({ adapters.ME, adapters.NOBODY }, { "@me", "@nobody" })
+  eq({ adapters.can(jira, "assign"), adapters.can(jira, "item_create") }, { true, true })
+  eq({ adapters.can(glab, "assign"), adapters.can(glab, "item_create") }, { true, false })
+  eq({ adapters.can(gh, "assign"), adapters.can(gh, "item_create") }, { false, false })
+end)
+
+test("jira: assign edits the assignee with --yes, as @me, removed, or by account id, and refuses what is none of them", function()
+  local calls, restore = stub_run(function(argv)
+    return done(argv, "")
+  end)
+  local got = {}
+  local function keep(ok, err)
+    got[#got + 1] = { ok, err }
+  end
+  jira.assign("TIG-1", adapters.ME, keep)
+  jira.assign("TIG-1", adapters.NOBODY, keep)
+  jira.assign("TIG-1", "acc-ana", keep)
+  local spawned = #calls
+  jira.assign("TIG-1,TIG-2", adapters.ME, keep)
+  jira.assign("TIG-1", nil, keep)
+  jira.assign("TIG-1", "", keep)
+  restore()
+  eq(calls[1].argv, argv_of("workitem", "edit", "--key", "TIG-1", "--assignee", "@me", "--yes", "--json"))
+  eq(calls[2].argv, argv_of("workitem", "edit", "--key", "TIG-1", "--remove-assignee", "--yes", "--json"))
+  eq(calls[3].argv, argv_of("workitem", "edit", "--key", "TIG-1", "--assignee", "acc-ana", "--yes", "--json"))
+  eq(#calls, spawned, "a refusal spawns nothing")
+  eq(got, {
+    { true },
+    { true },
+    { true },
+    { false, "TIG-1,TIG-2 is not a work item key" },
+    { false, "nil is not a person to assign" },
+    { false, '"" is not a person to assign' },
+  })
+  _, restore = stub_run(function(argv)
+    return failed(argv, 1, "Error: the user cannot be assigned")
+  end)
+  local refused
+  jira.assign("TIG-1", "acc-ana", function(ok, err)
+    refused = { ok, err }
+  end)
+  restore()
+  eq(refused, { false, "acli exited 1\nError: the user cannot be assigned" }, "the client's own words")
+end)
+
+test("jira: item_create sends the fields, the assignee when one is asked for, and the body as a document last", function()
+  local path, written
+  local calls, restore = stub_run(function(argv)
+    path, written = read_document(argv, "--description-file")
+    return done(argv, { id = "10045", key = "TIG-45", self = "https://example.atlassian.net/rest/api/3/issue/10045" })
+  end)
+  local got = {}
+  local function keep(key, err)
+    got[#got + 1] = { key, err }
+  end
+  jira.item_create({ project = "TIG", type = "Task", summary = "Follow up", assignee = adapters.ME }, "one\n\ntwo", keep)
+  local first_path, first_written = path, written
+  jira.item_create({ project = "TIG", type = "Bug", summary = "Nobody" }, "", keep)
+  jira.item_create({ project = "TIG", type = "Bug", summary = "Nobody either", assignee = adapters.NOBODY }, "\n\n", keep)
+  restore()
+  eq(calls[1].argv, argv_of(
+    "workitem", "create", "--project", "TIG", "--type", "Task", "--summary", "Follow up", "--json",
+    "--assignee", "@me", "--description-file", first_path
+  ))
+  eq(first_written, adf.serialise("one\n\ntwo"), "the file holds the serialised tree")
+  eq(vim.uv.fs_stat(first_path), nil, "and is removed once acli has exited")
+  eq(calls[2].argv, argv_of("workitem", "create", "--project", "TIG", "--type", "Bug", "--summary", "Nobody", "--json"))
+  eq(calls[3].argv, argv_of("workitem", "create", "--project", "TIG", "--type", "Bug", "--summary", "Nobody either", "--json"))
+  eq(got, { { "TIG-45" }, { "TIG-45" }, { "TIG-45" } })
+end)
+
+test("jira: item_create reads the key from an object, a bulk summary, or text naming exactly one key of the project", function()
+  local function create(stdout, summary)
+    local _, restore = stub_run(function(argv)
+      return done(argv, stdout)
+    end)
+    local got
+    jira.item_create({ project = "TIG", type = "Task", summary = summary or "Follow up" }, "", function(key, err)
+      got = { key, err }
+    end)
+    restore()
+    return got
+  end
+  eq(create({ id = "10045", key = "TIG-45", self = "https://example.atlassian.net/rest/api/3/issue/10045" }), { "TIG-45" })
+  eq(create({ results = { { key = "TIG-46" } }, successCount = 1, totalCount = 1 }), { "TIG-46" })
+  eq(
+    create("Work item TIG-47 created: Follow up TIG-12\nhttps://example.atlassian.net/browse/TIG-47", "Follow up TIG-12"),
+    { "TIG-47" },
+    "a key the summary names is not the new one"
+  )
+  local two = create("Created TIG-48 and TIG-49")
+  eq(two[1], nil)
+  eq(two[2]:find("acli reported the work item created and printed no key", 1, true), 1, two[2])
+  eq(contains(two[2], "acli jira workitem search --jql 'project = TIG ORDER BY created DESC' --fields summary --json"), true, two[2])
+  eq(two[2]:sub(-#"acli printed:\nCreated TIG-48 and TIG-49"), "acli printed:\nCreated TIG-48 and TIG-49")
+  eq(create({ key = "PAY-1" })[1], nil, "a key of another project is not this create's")
+end)
+
+test("jira: item_create reports a bulk summary's error and refuses what is not a work item before any spawn", function()
+  local _, restore = stub_run(function(argv)
+    return done(argv, { results = { { error = "issuetype is required" } }, successCount = 0, totalCount = 1 })
+  end)
+  local failed_create
+  jira.item_create({ project = "TIG", type = "Task", summary = "x" }, "", function(key, err)
+    failed_create = { key, err }
+  end)
+  restore()
+  eq(failed_create, { nil, "issuetype is required" })
+  local calls
+  calls, restore = stub_run(function(argv)
+    return done(argv, { key = "TIG-1" })
+  end)
+  local got = {}
+  local function keep(key, err)
+    got[#got + 1] = { key, err }
+  end
+  jira.item_create(nil, "", keep)
+  jira.item_create({ project = "TIG", summary = " " }, "", keep)
+  jira.item_create({ project = "TIG,PAY", type = "Task", summary = "x" }, "", keep)
+  jira.item_create({ project = "TIG", type = "Task", summary = "x", assignee = "" }, "", keep)
+  restore()
+  eq(#calls, 0)
+  eq(got, {
+    { nil, "a work item needs a project, a type and a summary" },
+    { nil, "a work item needs a type, a summary" },
+    { nil, "TIG,PAY is not a project key such as PROJ" },
+    { nil, '"" is not a person to assign' },
+  })
+end)
+
+test("jira: an identical create while one runs joins it, and a different one makes its own", function()
+  local pending, saved = {}, spawn.run
+  spawn.run = function(argv, _, on_done)
+    pending[#pending + 1] = { argv = argv, on_done = on_done }
+  end
+  local answers = {}
+  local function keep(key, err)
+    answers[#answers + 1] = { key, err }
+  end
+  local fields = { project = "TIG", type = "Task", summary = "Once" }
+  jira.item_create(fields, "the body", keep)
+  jira.item_create(vim.deepcopy(fields), "the body", keep)
+  local joined = #pending
+  jira.item_create(fields, "another body", keep)
+  local separate = #pending
+  pending[1].on_done(done(pending[1].argv, { key = "TIG-50" }))
+  pending[2].on_done(done(pending[2].argv, { key = "TIG-51" }))
+  spawn.run = saved
+  eq(joined, 1, "one spawn for two identical creates")
+  eq(separate, 2)
+  eq(answers, { { "TIG-50" }, { "TIG-50" }, { "TIG-51" } })
+end)
+
+test("glab: assign updates with --yes, as the account's username, unassigned, or by username, and refuses the rest", function()
+  glab.forget()
+  local calls, restore = stub_glab()
+  local got = {}
+  local function keep(ok, err)
+    got[#got + 1] = { ok, err }
+  end
+  glab.assign("!482", adapters.ME, keep)
+  glab.assign("!482", adapters.NOBODY, keep)
+  glab.assign("!482", "ana", keep)
+  local spawned = #calls
+  for _, odd in ipairs({ "+ana", "-ana", "!ana", "ana,bob" }) do
+    glab.assign("!482", odd, keep)
+  end
+  glab.assign("!482", nil, keep)
+  glab.assign("PROJ-1", "ana", keep)
+  restore()
+  eq(vim.tbl_map(function(call)
+    return call.argv
+  end, calls), {
+    { "glab", "api", "user" },
+    { "glab", "mr", "update", "482", "--assignee", "me", "--yes" },
+    { "glab", "mr", "update", "482", "--unassign", "--yes" },
+    { "glab", "mr", "update", "482", "--assignee", "ana", "--yes" },
+  })
+  eq(#calls, spawned, "a refusal spawns nothing")
+  eq(got, {
+    { true },
+    { true },
+    { true },
+    { false, '"+ana" is not a GitLab username' },
+    { false, '"-ana" is not a GitLab username' },
+    { false, '"!ana" is not a GitLab username' },
+    { false, '"ana,bob" is not a GitLab username' },
+    { false, "nil is not a GitLab username" },
+    { false, "PROJ-1 is not a merge request identifier" },
+  })
+  glab.forget()
+  calls, restore = stub_run(function(argv)
+    return failed(argv, 1, "glab: 401 Unauthorized")
+  end)
+  local refused
+  glab.assign("!482", adapters.ME, function(ok, err)
+    refused = { ok, err }
+  end)
+  restore()
+  eq(#calls, 1, "no update when the account is unknown")
+  eq(refused, { false, "glab exited 1\nglab: 401 Unauthorized" })
+end)
+
+test("glab: states reports a view that printed no merge request rather than raising", function()
+  for _, payload in ipairs({ "null", "5" }) do
+    local _, restore = stub_run(function(argv)
+      return done(argv, payload)
+    end)
+    local got
+    glab.states("!482", function(states, err)
+      got = { states, err }
+    end)
+    restore()
+    eq(got, { nil, "glab: mr view 482 printed no merge request; run\n  glab mr view 482 -F json\nby hand to see what it prints" }, payload)
+  end
+end)
+
+test("fast events: assign and item_create answer from a fast event without touching the editor", function()
+  glab.forget()
+  local _, restore = stub_run_fast(function(argv)
+    if argv[1] == "glab" then
+      return glab_answer()(argv)
+    end
+    return done(argv, { key = "TIG-45" })
+  end)
+  local notices, restore_notify = stub_notify()
+  local assigned, created
+  glab.assign("!482", adapters.ME, function(ok, err)
+    assigned = { ok, err }
+  end)
+  jira.item_create({ project = "TIG", type = "Task", summary = "Fast" }, "a body", function(key, err)
+    created = { key, err }
+  end)
+  vim.wait(2000, function()
+    return assigned ~= nil and created ~= nil
+  end)
+  restore_notify()
+  restore()
+  eq(assigned, { true })
+  eq(created, { "TIG-45" })
+  eq(notices, {})
+end)
+
+-- vim.ui.select replaced for a test: it records what it was offered and
+-- answers with the entry `pick` chooses, or nil to cancel.
+local function stub_select(pick)
+  local offered, saved = {}, vim.ui.select
+  vim.ui.select = function(items, opts, on_choice)
+    offered.items = items
+    offered.prompt = opts.prompt
+    offered.labels = vim.tbl_map(opts.format_item, items)
+    on_choice(pick(items))
+  end
+  return offered, function()
+    vim.ui.select = saved
+  end
+end
+
+test("commands: an item buffer binds a new comment, a transition and an assignment, and a draft binds nothing", function()
+  local buf = loaded_buffer()
+  commands.attach(buf)
+  for _, lhs in ipairs({ "<leader>dc", "<leader>dt", "<leader>da", "gx", "<leader>dw" }) do
+    local map = vim.api.nvim_buf_call(buf, function()
+      return vim.fn.maparg(lhs, "n", false, true)
+    end)
+    eq(map.buffer, 1, lhs)
+  end
+  local draft = vim.api.nvim_create_buf(false, false)
+  vim.api.nvim_buf_set_name(draft, commands.DRAFT .. "test")
+  commands.attach(draft)
+  local none = vim.api.nvim_buf_call(draft, function()
+    return vim.fn.maparg("<leader>dt", "n", false, true)
+  end)
+  eq(none.buffer, nil, "a draft acts on no item")
+  vim.api.nvim_buf_delete(draft, { force = true })
+
+  -- <leader>dc opens the comment region.
+  vim.api.nvim_set_current_buf(buf)
+  local count = vim.api.nvim_buf_line_count(buf)
+  vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<leader>dc", true, false, true), "x", false)
+  eq(vim.api.nvim_buf_line_count(buf), count + 3)
+  eq(vim.api.nvim_win_get_cursor(0), { count + 3, 0 })
+  eq(buffer.snapshot(buf).regions.new ~= nil, true)
+end)
+
+test("commands: a transition offers the adapter's states, applies the one chosen, drops the cached rows and reads the item", function()
+  local _, restore_cache = scratch_cache()
+  local key = cache.key("jira", "project IN (PROJ)" .. OPEN)
+  cache.write(key, { row.new({ source = "jira", id = "PROJ-142", state = "In Progress", title = "Retry" }) })
+  local buf = loaded_buffer()
+  local load = vim.b[buf].docket.load
+  local offered, restore_select = stub_select(function(items)
+    return items[2]
+  end)
+  local calls, restore = stub_calls(jira, {
+    -- Each label differs from its target, so the target is what is sent.
+    states = function()
+      return { { label = "Done, resolved", target = "Done" }, { label = "In Review, awaiting", target = "In Review" } }
+    end,
+    state_set = function()
+      return true
+    end,
+    item = function()
+      return ticket({ state = "In Review" })
+    end,
+  })
+  local notices, restore_notify = stub_notify()
+  commands.transition(buf)
+  vim.wait(2000, function()
+    return vim.b[buf].docket.load ~= load
+  end)
+  restore_notify()
+  restore()
+  restore_select()
+  local cached = cache.read(key)
+  restore_cache()
+  eq(names(calls), { "states", "state_set", "item" })
+  eq(calls[2].args, { "PROJ-142", "In Review" })
+  eq(offered.prompt, "Move PROJ-142 to")
+  eq(offered.labels, { "Done, resolved", "In Review, awaiting" })
+  eq(notices, { { message = "PROJ-142: In Review, awaiting", level = vim.log.levels.INFO } })
+  eq(cached, nil, "the rows holding the item are dropped")
+  eq(vim.api.nvim_buf_get_lines(buf, 0, 1, false)[1]:find("^PROJ%-142   In Review") ~= nil, true, "the item is read again")
+end)
+
+test("commands: a status the workflow refuses is the client's own error; a cancel, no state and a failed list send nothing", function()
+  local buf = loaded_buffer()
+  local refusal = "acli exited 1\nError: Transition 'Done' is not valid for PROJ-142: Resolution is required"
+  local notices, restore_notify = stub_notify()
+  local _, restore_select = stub_select(function(items)
+    return items[1]
+  end)
+  local refused_calls, restore = stub_calls(jira, {
+    states = function()
+      return { { label = "Done", target = "Done" } }
+    end,
+    state_set = function()
+      return false, refusal
+    end,
+  })
+  commands.transition(buf)
+  vim.wait(2000, function()
+    return #notices > 0
+  end)
+  restore()
+  restore_select()
+
+  local offered
+  offered, restore_select = stub_select(function()
+    return nil
+  end)
+  local cancelled_calls
+  cancelled_calls, restore = stub_calls(jira, {
+    states = function()
+      return { { label = "Done", target = "Done" } }
+    end,
+    state_set = function()
+      return true
+    end,
+  })
+  commands.transition(buf)
+  vim.wait(2000, function()
+    return offered.items ~= nil
+  end)
+  restore()
+  restore_select()
+
+  local listed = {}
+  for _, answer in ipairs({ { {} }, { nil, "acli exited 1\nError: search failed" } }) do
+    local shown = #notices
+    local calls
+    calls, restore = stub_calls(jira, {
+      states = function()
+        return answer[1], answer[2]
+      end,
+      state_set = function()
+        return true
+      end,
+    })
+    commands.transition(buf)
+    vim.wait(2000, function()
+      return #notices > shown
+    end)
+    restore()
+    listed[#listed + 1] = names(calls)
+  end
+  restore_notify()
+  eq(names(refused_calls), { "states", "state_set" })
+  eq(notices[1], { message = "PROJ-142: Done: " .. refusal .. "\n" .. commands.WEB, level = vim.log.levels.ERROR })
+  eq(names(cancelled_calls), { "states" }, "a cancelled picker applies nothing")
+  eq(listed, { { "states" }, { "states" } })
+  eq(notices[2], { message = "PROJ-142: there is no state to move it to", level = vim.log.levels.INFO })
+  eq(notices[3], { message = "PROJ-142: acli exited 1\nError: search failed", level = vim.log.levels.ERROR })
+  eq(#notices, 3)
+end)
+
+test("commands: an assignment offers me, nobody and the item's people, and applies the one chosen", function()
+  local buf = loaded_buffer()
+  local load = vim.b[buf].docket.load
+  local notices, restore_notify = stub_notify()
+  local offered, restore_select = stub_select(function(items)
+    return items[4]
+  end)
+  -- A reporter who wrote no comment, so each source of people is seen.
+  local chosen_calls, restore = stub_calls(jira, {
+    item = function()
+      return ticket({ reporter = { id = "acc-bo", name = "Bo" } })
+    end,
+    assign = function()
+      return true
+    end,
+  })
+  commands.assign(buf)
+  vim.wait(2000, function()
+    return vim.b[buf].docket.load ~= load
+  end)
+  restore()
+  restore_select()
+
+  -- Nobody, on a buffer holding edits, which is not read again after.
+  vim.api.nvim_buf_set_text(buf, 3, 0, 3, 0, { "X" })
+  _, restore_select = stub_select(function(items)
+    return items[2]
+  end)
+  local nobody_calls, shown
+  nobody_calls, restore = stub_calls(jira, {
+    item = function()
+      return ticket()
+    end,
+    assign = function()
+      return true
+    end,
+  })
+  shown = #notices
+  commands.assign(buf)
+  vim.wait(2000, function()
+    return #nobody_calls == 2 and #notices > shown
+  end)
+  restore()
+  restore_select()
+  local kept = vim.api.nvim_buf_get_lines(buf, 3, 4, false)
+
+  -- A refusal, in the client's own words.
+  _, restore_select = stub_select(function(items)
+    return items[1]
+  end)
+  local refused_calls
+  refused_calls, restore = stub_calls(jira, {
+    item = function()
+      return ticket()
+    end,
+    assign = function()
+      return false, "acli exited 1\nError: the account cannot be assigned here"
+    end,
+  })
+  shown = #notices
+  commands.assign(buf)
+  vim.wait(2000, function()
+    return #refused_calls == 2 and #notices > shown
+  end)
+  restore()
+  restore_select()
+  restore_notify()
+  eq(names(chosen_calls), { "item", "assign", "item" }, "the people come from a read, and the item is read again after")
+  eq(offered.prompt, "Assign PROJ-142 to")
+  eq(offered.labels, { "me (assigned)", "nobody", "Bo", "ana" }, "the assignee, the reporter, then each comment's author, once each")
+  eq(vim.tbl_map(function(choice)
+    return choice.who
+  end, offered.items), { adapters.ME, adapters.NOBODY, "acc-bo", "acc-ana" })
+  eq(chosen_calls[2].args, { "PROJ-142", "acc-ana" })
+  eq(notices[1], { message = "PROJ-142: assigned to ana", level = vim.log.levels.INFO })
+  eq(names(nobody_calls), { "item", "assign" })
+  eq(nobody_calls[2].args, { "PROJ-142", adapters.NOBODY })
+  eq(contains(notices[2].message, "PROJ-142: unassigned; the buffer holds unsaved edits"), true, notices[2].message)
+  eq(kept, { "XThe retry loop re-enters" })
+  eq(names(refused_calls), { "item", "assign" })
+  eq(refused_calls[2].args, { "PROJ-142", adapters.ME })
+  eq(notices[3], { message = "PROJ-142: acli exited 1\nError: the account cannot be assigned here", level = vim.log.levels.ERROR })
+  eq(#notices, 3)
+end)
+
+-- Deletes the draft an earlier test left, so each create test starts with none.
+local function no_draft()
+  local draft = buffer.named(commands.DRAFT .. "jira")
+  if draft then
+    vim.api.nvim_buf_delete(draft, { force = true })
+  end
+end
+
+test("commands: a backend lacking a capability says so in one line and calls nothing", function()
+  no_draft()
+  local buf = loaded_buffer()
+  local saved = jira.capabilities
+  jira.capabilities = {}
+  -- Held, so a regression that makes a call gets no answer that could reach
+  -- a picker after this test.
+  local calls, restore = stub_calls(jira, { item = HOLD, states = HOLD })
+  local _, restore_wait = stub_acli({ signed_in = true })
+  local notices, restore_notify = stub_notify()
+  -- A regression that reached a picker would otherwise block on the real one.
+  local _, restore_select = stub_select(function()
+    return nil
+  end)
+  local ok, raised = pcall(function()
+    commands.transition(buf)
+    commands.assign(buf)
+    commands.comment(buf)
+    commands.create("TIG")
+  end)
+  commands.transition(vim.api.nvim_create_buf(false, true))
+  drained()
+  restore_select()
+  restore_notify()
+  restore_wait()
+  restore()
+  jira.capabilities = saved
+  eq({ ok, raised }, { true })
+  eq(#calls, 0)
+  eq(notices, {
+    { message = "docket://jira/PROJ-142: the jira adapter has no states", level = vim.log.levels.WARN },
+    { message = "docket://jira/PROJ-142: the jira adapter has no assign", level = vim.log.levels.WARN },
+    { message = "docket://jira/PROJ-142: the jira adapter has no comment_create", level = vim.log.levels.WARN },
+    { message = "docket-new://jira: the jira adapter has no item_create", level = vim.log.levels.WARN },
+    { message = "nothing loaded in this buffer; :e reads the item", level = vim.log.levels.WARN },
+  })
+  eq(buffer.named(commands.DRAFT .. "jira"), nil, "no draft is made")
+end)
+
+test("create: a draft's header is parsed into the fields item_create takes, and the rest is the body", function()
+  local fields, body = commands.parse_draft({
+    "Project: TIG",
+    "type: Bug",
+    "Summary:   Retry drops the last attempt  ",
+    "Assignee: me",
+    "",
+    "",
+    "First line.",
+    "",
+    "Second.",
+    "",
+  })
+  eq(fields, { project = "TIG", type = "Bug", summary = "Retry drops the last attempt", assignee = adapters.ME })
+  eq(body, "First line.\n\nSecond.")
+  eq(commands.parse_draft({ "Assignee: nobody" }).assignee, adapters.NOBODY)
+  eq(commands.parse_draft({ "Assignee: acc-ana" }).assignee, "acc-ana")
+  eq({ commands.parse_draft({ "Project: TIG", "Summary: ", "Assignee:" }) }, { { project = "TIG" }, "" }, "an empty value is an absent field")
+  eq({ commands.parse_draft({ "Project TIG" }) }, { nil, "line 1 is not a header line such as `Summary: text`; a blank line ends the header" })
+  eq({ commands.parse_draft({ "Priority: High" }) }, { nil, "Priority is not a field of a new ticket; the fields are Project, Type, Summary, Assignee" })
+end)
+
+test("create: :Docket create opens a draft, :w creates the ticket once, and the ticket's buffer takes the draft's place", function()
+  no_draft()
+  local previous = buffer.named(buffer.name("jira", "TIG-45"))
+  if previous then
+    vim.api.nvim_buf_delete(previous, { force = true })
+  end
+  jira.forget()
+  local _, restore_wait = stub_acli({ signed_in = true })
+  local notices, restore_notify = stub_notify()
+  commands.run({ fargs = { "create", "TIG" }, bang = false })
+  local draft = vim.api.nvim_get_current_buf()
+  eq(vim.api.nvim_buf_get_name(draft), "docket-new://jira")
+  eq(vim.api.nvim_buf_get_lines(draft, 0, -1, false), { "Project: TIG", "Type: Task", "Summary: ", "Assignee: ", "", "" })
+  eq(vim.api.nvim_win_get_cursor(0), { 3, 8 }, "at the summary")
+  eq({ vim.bo[draft].buftype, vim.bo[draft].bufhidden, vim.bo[draft].buflisted }, { "acwrite", "hide", false })
+  eq(vim.bo[draft].modified, false, "a blank draft is not an edit")
+  vim.api.nvim_buf_set_text(draft, 2, 9, 2, 9, { "Follow up" })
+  vim.api.nvim_buf_set_lines(draft, 5, 6, false, { "The body." })
+  local calls, restore = stub_calls(jira, {
+    item_create = HOLD,
+    item = function()
+      return ticket({ id = "TIG-45" })
+    end,
+  })
+  local finished
+  local started = commands.save_draft(draft, function(ok, message)
+    finished = { ok, message }
+  end)
+  local locked = vim.bo[draft].modifiable
+  local again = { commands.save_draft(draft) }
+  local reopened_while = commands.create("TIG")
+  calls[1].release("TIG-45")
+  vim.wait(2000, function()
+    local buf = buffer.named(buffer.name("jira", "TIG-45"))
+    return finished ~= nil and buf ~= nil and vim.b[buf].docket ~= nil
+  end)
+  restore()
+  restore_notify()
+  restore_wait()
+  local item_buf = buffer.named(buffer.name("jira", "TIG-45"))
+  eq(started, true)
+  eq(locked, false, "the draft cannot change while its create is in flight")
+  eq(again[1], false)
+  eq(contains(again[2], "a create is in flight"), true, again[2])
+  eq(reopened_while, draft, ":Docket create while one is in flight goes to that draft")
+  eq(names(calls), { "item_create", "item" }, "one create, then the new item's read")
+  eq(calls[1].args, { { project = "TIG", type = "Task", summary = "Follow up" }, "The body." })
+  eq(finished, { true, "created TIG-45" })
+  eq(vim.api.nvim_get_current_buf(), item_buf, "the new ticket is where the draft was")
+  eq(vim.api.nvim_buf_is_valid(draft), false, "and the draft is gone")
+  eq(vim.b[item_buf].docket.id, "TIG-45")
+  eq(notices[#notices], { message = "created TIG-45", level = vim.log.levels.INFO })
+  vim.api.nvim_buf_delete(item_buf, { force = true })
+end)
+
+test("create: a create the client refuses keeps the draft and its text, and a missing field is the adapter's own refusal", function()
+  no_draft()
+  local _, restore_wait = stub_acli({ signed_in = true })
+  local notices, restore_notify = stub_notify()
+  local draft = commands.create("TIG")
+  vim.api.nvim_buf_set_text(draft, 2, 9, 2, 9, { "Follow up" })
+  local calls, restore = stub_calls(jira, {
+    item_create = function()
+      return nil, "acli exited 1\nError: issuetype is required"
+    end,
+  })
+  local refused
+  commands.save_draft(draft, function(ok, message)
+    refused = { ok, message }
+  end)
+  vim.wait(2000, function()
+    return refused ~= nil
+  end)
+  restore()
+  local refused_level = notices[#notices].level
+  local after = {
+    valid = vim.api.nvim_buf_is_valid(draft),
+    modified = vim.bo[draft].modified,
+    modifiable = vim.bo[draft].modifiable,
+    summary = vim.api.nvim_buf_get_lines(draft, 2, 3, false)[1],
+  }
+  -- A second :Docket create goes to the draft holding text, and keeps it.
+  local again = commands.create("PAY")
+  local project_line = vim.api.nvim_buf_get_lines(draft, 0, 1, false)[1]
+
+  -- No summary: the real adapter refuses before any spawn, which the suite's
+  -- guard would otherwise turn into a different message.
+  vim.api.nvim_buf_set_lines(draft, 2, 3, false, { "Summary: " })
+  local missing
+  commands.save_draft(draft, function(ok, message)
+    missing = { ok, message }
+  end)
+  vim.wait(2000, function()
+    return missing ~= nil
+  end)
+  vim.api.nvim_buf_set_lines(draft, 0, 1, false, { "Project TIG" })
+  local malformed = { commands.save_draft(draft) }
+  local bad_project = commands.create("tig")
+  restore_notify()
+  restore_wait()
+  vim.api.nvim_buf_delete(draft, { force = true })
+  eq(names(calls), { "item_create" })
+  eq(refused, { false, "docket-new://jira: acli exited 1\nError: issuetype is required" })
+  eq(refused_level, vim.log.levels.ERROR)
+  eq(after, { valid = true, modified = true, modifiable = true, summary = "Summary: Follow up" })
+  eq(again, draft)
+  eq(project_line, "Project: TIG")
+  eq(missing, { false, "docket-new://jira: a work item needs a summary" })
+  eq(malformed, { false, "docket-new://jira: line 1 is not a header line such as `Summary: text`; a blank line ends the header" })
+  eq(bad_project, nil)
+  eq(notices[#notices], { message = "create takes a project key such as PROJ; got tig", level = vim.log.levels.ERROR })
+end)
+
+test("create: a create that may have made the ticket leaves its text on screen and is not a draft any more, so :w makes no second one", function()
+  no_draft()
+  local _, restore_wait = stub_acli({ signed_in = true })
+  local notices, restore_notify = stub_notify()
+  local draft = commands.create("TIG")
+  vim.api.nvim_buf_set_text(draft, 2, 9, 2, 9, { "Follow up" })
+  local calls, restore = stub_calls(jira, {
+    item_create = function()
+      return nil, "acli reported the work item created and printed no key that can be read", true
+    end,
+  })
+  local first
+  commands.save_draft(draft, function(ok, message)
+    first = { ok, message }
+  end)
+  vim.wait(2000, function()
+    return first ~= nil
+  end)
+  local after = {
+    modified = vim.bo[draft].modified,
+    modifiable = vim.bo[draft].modifiable,
+    summary = vim.api.nvim_buf_get_lines(draft, 2, 3, false)[1],
+  }
+  local second = { commands.save_draft(draft) }
+  restore()
+  restore_notify()
+  restore_wait()
+  vim.api.nvim_buf_delete(draft, { force = true })
+  eq(first[1], false)
+  eq(after, { modified = false, modifiable = true, summary = "Summary: Follow up" })
+  eq(second, { false, "nothing to create in this buffer; :Docket create starts a ticket" })
+  eq(names(calls), { "item_create" }, "one create")
+  eq(notices[#notices].level, vim.log.levels.WARN)
+end)
+
+test("jira: a create killed at its timeout, or reported done with no key, answers that the ticket may exist", function()
+  local function create(answer)
+    local _, restore = stub_run(answer)
+    local got
+    jira.item_create({ project = "TIG", type = "Task", summary = "Follow up" }, "", function(...)
+      got = { n = select("#", ...), ... }
+    end)
+    restore()
+    return got
+  end
+  local killed = create(function(argv)
+    return { argv = argv, ok = false, code = spawn.TIMED_OUT, stdout = "", stderr = "", timed_out = true, timeout = 30000 }
+  end)
+  eq({ killed[1], killed[3] }, { nil, true })
+  eq(killed[2]:find("acli: killed after 30000 ms without exiting\nthe create may have reached Jira", 1, true), 1, killed[2])
+  eq(contains(killed[2], "acli jira workitem search --jql 'project = TIG ORDER BY created DESC'"), true, killed[2])
+  local unread = create(function(argv)
+    return done(argv, "created, see the board")
+  end)
+  eq({ unread[1], unread[3] }, { nil, true })
+  local refused = create(function(argv)
+    return failed(argv, 1, "Error: issuetype is required")
+  end)
+  eq({ refused[1], refused[3] }, { nil, nil }, "a refusal made nothing")
+end)
+
+test("adapters: a write killed at its timeout answers that it may have been sent, on Jira and on GitLab", function()
+  local killed = function(argv)
+    return { argv = argv, ok = false, code = spawn.TIMED_OUT, stdout = "", stderr = "", timed_out = true, timeout = 30000 }
+  end
+  local got = {}
+  local function keep(...)
+    got[#got + 1] = { ... }
+  end
+  local _, restore = stub_run(killed)
+  jira.comment_create("PROJ-142", "Once.", keep)
+  glab.comment_create("!482", "Once.", keep)
+  restore()
+  _, restore = stub_run(function(argv)
+    return failed(argv, 1, "refused")
+  end)
+  jira.comment_create("PROJ-142", "Once.", keep)
+  glab.comment_create("!482", "Once.", keep)
+  restore()
+  eq(vim.tbl_map(function(answer)
+    return answer[3] == true
+  end, got), { true, true, false, false })
+end)
+
+test("glab: a user search that fails is not asked again for a while, and a login asks again at once", function()
+  glab.forget()
+  local waits, restore_wait = stub_wait(function(argv)
+    return failed(argv, 1, "dial tcp: i/o timeout")
+  end)
+  local first = glab.complete("user", "a")
+  local second = glab.complete("user", "an")
+  local count = #waits
+  glab.forget()
+  glab.complete("user", "ana")
+  restore_wait()
+  eq({ first, second }, { {}, {} })
+  eq(count, 1, "the second query waits for nothing")
+  eq(#waits, 2, "after a login the search is asked again")
+  glab.forget()
+end)
+
+test("create: the project comes from the argument, the ticket in the current buffer, or the clone's one bound project", function()
+  no_draft()
+  local _, restore_wait = stub_acli({ signed_in = true })
+  local saved_root, saved_binding = repo.root, repo.binding
+  local bound = { kind = "projects", projects = { "PAY" } }
+  repo.root = function()
+    return { root = "/w/repo", bare = true }
+  end
+  repo.binding = function()
+    return bound
+  end
+  local _, restore_notify = stub_notify()
+  local item_buf = loaded_buffer()
+  vim.api.nvim_set_current_buf(item_buf)
+  local from_item = commands.create()
+  local first_from_item = vim.api.nvim_buf_get_lines(from_item, 0, 1, false)[1]
+  vim.api.nvim_buf_delete(from_item, { force = true })
+  vim.api.nvim_set_current_buf(vim.api.nvim_create_buf(false, true))
+  local from_binding = commands.create()
+  local first_from_binding = vim.api.nvim_buf_get_lines(from_binding, 0, 1, false)[1]
+  vim.api.nvim_buf_delete(from_binding, { force = true })
+  bound = { kind = "projects", projects = { "PAY", "OPS" } }
+  local ambiguous = commands.create()
+  local first_ambiguous = vim.api.nvim_buf_get_lines(ambiguous, 0, 1, false)[1]
+  vim.api.nvim_buf_delete(ambiguous, { force = true })
+  restore_notify()
+  repo.root, repo.binding = saved_root, saved_binding
+  restore_wait()
+  eq(first_from_item, "Project: PROJ")
+  eq(first_from_binding, "Project: PAY")
+  eq(first_ambiguous, "Project: ", "two bound projects leave the choice to the reader")
+end)
+
+test("plugin: :e on a draft's name fills it, :w on it goes to the create, and :e! in flight keeps what was sent", function()
+  no_draft()
+  vim.g.loaded_docket = nil
+  dofile(root .. "/dot_local/share/private_nvim/private_site/pack/docket/start/docket/plugin/docket.lua")
+  local saved_root = repo.root
+  repo.root = function()
+    return nil, "not a clone"
+  end
+  local notices, restore_notify = stub_notify()
+  vim.cmd.edit("docket-new://jira")
+  local draft = vim.api.nvim_get_current_buf()
+  local lines = vim.api.nvim_buf_get_lines(draft, 0, -1, false)
+  vim.api.nvim_buf_set_text(draft, 0, 9, 0, 9, { "TIG" })
+  vim.cmd.write()
+  vim.wait(2000, function()
+    return #notices > 0
+  end)
+  local refused = vim.deepcopy(notices)
+
+  -- A create in flight: `:e!` empties the draft before the read command
+  -- runs, and the read command puts back what was sent.
+  vim.api.nvim_buf_set_text(draft, 2, 9, 2, 9, { "Kept" })
+  local sent = vim.api.nvim_buf_get_lines(draft, 0, -1, false)
+  local calls, restore = stub_calls(jira, { item_create = HOLD })
+  vim.cmd.write()
+  vim.cmd("edit!")
+  local after_reload = vim.api.nvim_buf_get_lines(draft, 0, -1, false)
+  local shown = #notices
+  calls[1].release(nil, "acli exited 1\nError: issuetype is required")
+  vim.wait(2000, function()
+    return #notices > shown
+  end)
+  restore()
+  restore_notify()
+  repo.root = saved_root
+  vim.api.nvim_del_user_command("Docket")
+  vim.g.loaded_docket = nil
+  local after_failure = vim.api.nvim_buf_get_lines(draft, 0, -1, false)
+  local modified = vim.bo[draft].modified
+  vim.api.nvim_buf_delete(draft, { force = true })
+  eq(lines, { "Project: ", "Type: Task", "Summary: ", "Assignee: ", "", "" })
+  eq(refused, { { message = "docket-new://jira: a work item needs a summary", level = vim.log.levels.ERROR } })
+  eq(#calls, 1)
+  eq(after_reload, sent, ":e! during the create leaves the text that was sent")
+  eq(after_failure, sent, "and a refused create leaves it to correct")
+  eq(modified, true)
+  eq(notices[#notices], { message = "docket-new://jira: acli exited 1\nError: issuetype is required", level = vim.log.levels.ERROR })
 end)
 
 -- runner -----------------------------------------------------------------------------------

@@ -118,6 +118,32 @@
 --                                                     "item" or "user"; blocking
 --   states(id, on_done)                            -> on_done({ { label, target }... }|nil, err)
 --   state_set(id, target, on_done)                 -> on_done(ok, err)
+--   assign(id, who, on_done)                       -> on_done(ok, err); `who`
+--                                                     is ME, NOBODY, or a
+--                                                     person's `id` as this
+--                                                     adapter's items and rows
+--                                                     carry it. The item is
+--                                                     left with that one
+--                                                     assignee, or none
+--   item_create(fields, text, on_done)             -> on_done(id|nil, err, made),
+--                                                     the new item's identifier.
+--                                                     `made` is set beside an
+--                                                     error when the item may
+--                                                     exist all the same: a
+--                                                     create reported done
+--                                                     with no identifier, or
+--                                                     one killed at the
+--                                                     timeout.
+--                                                     `fields` is { project,
+--                                                     type, summary, assignee }
+--                                                     with `assignee` optional
+--                                                     and taking what `who`
+--                                                     takes; `text` is the
+--                                                     body. One call makes one
+--                                                     item: an identical call
+--                                                     while it runs joins it,
+--                                                     and any other makes
+--                                                     another
 --   diff(id, on_done)                              -> on_done(diff|nil, err)
 --   threads(id, on_done)                           -> on_done(threads|nil, err)
 --   line_comment(id, position, text, on_done)      -> on_done(ok, err)
@@ -185,12 +211,23 @@ M.OPTIONAL = {
   "complete",
   "states",
   "state_set",
+  "assign",
+  "item_create",
   "diff",
   "threads",
   "line_comment",
   "thread_resolve",
   "submit",
 }
+
+-- What assign() and item_create()'s `assignee` take besides a person's
+-- identifier: the account signed in, and no assignee at all. Both are named
+-- rather than left to a value an identifier cannot be, so that a picker
+-- cancelled into nil is refused by the adapter instead of removing the
+-- assignee. Neither can be an identifier either backend issues: a Jira
+-- `accountId` and a GitLab username never start with `@`.
+M.ME = "@me"
+M.NOBODY = "@nobody"
 
 -- How many parameters each call takes, as the signatures above write them.
 -- A function is a function whatever its arity, so without this a `rows`
@@ -214,6 +251,8 @@ M.ARITY = {
   complete = 2,
   states = 2,
   state_set = 3,
+  assign = 3,
+  item_create = 3,
   diff = 2,
   threads = 2,
   line_comment = 4,

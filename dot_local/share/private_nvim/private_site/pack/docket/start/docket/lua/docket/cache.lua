@@ -10,12 +10,13 @@
 -- tests/check.py fails on a program-written file there.
 --
 -- Nothing here raises. A directory that is absent or cannot be written, a file
--- that is not JSON or holds another key, a read that fails part way -- each is
--- a miss, because the cache stands in front of the client and a broken cache
--- must not stop the dashboard from asking. Every function is safe in a
--- fast-event context, which is where a spawn callback lands: the file name is
--- hashed in Lua rather than through vim.fn.sha256, and the directory is made
--- with libuv rather than vim.fn.mkdir, since vim.fn is refused there.
+-- that is not JSON, is of another format or holds another key, a read that
+-- fails part way -- each is a miss, because the cache stands in front of the
+-- client and a broken cache must not stop the dashboard from asking. Every
+-- function is safe in a fast-event context, which is where a spawn callback
+-- lands: the file name is hashed in Lua rather than through vim.fn.sha256, and
+-- the directory is made with libuv rather than vim.fn.mkdir, since vim.fn is
+-- refused there.
 --
 -- Transition lists and thread state are never cached; only rows are.
 
@@ -46,6 +47,14 @@ local requests = flight.new({
 -- ticket titles from the employer's tracker, on a server other accounts share.
 local FILE_MODE = 384 -- 0600
 local DIR_MODE = 448 -- 0700
+
+-- The shape of a row file. A file of another format, or of none, is a miss,
+-- so a row cached under an older shape is fetched again rather than shown
+-- without a field the current shape carries and a key reads: `w` and `R` read
+-- a merge request's `fork`, and a row shown without it reaches the launcher.
+-- Bump it when a row gains such a field. 2 is the shape whose merge requests
+-- carry `fork`.
+local FORMAT = 2
 
 --- The cache key for a section: the adapter's name, what the query is
 --- resolved against, and the query itself.
@@ -102,6 +111,26 @@ function M.path(key)
   return config.options.cache_dir .. "/" .. M.name(key) .. ".json"
 end
 
+-- A row file's decoded contents, or nil when it cannot be read or does not
+-- hold a JSON object.
+local function decoded_file(path)
+  local fd = vim.uv.fs_open(path, "r", 0)
+  if not fd then
+    return nil
+  end
+  local stat = vim.uv.fs_fstat(fd)
+  local data = stat and vim.uv.fs_read(fd, stat.size, 0)
+  vim.uv.fs_close(fd)
+  if type(data) ~= "string" then
+    return nil
+  end
+  local ok, decoded = pcall(vim.json.decode, data, { luanil = { object = true, array = true } })
+  if not ok or type(decoded) ~= "table" then
+    return nil
+  end
+  return decoded
+end
+
 --- The cached rows for a key and the moment they were fetched, or nil for a
 --- miss.
 ---
@@ -115,20 +144,10 @@ end
 ---@param key string
 ---@return { rows: table[], written: integer }|nil cached
 function M.read(key)
-  local fd = vim.uv.fs_open(M.path(key), "r", 0)
-  if not fd then
-    return nil
-  end
-  local stat = vim.uv.fs_fstat(fd)
-  local data = stat and vim.uv.fs_read(fd, stat.size, 0)
-  vim.uv.fs_close(fd)
-  if type(data) ~= "string" then
-    return nil
-  end
-  local ok, decoded = pcall(vim.json.decode, data, { luanil = { object = true, array = true } })
+  local decoded = decoded_file(M.path(key))
   if
-    not ok
-    or type(decoded) ~= "table"
+    decoded == nil
+    or decoded.format ~= FORMAT
     or decoded.key ~= key
     or type(decoded.written) ~= "number"
     or not vim.islist(decoded.rows)
@@ -181,7 +200,7 @@ function M.write(key, rows, now)
   if not fd then
     return false
   end
-  local ok, encoded = pcall(vim.json.encode, { key = key, written = now or os.time(), rows = rows })
+  local ok, encoded = pcall(vim.json.encode, { format = FORMAT, key = key, written = now or os.time(), rows = rows })
   local written = ok and vim.uv.fs_write(fd, encoded) or nil
   vim.uv.fs_close(fd)
   -- fs_write answers with the byte count, so a file system that fills part
@@ -199,12 +218,54 @@ function M.write(key, rows, now)
 end
 
 --- Drops a key: its file, and the answer of any request for it in flight,
---- since that answer predates whatever made the caller drop it. A write to an
---- item calls this for the sections that hold it.
+--- since that answer predates whatever made the caller drop it.
 ---@param key string
 function M.drop(key)
   requests:invalidate(key)
   vim.uv.fs_unlink(M.path(key))
+end
+
+--- Drops every key whose rows hold an item, which is what a write to that
+--- item makes stale: the row carries its state and its update time.
+---
+--- A key names a query rather than the items it returned, so every row file
+--- is read to find the ones holding the item, matched on the row's `source`
+--- and `id`. A key whose rows do not hold it is kept, including one whose
+--- query the write may have made match -- the dashboard refreshes behind
+--- what it shows in any case, and dropping every key would leave each
+--- section empty until its client answers. A file that cannot be read is a
+--- miss at the next read and is left alone.
+---
+--- Every request in flight is moved on as well, whatever its file holds. A
+--- search that started before the write can answer with the item as it was,
+--- and a key with no file yet, or one written before the item was in it, is
+--- not found by the scan. So a section refreshing while an item is written
+--- reports that its answer was dropped, and asks again on the next refresh.
+---@param source string the adapter's name, as a row carries it
+---@param id string the item's identifier, as a row carries it
+---@return string[] keys the keys dropped
+function M.drop_item(source, id)
+  local dropped = {}
+  local dir = config.options.cache_dir
+  local handle = vim.uv.fs_scandir(dir)
+  while handle do
+    local entry = vim.uv.fs_scandir_next(handle)
+    if not entry then
+      break
+    end
+    local decoded = entry:match("%.json$") and decoded_file(dir .. "/" .. entry)
+    if decoded and type(decoded.key) == "string" and vim.islist(decoded.rows) then
+      for _, r in ipairs(decoded.rows) do
+        if type(r) == "table" and r.source == source and r.id == id then
+          M.drop(decoded.key)
+          dropped[#dropped + 1] = decoded.key
+          break
+        end
+      end
+    end
+  end
+  requests:invalidate_all()
+  return dropped
 end
 
 --- Drops every key: every row file in the directory, and the answer of every
