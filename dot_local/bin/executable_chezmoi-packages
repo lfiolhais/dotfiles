@@ -70,7 +70,7 @@ FLAG_HELP = {
     "mise": "tool name in mise, the package manager of the no-sudo Linux profile",
     "mise_exe": "binary mise installs, when it differs from the tool name",
     "repo": "mark 'official' when the 01 script installs it from its own upstream\n"
-    "repository (gh, starship); the reason goes in --note",
+    "repository (gh, acli, starship); the reason goes in --note",
     "note": "why it installs nowhere on Linux; required when no target is named",
 }
 # What to run after an edit, printed once at the end of one.

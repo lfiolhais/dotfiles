@@ -36,8 +36,8 @@ FIELDS = ("brew", "apt", "fedora", "el", "mise", "mise_exe", "repo", "note")
 # Where an entry can install a tool. One naming none of these installs nowhere,
 # which is the deliberate case that `note` has to explain.
 TARGETS = frozenset({"apt", "fedora", "el", "mise"})
-# `repo` covers gh and starship, which the 01 script installs from their own
-# repository and installer because no base repo has them.
+# `repo` covers gh, acli and starship, which the 01 script installs from their
+# own repository, installer or pinned release because no base repo has them.
 KNOWN = TARGETS | {"brew", "mise_exe", "repo", "note"}
 
 HEADER = (
@@ -50,8 +50,9 @@ HEADER = (
     "",
     "THE RULE: if a tool is not in the system's package manager, it is not",
     "installed. No release downloads, no vendored installers. The only exceptions",
-    "are gh and starship, which the 01 script installs from their own repo and",
-    "installer because neither is in any base repo.",
+    "are gh, acli and starship, which the 01 script installs from their own repo,",
+    "installer or pinned release because none is in any base repo. acli's pin",
+    "lives in .chezmoidata/acli.toml, which is authored by hand.",
     "",
     "Targets:",
     "  apt     Debian / Ubuntu / Pop!_OS",
@@ -61,7 +62,8 @@ HEADER = (
     "          so a tool can be mise-only, available there and nowhere else",
     "",
     "  mise_exe  the binary mise installs, when it differs from the tool name",
-    "  repo      installed from its own repository by the 01 script (gh, starship)",
+    "  repo      installed from its own repository by the 01 script (gh, acli,",
+    "            starship)",
     "",
     'A missing field means "not available on that target": the name is left out',
     "of that distro's install list. An entry naming NO target is not installed on",

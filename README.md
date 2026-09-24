@@ -106,7 +106,7 @@ reversible operation. In order:
 | `setup-xcode-cli`            | installs Xcode Command Line Tools and Rosetta 2                            |
 | `decrypt-private-key`        | writes `~/.config/chezmoi/key.txt`                                         |
 | `01-install-packages-darwin` | updates or installs Homebrew, then the whole Brewfile — the list of everything macOS installs — then Rust's stable toolchain |
-| `01-install-packages-linux`  | apt/dnf, plus `starship` (the shell prompt) from its installer and `gh` (GitHub's CLI) from GitHub's repository — Fedora's dnf carries `gh` itself — or a rootless mise |
+| `01-install-packages-linux`  | apt/dnf, plus `starship` (the shell prompt) from its installer, `gh` (GitHub's CLI) from GitHub's repository — Fedora's dnf carries `gh` itself — and `acli` (Atlassian's command-line client for Jira) from Atlassian's; or a rootless mise, plus `acli` as the pinned release `.chezmoidata/acli.toml` names, digest-checked before it is extracted |
 | `02-setup-darwin` | rewrites preferences across the Dock, Finder, Safari, trackpad, keyboard, screenshots and Software Update, then kills the affected apps to reload them |
 | `03-setup-dock`              | appends the apps it names to the Dock, leaving existing items in place     |
 | `04-setup-fish`              | adds fish to `/etc/shells` and makes it the login shell with `chsh`        |
@@ -344,32 +344,50 @@ chezmoi-sync --all      # list every untracked file rather than a few per direct
 
 ## Packages
 
-Two files decide what is installed, and they are written by different hands:
+These files decide what is installed, and they are written by different hands:
 
 | file                          | holds                                                          |
 | ---                           | ---                                                            |
-| `private_dot_config/Brewfile` | what macOS installs — formulae, casks, Mac App Store apps      |
-| `.chezmoidata/packages.toml`  | what each Linux target calls the same tool, or why it has none |
+| `private_dot_config/Brewfile` | what macOS installs — formulae, Homebrew's command-line packages; casks, its app packages; and Mac App Store apps |
+| `.chezmoidata/packages.toml`  | the manifest: what each Linux target calls the same tool, or why it has none |
+| `.chezmoidata/acli.toml`      | the `acli` release the no-sudo profile installs, and the digests that verify it — the one file in that directory edited by hand |
 
-A third file is written from the second and never by hand:
-`private_dot_config/mise/config.toml.tmpl` renders the manifest's `mise` names
+`private_dot_config/mise/config.toml.tmpl` is written from the manifest and
+never by hand: it renders the manifest's `mise` names
 into the config mise reads on the no-sudo Linux profile. An edit to
 `~/.config/mise/config.toml` on that machine is replaced at the next apply, so a
 version or a tool changes in the manifest.
 
 The Brewfile is derived. `brew bundle dump` writes it from what the Mac has
-installed, descriptions and taps and casks and Mac App Store apps included, so
-an edit made by hand is gone at the next dump. The manifest is authored: it
-records a decision — what Linux calls this tool, or why Linux does without it —
-that no machine can be asked for.
+installed — descriptions, taps (the third-party formula repositories Homebrew
+has added), casks and Mac App Store apps included — so an edit made by hand is
+gone at the next dump. The manifest is authored: it records a decision — what
+Linux calls this tool, or why Linux does without it — that no machine can be
+asked for.
 
 A tool the distro's own package manager does not carry is not installed on
 Linux, which keeps the dotfiles clear of tracking where each project publishes
-its packages and what it considers the recommended way to install them. `gh` and
-`starship` are the two exceptions. Fedora packages `gh` itself; Debian, Ubuntu
-and the RHEL rebuilds take it from GitHub's own repository. `starship` comes
-from its installer everywhere, because no base repository has it and it is the
-shell prompt.
+its packages and what it considers the recommended way to install them. `gh`,
+`acli` and `starship` are the exceptions. Fedora packages `gh` itself; Debian,
+Ubuntu and the RHEL rebuilds take it from GitHub's own repository. `starship`
+comes from its installer everywhere, because no base repository has it and it
+is the shell prompt.
+
+`acli`, Atlassian's command-line client for Jira, comes from Atlassian's own
+apt and rpm repositories on the `sudo` profiles. Atlassian packages it for no
+rootless installer, so the no-`sudo` profile takes a pinned release tarball
+whose sha256 digest the `01` script checks before extracting it into
+`~/.local/bin`. The pin is `.chezmoidata/acli.toml`, written by hand: the
+version, and one digest per architecture. Both come from the `acli` Formula in
+the `atlassian/acli` tap, where Atlassian publishes them:
+`brew cat atlassian/acli/acli` prints it on a machine with Homebrew, and the tap
+is `github.com/atlassian/homebrew-acli` for one without. Atlassian publishes no
+digest for an unpinned `latest`, which is why a version is pinned at all. Moving
+to a newer release is an edit to that file followed by `chezmoi apply` — the
+`01` script's content changes with the pin, and a `run_once_` script whose
+content changed runs again. The `update` fish function reports when the
+installed `acli` is not the pinned one, and prints the command that runs the
+`01` script again, since an apply with the pin unchanged does not.
 
 One manifest entry per tool:
 
@@ -381,7 +399,7 @@ fedora = "<DNF_NAME>"     # Fedora
 el = "<RHEL_NAME>"        # RHEL rebuilds: Rocky, AlmaLinux, CentOS Stream
 mise = "<MISE_NAME>"      # the no-sudo profile, where mise is the package manager
 mise_exe = "<EXE_NAME>"   # the binary mise installs, when it differs from the tool
-repo = "<REASON>"         # installed from its own repository by the 01 script
+repo = "official"         # the 01 script installs it from its own repository; the reason goes in note
 note = "Anything surprising about the above."
 ```
 

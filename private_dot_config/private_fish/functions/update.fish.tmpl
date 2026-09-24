@@ -76,6 +76,38 @@ function update --description "Update the packages each installer on this machin
 {{ else }}
     # --- Linux without sudo: mise bootstrapped itself, so it updates itself ---
     command --query mise; and __update_step "mise itself" mise self-update --yes
+
+    # acli, Atlassian's command-line client for Jira, has no rootless package,
+    # so the 01 script installs the release .chezmoidata/acli.toml pins and
+    # checks its digest. Atlassian publishes no digest for an unpinned "latest",
+    # so a download here would drop that check; this step only reports when
+    # the installed acli is not the pinned one. The pin is rendered in at apply
+    # time, because a deployed machine has no .chezmoidata to read, and the
+    # test is the same substring match as the 01 script's guard, so the two
+    # agree on what current means whatever `acli --version` prints around it.
+    function __update_acli_pin
+        set --local pin "{{ .acli.version }}"
+        set --local have (acli --version 2>/dev/null | string collect)
+        if string match --quiet "*$pin*" -- "$have"
+            return 0
+        end
+        echo "acli --version prints '$have'; .chezmoidata/acli.toml pins $pin."
+        # The pin above is the one the last apply rendered, and the 01 script is
+        # run_once_: an apply runs it again only when its rendered content
+        # changed or its last run failed. A binary replaced since that apply is
+        # neither, so the remedy printed is the script itself, rendered as an
+        # apply would render it.
+        echo "The 01 script installs the pinned release. An apply runs it again only when its"
+        echo "content changed or its last run failed. To run it now:"
+        echo "  chezmoi execute-template --file (chezmoi source-path)/run_once_after_install-01-install-packages-linux.sh.tmpl | bash"
+        echo "acli --version then prints a line holding $pin."
+        echo "A newer release is taken by editing .chezmoidata/acli.toml. The version and both sha256 digests"
+        echo "come from the acli Formula: run `brew cat atlassian/acli/acli` where Homebrew is"
+        echo "installed, or read it at github.com/atlassian/homebrew-acli."
+        return 1
+    end
+    command --query acli; and __update_step "acli against its pin" __update_acli_pin
+    functions --erase __update_acli_pin
 {{ end }}
     # --- The two things no package manager covers -----------------------------
     # The Rust toolchain: brew and apt/dnf install rustup, not the compilers it

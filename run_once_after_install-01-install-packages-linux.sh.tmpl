@@ -1,11 +1,14 @@
 {{- if eq .chezmoi.os "linux" -}}
 #!/usr/bin/env bash
 # Two profiles:
-#   * sudo:    native package manager (apt/dnf), plus the two exceptions outside
+#   * sudo:    native package manager (apt/dnf), plus the exceptions outside
 #              the distro's own set: gh from GitHub's repository (Fedora's dnf
-#              carries it itself) and starship from its installer. A tool the
-#              distro does not package is simply not installed.
-#   * no-sudo: rootless mise under ~/.local -- the only option without root.
+#              carries it itself), acli from Atlassian's repository, and
+#              starship from its installer. A tool the distro does not package
+#              is simply not installed.
+#   * no-sudo: rootless mise under ~/.local -- the only option without root --
+#              plus acli as a pinned, digest-checked release, because Atlassian
+#              packages it for no rootless installer.
 #
 # The package names come from .chezmoidata/packages.toml, which maps every
 # Brewfile formula onto its per-distro equivalent. Edit the manifest with
@@ -46,6 +49,21 @@ packages=(
 "${SUDO[@]}" dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
 "${SUDO[@]}" dnf install -y gh
 {{- end }}
+
+# acli, Atlassian's command-line client for Jira, from Atlassian's repository:
+# no distro carries it. The repository file is written directly rather than
+# through `dnf config-manager --add-repo`, which is what the gh block above uses,
+# because that spelling is dnf4's: Fedora ships dnf5, whose equivalent lives in a
+# plugin package the image does not have and is spelled `addrepo
+# --from-repofile`. Writing the file needs no plugin on either. The file
+# Atlassian serves sets gpgcheck=1 and repo_gpgcheck=1 against its public key,
+# so packages are still verified. A failed curl leaves the file empty, and the
+# `dnf install` after it then fails, which is what stops the script. Which
+# config-manager spellings the pinned Fedora image has is unverified;
+# `dnf config-manager --help` in that container settles it.
+curl -fsSL https://acli.atlassian.com/linux/rpm/acli.repo \
+    | "${SUDO[@]}" tee /etc/yum.repos.d/acli.repo > /dev/null
+"${SUDO[@]}" dnf install -y acli
 {{- else }}
 # --- Debian / Ubuntu / Pop!_OS ----------------------------------------------
 "${SUDO[@]}" apt-get update
@@ -73,6 +91,32 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubc
     | "${SUDO[@]}" tee /etc/apt/sources.list.d/github-cli.list > /dev/null
 "${SUDO[@]}" apt-get update
 "${SUDO[@]}" apt-get install -y gh
+
+# acli, Atlassian's command-line client for Jira, from Atlassian's repository:
+# no distro carries it. Atlassian serves its signing key armoured, and the key
+# is written as it arrives, named in signed-by= with an .asc extension; the
+# `gpg --dearmor` in Atlassian's instructions would need gnupg, which is not in
+# the bootstrap list above (GitHub serves gh's keyring already binary, so that
+# block never needed it either). Whether apt in the targeted releases accepts
+# an armoured key there is unverified: `apt-get install -y --dry-run acli` in a
+# Debian or Ubuntu container settles it, and gnupg with `gpg --dearmor` is the
+# fallback. A key apt refuses fails every later `apt-get update`, this script's
+# first included, until `sudo rm /etc/apt/sources.list.d/acli.list` removes the
+# source.
+#
+# The key is downloaded to a file first, for the reason starship's installer is
+# below: `curl | tee` after a failed download writes an empty key and exits 0,
+# which is the refused key above, while the file form makes `set -e` stop on
+# the curl before acli.list is written. /etc/apt/keyrings exists by now: the gh
+# block creates it.
+acli_key="$(mktemp)"
+curl -fsSL https://acli.atlassian.com/gpg/public-key.asc -o "${acli_key}"
+"${SUDO[@]}" install -m 644 "${acli_key}" /etc/apt/keyrings/acli.asc
+rm -f "${acli_key}"
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/acli.asc] https://acli.atlassian.com/linux/deb stable main" \
+    | "${SUDO[@]}" tee /etc/apt/sources.list.d/acli.list > /dev/null
+"${SUDO[@]}" apt-get update
+"${SUDO[@]}" apt-get install -y acli
 {{- end }}
 
 # Starship prompt is not in the base repos; use its official installer. The
@@ -106,5 +150,57 @@ fi
 export PATH="$HOME/.local/bin:$PATH"
 eval "$(mise activate bash)"
 mise install
+
+# --- no-sudo: acli has no rootless package ----------------------------------
+# acli, Atlassian's command-line client for Jira, is packaged for Homebrew, apt
+# and yum and for no rootless installer, so this profile takes a pinned release
+# tarball -- an exception to the manifest's rule, beside gh and starship. The
+# version and both digests come from .chezmoidata/acli.toml, which the `update`
+# fish function renders too, so the two cannot disagree. Atlassian publishes a
+# digest for each versioned tarball and none for "latest", which is why a
+# version is pinned rather than the newest taken.
+#
+# The download goes to a file first: a pipeline's status is the last command's,
+# so the file form makes `set -e` stop on a failed curl. sha256sum exits
+# non-zero on a mismatch, and that stops the script before anything is
+# extracted; the trap removes the tarball on that exit, since the `rm` below is
+# never reached. ~/.local/bin needs no root, so a compromised download runs
+# unprivileged.
+#
+# The guard tests the pinned version rather than the presence of a binary, so
+# that changing the pin reinstalls: `command -v acli` would skip the block for
+# any acli at all. The test is a substring match, so it holds whether
+# `acli --version` prints the bare version or a line with words around it.
+acli_version={{ .acli.version }}
+case "$(uname -m)" in
+    x86_64)  acli_arch=amd64; acli_sha={{ .acli.sha256.amd64 }} ;;
+    aarch64) acli_arch=arm64; acli_sha={{ .acli.sha256.arm64 }} ;;
+    *)       acli_arch="" ;;
+esac
+if [ -z "${acli_arch}" ]; then
+    echo "acli: Atlassian builds no Linux release for $(uname -m); nothing installed." >&2
+    echo "  The routes that exist are at https://developer.atlassian.com/cloud/acli/guides/install-linux/" >&2
+else
+    case "$(acli --version 2> /dev/null || true)" in
+        *"${acli_version}"*)
+            # The pinned release is the one installed.
+            ;;
+        *)
+            mkdir -p "$HOME/.local/bin"
+            acli_tar="$(mktemp)"
+            trap 'rm -f "${acli_tar}"' EXIT
+            curl -fsSL \
+                "https://acli.atlassian.com/linux/${acli_version}/acli_${acli_version}_linux_${acli_arch}.tar.gz" \
+                -o "${acli_tar}"
+            echo "${acli_sha}  ${acli_tar}" | sha256sum -c -
+            # The archive holds acli_<version>_linux_<arch>/acli, not a bare
+            # acli, so the member is named in full and the directory dropped.
+            tar -xzf "${acli_tar}" -C "$HOME/.local/bin" --strip-components=1 \
+                "acli_${acli_version}_linux_${acli_arch}/acli"
+            rm -f "${acli_tar}"
+            trap - EXIT
+            ;;
+    esac
+fi
 {{- end }}
 {{ end -}}

@@ -1,3 +1,4 @@
+tap "atlassian/acli"
 tap "nikitabobko/tap", trusted: true
 tap "riscv-software-src/riscv", trusted: true
 # Core application library for C
@@ -224,6 +225,8 @@ brew "z3"
 brew "zig"
 # Language Server for Zig
 brew "zls"
+# Software to interact with Atlassian Cloud from the terminal
+brew "atlassian/acli/acli", trusted: true
 # RISC-V toolchain including gcc (with newlib), simulator (spike), and pk
 brew "riscv-software-src/riscv/riscv-tools"
 # Stand alone ad blocker
@@ -305,8 +308,8 @@ mas "GarageBand", id: 682658836
 mas "Ice Cubes", id: 6444915884
 mas "iMovie", id: 408981434
 mas "Infuse", id: 1136220934
-mas "Keynote", id: 361285480
 mas "Keynote", id: 409183694
+mas "Keynote", id: 361285480
 mas "Noir", id: 1592917505
 mas "Numbers", id: 361304891
 mas "Numbers", id: 409203825

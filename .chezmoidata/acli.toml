@@ -1,0 +1,23 @@
+# The acli release the no-sudo Linux profile installs, and the sha256 digests
+# that verify the tarball before it is extracted. acli is Atlassian's
+# command-line client for Jira; Atlassian packages it for Homebrew, apt and yum
+# and for no rootless installer, so that profile takes a pinned release instead.
+#
+# Authored by hand, unlike packages.toml beside it. Read by
+# run_once_after_install-01-install-packages-linux.sh.tmpl, which installs the
+# release named here, and by the `update` fish function, which reports when the
+# installed acli is not this one. The digests come from the acli Formula in the
+# atlassian/acli tap, where Atlassian publishes one per architecture:
+# `brew cat atlassian/acli/acli` prints it on a machine with Homebrew, and the
+# tap is github.com/atlassian/homebrew-acli for one without. No digest is
+# published for an unpinned "latest", which is why a version is pinned at all.
+#
+# Changing the version here changes the rendered 01 script, and a run_once_
+# script whose content changed re-runs at the next apply, so editing this file is
+# what reinstalls acli.
+[acli]
+version = "1.3.36-stable"
+
+[acli.sha256]
+amd64 = "b6a9d70fd107ce5e284380d110d2eaee82155c4fc90f7bb17612213c9a1087e1"
+arm64 = "4c404a2a0cb98e516502b6f528ad70fb95187aebf744ea108f0632e41984d0bd"
