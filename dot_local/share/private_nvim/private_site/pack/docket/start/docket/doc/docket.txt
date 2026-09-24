@@ -1,92 +1,299 @@
 *docket.txt*    Jira tickets and merge requests from neovim
 
                                                                       *docket*
-docket reaches Jira through `acli`, Atlassian's command-line client for its
-Cloud products, GitLab through `glab`, GitLab's command-line client, and
-GitHub through `gh` and octo.nvim. It has four modes, and every backend is
-reached through the same four.
+docket brings Jira tickets, GitLab merge requests and GitHub pull requests
+into the editor. It lists what is outstanding, opens a ticket or a merge
+request as a buffer to read and comment on, turns any of them into a git
+worktree with its own tmux windows, and reviews a merge request as a diff. A
+worktree is a second checkout of a repository in a folder of its own; tmux
+is the terminal multiplexer the windows open in.
 
-1. The dash. One buffer listing everything outstanding, grouped in sections,
-   at the root of a bare clone. |:Docket|, bound to `<leader>dd`.
-2. Commenting on an item. The item as a buffer with its thread, where `:w`
-   sends only the regions that changed. `:Docket <id>`, or `<CR>` from the
-   dash.
-3. Working on an item. A ticket turned into a development environment: a git
-   worktree, then two named windows in tmux, the terminal multiplexer -- or,
-   away from tmux, a tab of the running editor at the worktree. `w` from the
-   dash, `<leader>dw` from an item.
-4. Reviewing code. A merge request turned into the same environment, and then
-   its diff with the review's held comments. `R` from the dash.
+docket is deployed by the dotfiles repository `lfiolhais/dotfiles`, together
+with the neovim configuration it runs in and the commands it calls. Below,
+"the dotfiles" means that repository, and "this configuration" its neovim
+configuration, `~/.config/nvim/init.lua`.
 
-Before any of them there is a login, |:Docket-login|, run once per machine per
-backend. A mode that meets a backend with no account signed in reports the
-state and names that command, and stops.
+Each backend is reached through its own command-line client:
 
-This build holds the login, the dash, working on an item, and the item
-buffer's read path. Where a section below describes a mode that is not built,
-it says what the command reports.
+    Jira      `acli`, Atlassian's command-line client for its Cloud products
+    GitLab    `glab`, GitLab's command-line client
+    GitHub    `gh`, GitHub's command-line client; a pull request itself opens
+              in octo.nvim, the GitHub plugin this configuration installs
+
+Every backend is reached through the same modes:
+
+1. The dash, |docket-dash|: one buffer listing everything outstanding for the
+   clone the editor is in, in sections. |:Docket|, or `<leader>dd`.
+2. Commenting on an item, |docket-item|: a ticket or a merge request as a
+   buffer holding its thread, where `:w` sends the parts that changed.
+   `:Docket {id}`, or `<CR>` on a row of the dash.
+3. Working on an item, |docket-work|: a ticket turned into a development
+   environment -- the worktree, then two tmux windows named after its branch,
+   or a tab of the running editor at the worktree when the editor is not
+   inside tmux. `w` on a row of the dash, `<leader>dw` in an item buffer.
+4. Reviewing code, |docket-review|: a merge request turned into the same
+   environment, opened on its diff, where line comments are held until the
+   review is submitted. `R` on a row of the dash, or `:Docket review {id}`
+   in the merge request's worktree.
+
+Before any of them comes a login, |:Docket-login|, once per machine for each
+backend. A mode never prompts for one: when a backend has no account signed
+in, the mode reports that, names the command, and stops.
+
+`<leader>` is the space bar in this configuration.
 
 ==============================================================================
 CONTENTS                                                     *docket-contents*
 
   The dash ............................................ |docket-dash|
   Commenting on an item ............................... |docket-item|
+    Saving ............................................ |docket-save|
+    A new comment ..................................... |docket-comment|
+    Completion ........................................ |docket-completion|
+    Changing state and assignee ....................... |docket-state|
+    Creating a ticket ................................. |:Docket-create|
   Working on an item .................................. |docket-work|
   Reviewing code ...................................... |docket-review|
+    Opening a review .................................. |:Docket-review|
+    The verbs ......................................... |docket-review-verbs|
+    Submitting ........................................ |docket-review-submit|
   Setup ............................................... |docket-setup|
+  Binding a repository to Jira ........................ |docket-binding|
   Authentication ...................................... |docket-auth|
   Commands and keymaps ................................ |docket-commands|
+  Highlight groups .................................... |docket-highlights|
   What each backend supports .......................... |docket-backends|
   Troubleshooting ..................................... |docket-health|
 
 ==============================================================================
 THE DASH                                                         *docket-dash*
 
-|:Docket| with no argument, or `<leader>dd`, opens the dash for the clone the
-working directory is in: one buffer named `docket-dash`, with a section for
-each entry of |docket-setup-sections| that the clone's binding and its remote
-give a query to, the rows under each, and the keys on the last line: >
+|:Docket| with no argument, or `<leader>dd`, opens the dash in the current
+window for the clone the working directory belongs to. That is any folder of
+a clone made by `git wt-clone` -- the command the dotfiles install, which
+keeps the repository in `.bare` with one folder per worktree beside it -- or
+any folder of a plain clone. Outside a clone the command reports
+`the dashboard opens inside a clone;` followed by git's own message.
+>
+    Docket · /home/me/src/payments
+
+    All open tickets (2) · 5m ago, refreshing
+      PAY-1234   In Progress   Retry backoff drops the last attempt
+      PAY-1201   To Do         Cache invalidation on rename
+
+    Review requested (1) · 5m ago
+      !482   opened   Bump the pinned toolchain
 
     <CR> open   w build environment   r refresh   R review
 <
-A section's header carries its title and how it stands: `fetching` while its
-first request runs, the age of the rows shown when they came from the cache,
-with `, refreshing` while a request runs behind them, or the client's error.
-A section's count is the number of rows fetched, because the search endpoint
-returns no total.
+The sections are the ones |docket-setup-sections| configures, shaped by the
+clone's Jira binding, |docket-binding|, and by the host of its `origin`
+remote: a host whose name holds `gitlab` shows the review sections through
+`glab`, and one holding `github` through `gh`. Each row is an identifier, a
+state and a title, in the order the client returned them; the default Jira
+queries put the most recently updated first. A state is coloured as
+|docket-highlights| describes.
 
-A section with no query states why under its header. The three cases:
+A section header carries the title, the number of rows, and after ` · ` how
+the section stands:
 
-- The clone is bound to no Jira project. One Jira section runs, scoped to the
-  account signed in, and its rows sit under the command that binds the clone,
-  which is under |docket-work|. `w` refuses there for the reason given in the
-  same section.
-- The clone is marked as having no Jira, with
-  `git config --type=bool dotfiles.jira.ignore true`. No Jira section is
+    checking sign-in          the backend's state check is running
+    fetching                  the first request is running
+    5m ago                    the age of the rows shown
+    5m ago, checking sign-in  the state check is running behind the rows
+                              shown
+    5m ago, refreshing        a request is running behind the rows shown
+    5m ago, refresh failed    the last request failed; its error is below
+    error                     the request failed and nothing is cached
+
+The count is the number of rows fetched, because none of the clients reports
+a total. A GitLab or GitHub section asks for 100 rows, so one showing `(100)`
+has met that cap; a Jira section fetches every page.
+
+Each backend is asked whether it is signed in before anything else is asked
+of it, and the dash does not hold the editor while it answers: the check
+reaches the network, so its sections read `checking sign-in` until the
+answer lands, and then show their rows, or, under the header,
+`<backend>: not signed in; run :Docket login <backend>` and the client's
+own output. One check serves every section of a backend. It runs in the
+clone the dash shows, as the rows do, so `r` after a `:cd` in the dash's tab
+still reports that clone's host. An answer that lands after a login for the
+same backend describes the account signed in before it, so it is not shown;
+the section reads `<backend>: a login ran while the state check was in
+flight, so its answer is not shown; refresh to ask again`.
+
+Rows are cached. The dash shows the cached rows the moment it opens, with
+their age, and fetches every section again behind them. `r` asks each
+backend's state again, then fetches again; an `r` while a section's request
+is running joins that request. The age is worked out when the buffer is
+drawn and nothing redraws it on a timer, so a dash left open shows the age
+it was last drawn with. A login clears every cached row, because the cache
+is keyed by query and not by account. Where the cache lives is
+|docket-setup-cache_dir|.
+
+A save, a state change or an assignment drops the cached rows of the item
+it changed, and the answer of every section request still running, since
+that answer can hold the item as it was. Such a section reports a failed
+request, as the table above shows one, with an error saying it was
+`dropped while the request was in flight`, and `r` asks again.
+
+A row the client returned without a status or a title is left out, and the
+section names it below its rows on a line starting `warning:`.
+
+A section that cannot run as configured says why under its header:
+
+- The clone is bound to no Jira project. One Jira section runs, titled with
+  `(unbound)` after its name: the first configured Jira section whose query
+  holds `assignee = currentUser()`, or failing that any `currentUser()`
+  clause. Its rows come from every project the account can see, and under
+  the header it prints the command that binds the clone and the one that
+  lists the project keys. `w` refuses there, for the reason |docket-work|
+  gives.
+- The clone is bound to no Jira project, and no configured Jira section is
+  scoped to the account, or its `<projects>` is joined to the rest by `OR`.
+  Nothing runs, because the search would cover every project the account can
+  see, and the section says which stopped it.
+- The clone is marked as having no Jira, |docket-binding|. No Jira section is
   shown.
-- The remote `origin` is on neither GitLab nor GitHub. No review section is
-  shown, and the header names the host.
+- The clone's binding cannot be read. A `Tickets` section carries git's
+  message.
+- `origin` is missing, or its host is neither GitLab nor GitHub. One `Reviews`
+  section says why: git's own message, or the host.
+- A backend has no account signed in. Each of its sections shows
+  `<backend>: not signed in; run :Docket login <backend>` and the client's
+  own output, and nothing is asked of that client. A client that is not
+  installed shows `<backend>: the client is not installed`.
 
-A backend with no account signed in puts `:Docket login <backend>` under each
-of its sections and asks nothing of it.
+Keys, named on the last line of the buffer:
 
-`<CR>` opens the row's item in the buffer |docket-item| describes, `w` builds
-the environment |docket-work| describes, from the key for a ticket and from
-the branch a merge request carries, and `r` refreshes every section. The dash
-buffer is wiped when it is hidden, so leaving it is closing it, and the next
-|:Docket| builds it afresh.
+    <CR>    opens the item on the cursor line, |docket-item|
+    w       builds its development environment, |docket-work|
+    r       asks each backend's state again, then fetches every section
+            again
+    R       builds a merge request's environment and opens its review,
+            |docket-review|
+
+Each of `<CR>`, `w` and `R` takes the row into the clone the dash shows:
+`<CR>` reads the merge request of that number there, and `w` and `R` make a
+worktree from a branch of the row's name on its `origin`. A section naming
+`glab` or `gh` as its adapter runs in every clone, |docket-setup-sections|,
+and `-R acme/payments` or `--repo acme/tools` in its query lists another
+project's rows, whose `!482` is not this clone's `!482` and whose branch
+names another's code here. So a row whose address names a project that
+none of the clone's remotes name is refused, and nothing is read, checked
+or built. `<CR>` on such a row reports >
+    !482 is acme/payments's, and the dash's clone is of acme/other, whose
+    !482 is another; :Docket !482 from a clone of acme/payments opens it
+<
+`w` reports >
+    !482 is acme/payments's, and the dash's clone is of acme/other, where a
+    branch of its name is another's code; w in the dash of a clone of
+    acme/payments builds it
+<
+and `R` >
+    !482 is acme/payments's, and the dash's clone is of acme/other, where a
+    branch of its name is another's code; R in the dash of a clone of
+    acme/payments reviews it
+<
+each followed by the clause the read's refusal ends with, |docket-item|: >
+    ; where origin spells this project another way -- an ssh URL without
+    the instance's path prefix, or the path the project had before a move
+    or a rename -- git remote set-url origin
+    https://gitlab.example.test/acme/payments.git makes the two agree
+<
+The clause is there because the compare cannot tell a clone of another
+project from one whose `origin` spells this project another way than the
+row's address does: on an instance served under a path prefix, which is in
+its https URLs and not in its ssh ones, a clone by the ssh URL has its own
+rows refused by each of those keys until `origin` is the URL named. The
+paths are compared without regard to case, and against every remote of the
+clone, so a row of `upstream`'s project listed in a fork's clone is the
+clone's own. A row whose address is not of the shape the backend's
+addresses take, a ticket, and a row in a dash whose clone names no project
+are held against nothing. A pull request row of another repository is
+refused by `w` and `R` the same way, as `#7 is acme/tools's`, and not by
+`<CR>`, which hands octo.nvim the address, |docket-item|.
+
+The buffer is named `docket-dash://` and is unlisted, so it is absent from
+`:ls` and from a buffer picker. It is wiped when it is hidden: leaving it
+closes it, and the next |:Docket| builds it afresh. When rows arrive the
+cursor stays on the row it was on. A saved session can restore an empty
+buffer of that name, and |:Docket| fills it.
 
 ==============================================================================
 COMMENTING ON AN ITEM                                            *docket-item*
 
-`:Docket PROJ-142` opens the ticket in a buffer named
-`docket://jira/PROJ-142`. `:e` in that buffer reads it again; on a buffer
-with unsaved edits `:e` refuses with `E37`, and `:e!` reads over them. The
-buffer is unlisted, so it is absent from `:ls` and from the buffer picker;
-`:Docket PROJ-142` returns to it, and `:ls!` lists it. The buffer is a
-rendered document:
+`:Docket PAY-1234` opens a Jira ticket, and `:Docket !482` a GitLab merge
+request of the clone the editor is in, each in a buffer named after it:
+`docket://jira/PAY-1234`, and `docket://glab/acme/payments/!482`, where
+`acme/payments` is the project's path on its host, read off the clone's
+`origin` remote. GitLab numbers merge requests within a project, so `!482`
+opened from clones of two projects is two merge requests, and the path in
+the name keeps them in two buffers. Outside a clone, or in one whose
+`origin` names no project, `:Docket !482` opens nothing and reports >
+    !482: glab numbers its items within a project, and the editor's
+    directory names none; :tcd into a clone of the project and run
+    :Docket !482 again
+<
+followed by the reason: git's own message where `origin` is missing, or
+`origin is <url>, which names no project`.
+
+`<CR>` on a row of the dash opens the item from the clone the dash shows,
+where the row was fetched, whatever folder the tab is in by then, and the
+buffer is named after that clone's project. A row whose address names a
+project none of the clone's remotes name is refused instead, |docket-dash|.
+A section naming `glab` as its adapter is shown in every clone,
+|docket-setup-sections|, so its rows can be in a dash whose clone has no
+project: `<CR>` there opens nothing and reports >
+    !482: glab numbers its items within a project, and /home/me/src/tools,
+    the clone it is opened from, names none; :Docket !482 from a clone of
+    the project opens it
+<
+followed by the same reason.
+
+The name's project is read off `origin`, and `glab` picks the project it
+answers from the clone's remotes on its own; which remote it reads in a
+clone with `upstream` beside `origin` is unverified, |docket-backends|. So
+every read holds the answer against the name, and an answer whose project
+is not the name's is refused with nothing filled. With `origin` at
+`me/payments` and `glab` answering `acme/payments`'s `!482`, the report
+is >
+    docket://glab/me/payments/!482: glab answered !482 of acme/payments,
+    and the name, read off origin, says me/payments, so nothing is filled;
+    :Docket !482 from a clone whose origin is acme/payments opens that one
+    under its own name; where origin spells this project another way -- an
+    ssh URL without the instance's path prefix, or the path the project had
+    before a move or a rename -- git remote set-url origin
+    https://gitlab.example.test/acme/payments.git makes the two agree
+<
+The paths are compared without regard to case. The host is not compared,
+because the host an ssh `origin` names need not be the one the instance's
+web addresses carry. The second remedy is for a clone whose `origin` spells
+this one project another way than the instance writes it -- an ssh URL on
+an instance served under a path prefix, which is in its https URLs and not
+in its ssh ones, or the path the project had before it was moved or renamed
+-- where every read is refused this way until `origin` is the URL named: >
+    git remote set-url origin https://gitlab.example.test/acme/payments.git
+<
+An answer that names no project, because its address is not of the shape
+the read expects, is compared with nothing and fills the buffer;
+|docket-backends| says what shows that.
+
+A GitHub pull request opens in octo.nvim instead. `<CR>` on its row hands
+octo.nvim the address the row carries, as
+`:Octo https://github.com/acme/payments/pull/12` does, so the pull request
+opens as its own repository's on its own host, whatever folder the tab is
+in by then and whatever GitHub host octo.nvim is configured with; a row of
+another repository than the dash's clone is not refused, since the address
+names it. `:Docket #12` typed by hand carries no address, so the number
+goes alone, as `:Octo pr edit 12`, and octo.nvim takes the repository from
+the folder the editor is in. Whether the installed octo.nvim takes an
+address is not yet verified, |docket-backends|, which also covers a name
+typed by hand.
+
+The buffer is a rendered document:
 >
-    PROJ-142   In Progress   me   updated 2h ago
+    PAY-1234   In Progress   me   updated 2h ago
     # Retry backoff drops the last attempt
 
     The retry loop re-enters before the final
@@ -98,149 +305,821 @@ rendered document:
     me   yesterday
     Fix is in review.
 <
-The first line is the key, the state, the assignee and when the item last
-changed; `me` stands for the account signed in. The description follows the
-title, and each comment follows an author line naming who wrote it and when.
+The first line is the identifier, the state, the assignee and when the item
+last changed; `me` stands for the account signed in, and `unassigned` for no
+assignee. The title follows, then the description, then each comment under a
+line naming its author and when it was written. A time reads `just now`,
+`5m ago`, `2h ago`, `yesterday` or `3 days ago`, and from thirty days back
+it is the date in UTC, as `2026-08-12`.
 
-Nothing in the text says where a region begins. The description and each
-comment are one region each, and an editable region's lines are highlighted
-with |hl-DocketEditable|. The header, the title and each author line sit
-outside every region, and an edit to them is never sent.
+The description and each comment are one region each, and nothing in the
+text shows where a region begins. docket tracks each region with a mark, an
+extmark in neovim's terms: a range attached to the lines, which grows and
+shrinks as lines inside it are added or deleted. The lines of an editable
+region are highlighted with |hl-DocketEditable|. The first line, the title
+and each author line are outside every region. An edit to them is never
+sent, and while one is in the buffer a save is refused, |docket-save|.
 
-A region is editable when the following hold:
+A region is editable when these hold:
 
 - the account signed in wrote it, or it is the description; and
-- its body is plain paragraphs. Jira returns a body as a document tree and
-  takes one back as text, so a body carrying a link, bold, a mention, a list,
-  a heading, a code block or a table would be replaced by its flattened form
-  on a write. Such a region is read-only whoever wrote it, and the reason
-  names the first node that made it so.
+- on Jira, its body is plain paragraphs. Jira returns a body as a document
+  tree, Atlassian Document Format, and docket writes back only paragraphs,
+  line breaks and unformatted text, so a body holding a link, bold or other
+  formatting, a mention, an emoji, a list, a heading, a code block, a table
+  or a panel would lose it on a write. A GitLab body is Markdown and is
+  written back exactly as it reads, so any region the account wrote is
+  editable there.
 
-Most comments carry a mention and most descriptions a heading or a list, so
-much of a real ticket is read-only here and edited on the web: `gx` opens the
-item in the browser.
+A node is a block or an inline element of that document tree, such as a
+paragraph, a list, a mention or a run of text. Jira calls the formatting on
+a run of text, such as bold or a link, a mark; that is Jira's word, and a
+different thing from the mark docket tracks a region by.
 
-A thread longer than the page the client returns shows that page and a line
-at each end saying how many comments are not shown there; `gx` reaches the
-rest.
+An edit to a read-only region is refused when the buffer is saved, with the
+region's reason, which ends `gx opens it on the web`: `written by ana`, or
+the first node or Jira mark that made the body read-only, as in >
+    carries a bulletList node, which a write would replace by its
+    flattened text; gx opens it on the web
+<
+or `carries a text node with a strong mark` and the same ending.
 
-With the account's own identifier unknown -- the client answers it from a
-work item assigned to or reported by the account, so an account with neither
-gets no answer -- every comment is read-only, and the message says to assign
-the account one work item. The description stays editable.
+Most Jira comments carry a mention and most descriptions a heading or a
+list, so much of a real ticket is edited on the web.
 
-In this build `:w` sends nothing: it reports each region that would be
-refused or skipped, says how many regions hold edits, and leaves the buffer
-modified with its text intact. With nothing changed it reports that.
+What a region cannot write back still renders for reading: formatting, a
+list or a heading in the shape Markdown gives it, as `**bold**` or
+`[text](address)`, and a node docket does not know as `[unsupported: <type>]`
+with its text beneath, so nothing is dropped from the buffer.
 
-Completion is not part of this build. `<C-x><C-o>` falls back to neovim's own
-omni completion, which has nothing to offer here.
+A Jira thread arrives one page at a time. When the page holds fewer comments
+than the thread, a line where the rest would be says how many are missing, as
+`40 of 54 comments not shown; gx opens it on the web`. The comments shown are
+ordinary regions.
+
+The account's own identifier is what tells its comments apart, and on Jira it
+comes from a work item assigned to or reported by the account. With neither,
+the item still opens and every comment is read-only; the message ends
+`Assign it one work item and open the item again`. The description stays
+editable. `<leader>da` in the item's buffer, choosing `me`, assigns that
+item to the account, and the buffer is read again after it, which asks for
+the identifier again; assigning any work item to the account on the web and
+then `:e` does the same.
+
+`gx` opens the item in the browser. On Jira the address needs the site, which
+is learnt from the first exchange with `acli`, so `gx` before any item or
+list has been read reports
+`the Jira site is not known until an item or a list has been read`, and `:e`
+reads the item, which names the site.
+
+`:e` reads the item again. On a buffer with unsaved edits `:e` refuses with
+`E37: No write since last change (add ! to override)`, and `:e!` discards
+the edits and reads it. `:Docket PAY-1234` on such a buffer switches to it
+without reading, and says so. A merge request is read again from the clone
+its text came from, whatever folder the current tab is in, so `:e` and `:e!`
+never replace it with another project's `!482`.
+
+The buffer is unlisted, so it is absent from `:ls` and from a buffer picker;
+`:Docket PAY-1234` returns to it, and `:ls!` lists it. It is hidden rather
+than closed when left, so an unsaved comment survives a switch to another
+buffer. A saved session restores it empty, with nothing read: `:w` there
+reports `nothing loaded in this buffer; :e reads the item`, and `:e` reads it.
+
+A merge request's buffer with nothing read -- one a session restored, one
+whose last read failed, or a name typed by hand -- has no clone to go back
+to, so `:e` reads it by its number from the clone the tab's directory is in,
+and only when that clone's project is the one in the name, the two paths
+compared without regard to case. In a clone of another project it is
+refused with >
+    docket://glab/acme/payments/!482: the editor is in a clone of
+    acme/other, whose !482 is another; :e reads this one from a clone of
+    acme/payments
+<
+and outside any clone with >
+    docket://glab/acme/payments/!482: :e reads it only from a clone of
+    acme/payments, and the editor's directory names no project; :tcd into
+    a clone of acme/payments and :e again
+<
+followed by git's own message. A name that carries no project,
+`docket://glab/!482`, is refused with >
+    docket://glab/!482 names no project, and glab numbers its items
+    within one; :Docket !482 opens it from a clone of its project
+<
+
+                                                                 *docket-save*
+Saving~
+
+`:w` compares each region's text now with its text as it was read. A line
+added below a region's last line -- with |o| on that line, |:put|, or |p|
+of whole lines as |yy| and |dd| leave them, |linewise-register| -- joins
+the region, and so does a line opened above its first line and text
+typed on the blank line after its last, with or without <CR>. Blank lines
+at either end of a region are ignored, so a blank line that joined it is
+not an edit. A |:sort|, a |!| filter, |J|, |gq| or |:m| over a region's own
+lines sends them as they then stand.
+
+Each message below starts with what it is about: `body` for the
+description, the comment's identifier for a comment, `new` for a new
+comment, |docket-comment|, and `outside the regions` for the text around
+them. Then:
+
+- An edit in a read-only region refuses the whole save before anything is
+  sent, with `<region>: refused:` and the region's reason, so a save never
+  half-succeeds around it. Text typed on the blank line after another
+  account's comment joins that comment, and is refused as an edit to it.
+- A region emptied of text is skipped and reported as
+  `<region>: empty; nothing sent`. Emptying a comment does not delete it;
+  `gx` opens the item on the web, where a comment is deleted. With nothing
+  else sent, the buffer stays modified. When another region is sent and
+  every call succeeds, the read after the save puts the emptied region's
+  text back; when that read fails, the region is left empty and the buffer
+  unmodified, and `:e` puts the text back. Lines typed or put where an
+  emptied region's lines were join it again, so putting the same lines
+  back is not an edit.
+- The first line, the title, the author lines and any line no region
+  reaches are never sent, so a save that finds that text changed is
+  refused whole. Text typed, put or moved there is named by its line, as
+  `line <n>, "<text>", is outside every region`, and a line of it deleted
+  or moved into a region as `"<text>" is no longer outside the regions`.
+  Line breaks and spaces there are not compared, so an author line joined
+  to a region by `J` or `gq` is not an edit there. Text typed where the
+  two lines met -- at the end of the author line's words, or after the
+  space `J` put there -- is the author line's, and refuses the save as
+  `line <n>, "me   yesterdayX", is outside every region`; text typed at
+  the start of the comment's first line before the join, or a line opened
+  above it, is the comment's and is sent. `u` undoes the edit and clears
+  the refusal.
+- A `:sort` or a `:m` across a region's boundary, into an author line, the
+  title or another region, can leave two regions running into each other
+  or a region's first line below its last. Which lines are whose is then
+  unknown, and the save is refused with `its text runs into <other>'s` or
+  `an edit moved its first line below its last`. `u` undoes the edit.
+- A region whose mark is no longer in the buffer refuses the whole save.
+  A typed edit never removes a mark; a call that deletes the buffer's
+  extmarks does, such as
+  `:lua vim.api.nvim_buf_clear_namespace(0, -1, 0, -1)`. The message has a
+  line for each such region, `<region>: refused:` followed by >
+    its mark is gone; yank the text, then :e! reads the item again
+<
+  and the text is yanked first because `:e!` discards every edit in the
+  buffer.
+- With nothing changed in the regions or around them, the save reports
+  `nothing changed` and marks the buffer unmodified.
+
+Before it replaces the description or a comment, the save reads the item
+again and compares each field it is about to replace with what was loaded:
+the description by its text, and a comment by the time it was last edited,
+or by its text where the client gives no such time. What is compared is the
+field being replaced, not the item's own update time, which moves whenever
+anyone comments. The description is also judged again as the first read
+judged it, since formatting added on the web to words already there leaves
+its text the same, and one no longer editable is reported as `body: now`
+followed by its reason, as >
+    body: now carries a text node with a textColor mark, which a write
+    would replace by its flattened text; gx opens it on the web
+<
+When one of those fields has changed, gone or turned read-only, nothing at
+all is sent, the buffer stays modified, and the message names each region
+concerned and ends: >
+    Yank each region named to keep its text; :e! then reads the item
+    again, discarding every edit in this buffer.
+<
+A read that fails sends nothing either, and the message carries the client's
+words. A save that only posts a new comment replaces nothing and skips the
+check.
+
+Then each changed region is sent, one call at a time: each changed comment
+of the account's own, then the description, then the new comment. On Jira
+each is sent as a document built from the text -- a blank line starts a new
+paragraph and a single line break stays a line break -- because plain text
+posted to Jira comes back as one paragraph. On GitLab each is sent as the
+Markdown it holds, with the line ending it arrived with: a body whose every
+line break is CRLF shows no `^M` in the buffer and is sent back with CRLF,
+and one holding LF, or both endings, is sent with LF. A call that fails does
+not stop the calls after it. The
+message has a line per region: `body: written`, `10002: written`,
+`new: posted as 10045`, or the region and the client's own words.
+
+When any call succeeded, the rows the dash cached for the item are dropped
+and the item is read again. Once every call has succeeded and nothing was
+typed while they ran, the buffer is drawn afresh from that read and is
+unmodified. Otherwise it keeps its text, and each region that was written
+counts as saved, so `:w` again sends only what failed and what was typed
+since; the buffer stays modified when a call failed or text was typed
+meanwhile. Each region written is judged again from that read as the first
+read judged it, so one the backend gave back holding a node a write cannot
+carry turns read-only rather than being flattened by the next save. Text
+typed into the new comment while it was posted goes as an edit to the
+comment it became. When the read could not name that comment, its region is
+read-only, |docket-comment|, and the message says to yank what was typed
+into it before `:e!`. When the read itself fails, the buffer keeps what was
+sent and the message says so. A second `:w` before that read has landed is
+refused with
+`<buffer>: a write is still in flight; :w again once it reports`, where
+`<buffer>` is the buffer's name, as `docket://jira/PAY-1234`.
+
+                                                              *docket-comment*
+A new comment~
+
+`<leader>dc` opens a new comment at the end of the thread: an author line
+reading `me   not posted`, and an empty line under it, where the cursor goes.
+Opening one does not mark the buffer modified, and one left empty is skipped
+by `:w`. There is one new comment at a time; `<leader>dc` again moves the
+cursor to the one already open, or opens it afresh when its line was
+deleted.
+
+`:w` posts it and then reads the item again, because the client answers a
+post with no identifier: the read is what names the comment it became, as
+the last new comment by the account signed in that holds the text sent.
+When none holds exactly that text and the account has one new comment, that
+one is taken, and the message adds a line ending
+`it reads back differently from what was sent; gx shows it on the web`.
+The save finishes when that read lands. When the read fails, the comment is
+on the item all the same, and its region turns read-only with the reason >
+    posted; the comment it became is known once the item is read again:
+    :e reads it when nothing is unsaved, and otherwise yank what to keep
+    before :e!
+<
+so that `:w` cannot post it a second time. `<leader>dc` is refused until the
+item has been read again.
+
+A post whose client was killed at its timeout may have reached the item, so
+the read looks for it all the same. Found, the message reads
+`new: posted as <id>; the client was killed at its timeout after sending it`.
+Not found, the message says whether it was posted is unknown, and the region
+is held read-only under the reason above rather than posted again. `gx`
+shows whether the comment is on the item; when it is not, yank its text
+before `:e`, which reads the item and takes the region away, and post it
+again from `<leader>dc`.
+
+                                                           *docket-completion*
+Completion~
+
+An item buffer completes a reference to another item or a person, straight
+after a trigger:
+
+    @ana      a person, by what follows `@`: letters, digits, `.`, `_` and
+              `-`; the completion keeps the `@`
+    !48       a merge request, by the digits after `!`
+    PAY-1     a Jira key: an uppercase letter, then one or more uppercase
+              letters or digits, a hyphen, and any digits
+
+A trigger counts at the start of a line or after a character that cannot be
+part of a word, so an address such as `ana@example.com` and a sentence ending
+`done!` hold none. `<C-x><C-o>` asks for the list, and mini.completion, the
+completion plugin this configuration sets up, asks by itself after a pause in
+typing. Either way, text that ends in no trigger asks the client nothing and
+opens no menu, and neither does a trigger the backend has nothing for. An
+answer is kept for a minute, so a character typed and erased asks nothing
+new.
+
+Jira offers keys and GitLab offers merge requests, each from the rows the
+dash listed in this editor session, and GitLab offers people as well;
+|docket-backends| says where each comes from. Jira offers no people, because
+a mention cannot be written from the buffer: a Jira mention is a node
+carrying an account identifier, and a save writes plain paragraphs, so a
+completed `@ana` would post as the plain text `@ana`.
+
+                                                                *docket-state*
+Changing state and assignee~
+
+`<leader>dt` in an item buffer asks the client which states the item can be
+moved to, offers them in a picker, and applies the one chosen.
+
+                                                               *docket-picker*
+A picker is the list |vim.ui.select()| opens. neovim's own prints the
+entries numbered and asks for one: the entry's number and <CR> choose it,
+and <Esc>, `q` or <CR> alone choose nothing. A plugin can replace it with a
+list and keys of its own, and `:lua =debug.getinfo(vim.ui.select).source`
+names the file the one in use comes from. With nothing chosen, nothing
+changes.
+
+On Jira the picker lists the statuses seen among one page of the project's
+most recently updated work items, sorted by name, because `acli` cannot list
+the transitions a work item offers. A status the workflow does not allow
+from where the item is, or one that needs fields filled in first, fails with
+`acli`'s own message, and the report ends `gx opens the item on the web`,
+which is where such a transition is made.
+
+On GitLab it offers Approve, Merge and Close for an open merge request,
+Reopen for a closed one, and nothing for a merged one. Merge with a pipeline
+running sets the merge request to merge when the pipeline passes, so the row
+stays `opened` until it does.
+
+`<leader>da` reads the item and offers, in a picker, `me`, `nobody`, and each
+person the item names -- its assignee, its reporter and each comment's
+author -- with the current assignee marked `(assigned)`. No one else is
+offered, on either backend: `acli` has no command that looks a person up,
+and a Jira account identifier is not something anyone types. The item is
+left with the one assignee chosen, or with none.
+
+After either succeeds, the rows the dash cached for the item are dropped and
+the buffer is read again, so its first line shows the new state or assignee.
+A buffer holding unsaved edits is not read into, and the message says its
+first line shows the item as it was read until `:w` or `:e!` settles them.
+
+                                                              *:Docket-create*
+Creating a ticket~
+
+`:Docket create PAY` opens a draft of a new ticket in the Jira project `PAY`,
+in a buffer named `docket-new://jira`: >
+
+    Project: PAY
+    Type: Task
+    Summary:
+    Assignee:
+
+<
+The header runs to the first blank line, and everything after it is the
+description. Project, Type and Summary are required. Assignee takes `me`,
+`nobody` or the email address of a person's Atlassian account, which `acli`
+takes in place of the account identifier; left empty, the choice is Jira's.
+With no project named, `:Docket create` takes it from the Jira ticket in the
+current buffer, or from the clone's binding when that names one project,
+|docket-binding|, and leaves it empty otherwise. The cursor starts at the
+end of the Summary line.
+
+`:w` creates the ticket and puts its item buffer where the draft was, so
+`<leader>dw` is the next keystroke. The draft cannot be edited while the
+client works, and a second `:w` meanwhile is refused. A create the client
+refuses leaves the draft as it was, still modified, under the client's own
+words; `:e!` starts the draft afresh. `:Docket create` while a draft holds
+unsaved text switches to it rather than starting another.
+
+When `acli` reports the ticket created but prints no key docket can read,
+or is killed at its timeout, the ticket exists or may exist, and creating
+it again could make a second one. The message says so and prints the
+`acli jira workitem search` command that lists the project's newest work
+items. The buffer stops being a draft and is marked unmodified: `:w` there
+reports `nothing to create in this buffer; :Docket create starts a ticket`.
+Its text stays for copying until `:e` or `:Docket create` replaces it with
+a fresh draft.
 
 ==============================================================================
 WORKING ON AN ITEM                                               *docket-work*
 
-`<leader>dw` in an item buffer builds the development environment for the
-ticket: the worktree through `git wt-add`, this repository's own git
-subcommand that adds a worktree to a bare clone, on a branch made from the
-key and the summary, then two tmux windows named after the branch -- one
-running neovim and a companion shell with `-sh` appended. A second
-`<leader>dw` on the same ticket lands in the windows already made.
+`w` on a row of the dash, or `<leader>dw` in a Jira ticket's buffer, builds
+the item's development environment: a worktree through `git wt-add`, the
+dotfiles' command that adds a worktree to a clone made by `git wt-clone`,
+then two tmux windows named after its branch -- one running neovim, and a
+companion shell whose name ends `-sh` -- with focus on the editor's window.
+Choosing the same item again lands in the windows already there.
 
-The branch is the key, a hyphen, and the summary lowercased with every run of
-characters outside `a-z0-9` collapsed to one hyphen and the ends trimmed,
-capped at sixty characters: `PROJ-142-fix-race-in-flush`. The window name
-collapses everything outside `A-Za-z0-9_-` to one hyphen.
+The launcher runs git and tmux one step after another, holding the editor
+until they finish. `git wt-add` fetches when the branch is not known locally
+and `git ls-remote` asks the remote, so a line naming the item and how long
+the editor may wait is drawn first. That wait is at most the `git` entry of
+|docket-setup-timeouts| for each command; at the timeout `git wt-add` and
+the `git fetch` it started are ended together.
 
-The launcher runs inside a clone the ticket belongs to, and the clone has to
-be bound to its Jira project first: >
+The branch~
 
-    git config --add dotfiles.jira.project PROJ
+For a ticket the branch is made from its key and summary: the key, a hyphen,
+and the summary lowercased with every run of characters other than `a-z` and
+`0-9` turned into one hyphen and the ends trimmed, the whole capped at sixty
+characters without cutting into the key. Summary "Fix race in flush" on
+`PAY-142` gives `PAY-142-fix-race-in-flush`. A letter outside `a-z`, such as
+`é`, is treated as punctuation. A worktree whose branch already starts with
+the key and a hyphen is reused, so a summary edited later does not make a
+second one.
 
-`acli jira project list` prints the keys. In a clone bound to no project the
-launcher refuses, because the rows then come from every project the account
-can see and a worktree here could be for another repository's ticket. In a
-plain clone, one not made by `git wt-clone` -- the repository's command that
-clones into the bare layout worktrees hang off -- `git wt-add` refuses and its
-message names `git wt-clone`.
+A ticket's worktree is made only in a clone bound to the ticket's project,
+|docket-binding|. In a clone bound to no project the launcher refuses and
+prints the command that binds it: the rows there come from every project the
+account can see, and a worktree for another repository's ticket would land in
+this one. A key from a project other than the ones bound is refused the same
+way, with the command that adds its project. A clone bound by a complete
+query is not checked.
 
-Each window is created with its name, which is what holds the name against
-tmux renaming it after the program in the pane, and `allow-rename off` is set
-on both as a guard against a tmux configuration that lets a program rename
-it. This checks that the name held: >
+For a merge request or a pull request the branch is its own source branch,
+which has to be on `origin`. In a clone of the project the row belongs to, a
+row from a fork is refused before `origin` is asked anything, because its
+branch lives in the fork: a branch of the same name on `origin` -- `main` or
+`patch-1`, say -- is somebody else's code, and so is a worktree already on
+one. `glab` lists a merge request with its source and target project ids,
+which differ for one from a fork, and `gh` lists a pull request with
+`isCrossRepository`, true for one from a fork. The refusal names the row and
+the branch: >
 
-    tmux display-message -p -t '=PROJ-142-fix-race-in-flush' '#{window_name}'
+    !482 comes from a fork, so origin's main is not its branch and no
+    worktree is made for it
+<
+In a fork's clone, whose rows are `upstream`'s, |docket-dash|, `origin` is
+itself a fork and holds the branch of every merge request made from it, so a
+row from a fork is not refused there.
 
-Away from tmux there is no terminal to open, so the launcher opens a tab of
-the running editor with its working directory at the worktree and prints the
-worktree path with the tmux commands that make the two windows, for pasting at
-a prompt of a shell already open. There is no companion shell in that state.
+For every row not refused a worktree already on the branch is reused as it
+is. Otherwise `origin` is asked whether it has the branch, and one it does
+not have is refused, because `git wt-add` would create a new branch of that
+name from the default one: >
 
-When the environment was made and a step after that failed -- an
-`allow-rename` that did not take, or a review command that did not run in the
-tab -- the message carries `warning:` beside the path. The environment is
-there; the warning is what did not take.
+    feature/x is not a branch on origin -- a merge request from a fork,
+    typically -- so no worktree is made for it
+<
+This is also what refuses a merge request whose branch was deleted after it
+merged. A merge request from a fork whose list lacked either project id,
+|docket-backends|, is not marked, and in a fork's clone a merge request from
+another fork is not refused above, so each is refused here only when
+`origin` has no branch of its name; one on `main` gets `origin`'s `main`.
+
+When `git wt-add` fails, its own message is shown. In a plain clone that
+message says to clone again with `git wt-clone`; everything else docket does
+works in a plain clone.
+
+Inside tmux~
+
+The window names are the branch with every run of characters other than
+`A-Za-z0-9`, `_` and `-` turned into one hyphen, because tmux reads `:` and
+`.` in a window name as separators: branch `feature/v2.1` gives windows
+`feature-v2-1` and `feature-v2-1-sh`. The report names the worktree, the
+branch and both windows: >
+
+    worktree /src/pay/PAY-1-fix on PAY-1-fix
+    tmux windows PAY-1-fix and PAY-1-fix-sh
+<
+Each window is named when it is created, which stops tmux renaming it after
+the program running in it, and `allow-rename off` is set on both, which stops
+a program renaming its own window where a tmux configuration would allow it.
+This prints the editor window's name when the naming held: >
+
+    tmux display-message -p -t '=PAY-1-fix' '#{window_name}'
+<
+When `allow-rename` could not be set the environment is still there, and the
+report adds a line starting `warning:` naming what did not take. A companion
+shell that exited at once is reported as closed.
+
+Away from tmux~
+
+tmux tells a program it runs inside it through `$TMUX`, and with `$TMUX`
+unset the launcher opens no window, even with a tmux server running
+elsewhere: a window created from outside lands in whichever session was used
+last, which is some other repository's. It opens a tab of the running editor
+instead and runs `:tcd` there, so that tab's file and search commands work in
+the worktree while the other tabs keep their directory. A tab already at the
+worktree is switched to rather than opened again. There is no companion
+shell.
+
+The report then prints the tmux commands that make the two windows, for
+pasting into a shell inside tmux. They are quoted so that fish, the shell
+the dotfiles make the login shell, and bash read them alike: >
+
+    tmux new-window -S -n 'PAY-1-fix' -c '/src/pay/PAY-1-fix' 'nvim'
+    tmux new-window -S -d -n 'PAY-1-fix-sh' -c '/src/pay/PAY-1-fix'
+    tmux set-option -w -t '=PAY-1-fix' allow-rename off
+    tmux set-option -w -t '=PAY-1-fix-sh' allow-rename off
+    tmux select-window -t '=PAY-1-fix'
+<
+Removing an environment~
+
+No docket command removes one. Run `:wall` in the environment's editor
+window first, because `kill-window` below stops that neovim without a chance
+to save. Then, from a shell in another window of the clone, close both
+windows and remove the worktree, in that order, because a window left in a
+removed worktree sits in a folder that no longer exists: >
+
+    tmux kill-window -t '=PAY-1-fix'
+    tmux kill-window -t '=PAY-1-fix-sh'
+    git wt-rm PAY-1-fix
+<
+`git wt-rm` prints `removed <folder>/` once the folder is gone. It refuses a
+worktree holding uncommitted work, and removes the folder but keeps a branch
+that is not merged; each refusal prints the command that overrides it.
+
+Away from tmux the environment is a tab of the running editor. Save its
+buffers with `:wall`, close the tab from inside it with `:tabclose`, then
+remove the worktree from a shell in the clone: >
+
+    git wt-rm PAY-1-fix
+<
 
 ==============================================================================
 REVIEWING CODE                                                 *docket-review*
 
-Not part of this build. `:Docket review <id>` reports that.
+`R` on a merge request row of the dash builds the environment `w` builds for
+its source branch, |docket-work|, and the editor window runs
+`nvim -c 'Docket review !482'` rather than plain `nvim`. Away from tmux the
+tab runs `:Docket review !482` itself, and the review reports on its own.
+`R` again lands in the windows, or the tab, already there without running the
+command again; `:Docket review !482` there returns to the review. A row of
+another project than the dash's clone is refused, |docket-dash|. `R` on a
+pull request row builds the same environment and opens the pull request in
+octo.nvim, and `R` on a ticket reports
+`PAY-142 is a ticket; R starts a review on a merge request`.
+
+A review is one batch, as it is in octo.nvim: a comment written on a line of
+the diff is held in the editor, nothing reaches the merge request until the
+review is submitted, and a review abandoned sends nothing. Held comments
+last as long as the editor: quitting it discards them.
+
+                                                              *:Docket-review*
+Opening a review~
+
+:Docket review {id}
+    Opens the review of a merge request, as `!482`, in the worktree the
+    current tab is in. It needs diffview.nvim, the diff plugin this
+    configuration installs, and says so in one line when it is missing. A
+    pull request, `#12`, opens in octo.nvim instead, and a Jira key is
+    refused, since Jira has no diff.
+
+The worktree has to be on the merge request's source branch, because the
+diff is that branch's change against the branch it merges into, the
+target: >
+    :DiffviewOpen origin/<target>...HEAD --imply-local
+<
+`...` diffs HEAD against its merge base with the target, and `--imply-local`
+shows the new side as the worktree's own files, so a language server works
+there. The diff opens in a tab of its own. Outside a worktree, on another
+branch, or with no merge base between HEAD and `origin/<target>`, the command
+refuses and says which; the last names the `git fetch` that brings the
+target branch in.
+
+Each discussion already on the merge request is drawn under the line it
+belongs to, with each note's author and text and whether the thread is
+resolved. The notes GitLab writes itself -- a status change, a force-push, a
+label edit -- are left out. A discussion placed on another version of the
+diff than the one shown, such as a thread whose line a later push changed,
+is drawn at no line, because its line numbers are that version's; the merge
+request's page shows it. The report's first sentence counts the
+discussions, how many are on lines of the diff, how many are on another
+version when any are, and the comments held: >
+    !482: 3 discussion(s), 1 on lines of the diff, 1 on another version
+    of it; 0 comment(s) held.
+<
+GitLab places a comment on a line against the merge request's newest
+version, so a line numbered here is the right one only while the worktree
+matches that version. The report adds a warning when the worktree has
+uncommitted changes, naming `git -C <worktree> status --short`; when HEAD is
+not the merge request's head, naming the `git pull --ff-only` that brings it
+there; and when the merge base is not GitLab's, naming the `git fetch` that
+corrects it. After a pull or a fetch, `:Docket review !482` opens the review
+again.
+
+Run again, `:Docket review !482` reads the merge request again and returns
+to the review's tab, and when HEAD has moved since the diff opened it opens
+the diff again on the new HEAD.
+
+Closing the diff's tab keeps the review. `:DiffviewClose`, which this
+configuration maps to `<leader>gdc`, or `:tabclose` in that tab leaves every
+held comment held, and `:Docket review !482` opens the diff again with them
+drawn. The verbs below, `abandon` among them, run only in the diff's tab, so
+abandoning a review whose diff is closed starts with `:Docket review !482`.
+`abandon` is the only command that discards held comments; quitting the
+editor loses them too.
+
+                                                         *docket-review-verbs*
+The verbs~
+
+Each verb runs on the review in the current tab. `comment`, `reply` and
+`resolve` act on the line under the cursor, on either side of the diff. The
+keys are set on each buffer that shows a side of the diff while the review's
+tab is open, and come off when it closes.
+
+    :Docket review comment   <leader>dc   hold a comment on this line
+    :Docket review reply     <leader>dr   hold a reply to the thread drawn
+                                          at this line
+    :Docket review resolve   <leader>dx   resolve the thread drawn at this
+                                          line, at once
+    :Docket review submit    <leader>ds   send what is held,
+                                          |docket-review-submit|
+    :Docket review abandon                discard the review
+
+`comment` opens a floating window over the diff, holding a Markdown buffer
+and titled with the place, as `!482/lua/docket/env.lua:5`, or
+`!482/lua/docket/env.lua:old:5` on the old side; the buffer's name is
+`docket-review://`, the worktree's path, and the place. `:w` there holds
+its text as the comment at that line, closes the window and returns the
+cursor to the diff; nothing is sent. Each line of each side holds one
+comment: `comment` on a line that holds one opens it to change, and writing
+it empty drops it. `:q` closes the window and keeps the unwritten text for
+the next time that line is commented on; `:q!` discards it, and a comment
+already held there stays held as it was. A held comment is drawn under its
+line, marked `comment, not sent`.
+
+Before its window opens, a comment is refused on a new-side line while HEAD
+is not the merge request's head, on an old-side line while the merge base is
+not GitLab's, and in a file with unsaved changes or one that differs from
+HEAD in the worktree, since its lines are then not the merge request's. The
+refusal names what settles it: the pull or fetch above, `:e!`, or
+`git -C <worktree> stash`. A comment is also refused on a line the merge
+request's diff does not show, more than three lines from any change,
+because `glab` refuses one there and the submit would fail on it; and in a
+file of the worktree opened beside the diff rather than in it, with
+`the cursor is on no side of the diff`.
+
+`reply` offers the threads drawn at the line, in a picker, |docket-picker|,
+when there are several. A standalone comment, which GitLab lets nobody
+reply into, is not offered. The reply is written and held as a comment is,
+and is drawn under its thread, marked `reply, not sent`. A reply is placed
+by its thread rather than by a line, so it is held whatever version the
+worktree is at.
+
+`resolve` resolves a thread drawn at the line straight away rather than with
+the batch, since resolving is not a comment. It offers only a thread GitLab
+lets be resolved that is not resolved already, in a picker when there are
+several.
+
+`abandon` discards every held comment, closes the diff and sends nothing. It
+has no key, since what it discards cannot be brought back.
+
+                                                        *docket-review-submit*
+Submitting~
+
+:Docket review submit [approve] [summary]
+:Docket! review submit [approve] [summary]
+    Posts each held comment, one at a time in the order they were held,
+    then applies the verdict: `summary` posts a summary comment, and
+    `approve` then approves the merge request; with neither, the comments
+    are all that is sent. `summary` first opens a window titled
+    `!482/summary  :w submits the review`, whose `:w` submits with that
+    text. Written empty, it sends nothing, and the message names the
+    submit that sends the rest without a summary. `<leader>ds` is the form
+    with neither.
+
+The approval names the commit the diff shows, so GitLab refuses it when the
+merge request's head is another commit: after a push since the diff opened,
+or with the worktree behind the merge request.
+
+When any held comment is on a line, the submit first reads the merge request
+again. When its head or merge base has moved since a comment was held,
+nothing is sent, and the message lists those comments: bring the worktree to
+the new head, open the review again, and hold each at its new line, writing
+the old one empty to drop it. The `!` form skips that check and posts them
+at the same line numbers. Replies alone, or a verdict alone, need no check.
+
+The first comment that fails stops the batch: it and every comment held
+after it stay held, no verdict is applied, and the message carries `glab`'s
+own words and the merge request's address. `:Docket review submit` again
+sends what is still held. A comment that failed after GitLab had taken it --
+on a timeout, say -- is posted a second time by that retry, so check the
+merge request's page first. When the summary is posted and the approval then
+fails, the summary's window closes, since the summary is on the merge request
+already, and the message names `:Docket review submit approve`, which then
+approves alone.
+
+Every call a review makes runs in its worktree, whatever folder the current
+tab is in, |docket-backends|. After a submit that sent anything, the merge
+request's discussions are read again, so what was posted is drawn as
+discussions; `abandon` while that read runs discards the review and the
+read's answer with it. A submit and a resolve are refused in a tab whose
+working directory is outside the review's worktree, with the `:tcd` that
+moves the tab. While a submit runs, holding, dropping, abandoning and a
+second submit are refused.
+
+Not yet seen with a real diffview.nvim, each with what shows it:
+
+- The `origin/<target>...HEAD` range together with `--imply-local`. A review
+  reporting `diffview opened no tab` is the sign, and |:messages| holds
+  diffview's own reason.
+- Telling the old side from the new, and the diff from a file opened
+  beside it, both of which read diffview's internals. A comment on the old
+  side refused with `the cursor is on no side of the diff` is the sign
+  that they went unread; the new side is then found from the worktree's
+  files alone, and a file of the worktree opened beside the diff counts as
+  its new side.
+- Whether a discussion drawn on one side keeps the two sides aligned. Lines
+  of the two sides out of step below a drawn discussion are the sign.
+- Whether `:DiffviewClose` closes the review's tab, which `abandon` relies
+  on. The diff's tab still open after `abandon` reports is the sign; the
+  review is discarded all the same, and `:tabclose` closes the tab.
 
 ==============================================================================
 SETUP                                                           *docket-setup*
 
-`init.lua` carries one call: >
+The configuration's `init.lua` calls setup once, after octo.nvim's own setup,
+so that the highlight groups can follow octo.nvim's, |docket-highlights|: >lua
 
-    require('docket').setup{}
+    require('docket').setup {}
+<
+The |:Docket| command, the `<leader>dd` map and the autocommands come from the
+plugin itself, so `setup{}` carries options alone. It also writes the help
+tags beside this file whenever they are older than it, and reports once when
+it cannot, |docket-health|.
 
-Every option, with its default:
+Each option is a key of the table given to `setup{}`. An option that is a
+table merges over its default key by key, so
+`setup { timeouts = { tmux = 1000 } }` keeps the other timeouts. `sections`
+is a list and replaces the default list whole.
 
                                                        *docket-setup-sections*
 sections~
-    The dash's sections, each a table of `title`, `adapter` and `query`. The
-    list given replaces the default list whole. Type: list of tables.
-    A Jira section's `adapter` is `"jira"` and its `query` is JQL in which
-    `<projects>` is filled from the clone's binding; a review section's
-    `adapter` is `"review"` and its `query` is a table keyed `glab` and `gh`,
-    each the argument list for that client. The default: >
+    Type: list of tables. The dash's sections, in order. Each has:
 
-      { title = "All open tickets", adapter = "jira",
-        query = "<projects> AND statusCategory != Done"
-          .. " ORDER BY updated DESC" },
-      { title = "Assigned to me", adapter = "jira",
-        query = "<projects> AND assignee = currentUser()"
-          .. " AND statusCategory != Done ORDER BY updated DESC" },
-      { title = "Mine", adapter = "jira",
-        query = "<projects> AND reporter = currentUser()"
-          .. " AND statusCategory != Done ORDER BY updated DESC" },
-      { title = "Review requested", adapter = "review",
-        query = { glab = { "mr", "list", "--reviewer=@me" },
-                  gh = { "pr", "list", "--search",
-                         "review-requested:@me" } } },
-      { title = "My open reviews", adapter = "review",
-        query = { glab = { "mr", "list", "--assignee=@me" },
-                  gh = { "pr", "list", "--assignee", "@me" } } },
+      title     the header's text, a string
+      adapter   `"jira"` for tickets; `"review"` for merge requests or pull
+                requests through whichever client the host of `origin`
+                selects; or `"glab"` or `"gh"`, naming a client directly,
+                for a section shown in every clone whatever its remote;
+                a row of another project than the clone's is refused as
+                |docket-dash| says
+      query     for `"jira"`, a query in JQL, Jira's query language, where
+                `<projects>` stands for the clone's binding,
+                |docket-binding|; for `"review"`, a table keyed `glab` and
+                `gh`, each the arguments of that client's list command; for
+                `"glab"` or `"gh"`, those arguments alone. The client adds
+                its own page size and output format.
+
+    Default: >lua
+      {
+        { title = "All open tickets", adapter = "jira",
+          query = "<projects> AND statusCategory != Done"
+            .. " ORDER BY updated DESC" },
+        { title = "Assigned to me", adapter = "jira",
+          query = "<projects> AND assignee = currentUser()"
+            .. " AND statusCategory != Done ORDER BY updated DESC" },
+        { title = "Mine", adapter = "jira",
+          query = "<projects> AND reporter = currentUser()"
+            .. " AND statusCategory != Done ORDER BY updated DESC" },
+        { title = "Review requested", adapter = "review",
+          query = { glab = { "mr", "list", "--reviewer=@me" },
+                    gh = { "pr", "list", "--search",
+                           "review-requested:@me" } } },
+        { title = "My open reviews", adapter = "review",
+          query = { glab = { "mr", "list", "--assignee=@me" },
+                    gh = { "pr", "list", "--assignee", "@me" } } },
+      }
 <
                                                        *docket-setup-timeouts*
 timeouts~
-    Milliseconds a process is allowed before it is killed, one per kind:
-    `client` for a call to `acli`, `glab` or `gh`; `complete` for the
-    omnifunc, which holds the editor while it waits; `git` for `git wt-add`
-    and `git ls-remote`, which reach the remote; `tmux` for tmux. Type: table
-    of integers. Default: >
-
-        { client = 30000, complete = 2000, git = 60000, tmux = 5000 }
+    Type: table of integers, in milliseconds. How long each kind of process
+    may run before it is killed. Default: >lua
+      { client = 30000, complete = 2000, git = 60000, tmux = 5000 }
 <
+      client     a call to `acli`, `glab` or `gh`
+      complete   the lookup behind completion, which holds the editor
+                 while it waits
+      git        every git command, `git wt-add` and `git ls-remote`
+                 among them, which reach the remote
+      tmux       each tmux command
+
+    Every command is ended at its timeout together with every process it
+    started -- a client's update check, the `git fetch` that `git wt-add`
+    streams -- and reports `<command>: killed after <ms> ms without
+    exiting`, `<command>` being `acli`, `glab`, `gh`, `git` or `tmux`. The
+    processes are sent SIGTERM first, so that one that cleans up on it has
+    the chance -- git removes its lock files -- and SIGKILL a second later
+    for whatever ignored it. A command that exits while a process it
+    started still holds its output is reported at the timeout, not when
+    that process ends. A command the editor waits on -- a client's state
+    check outside the dash, its login, the completion lookup, and every git
+    and tmux command -- holds the editor for the timeout and no longer. A
+    command that another signal ended, as the system's memory killer does,
+    reports `<command>: killed by signal <n>`.
+
                                                            *docket-setup-jira*
 jira~
-    `site`, as `example.atlassian.net`, and `email`, for a machine where the
-    first login is not to prompt for them. Type: table of strings. Default:
-    `{}`, and the first login prompts; `acli` keeps both after it.
+    Type: table of strings. `site`, as `example.atlassian.net`, and `email`,
+    the Atlassian account's address, for a machine where the first Jira login
+    is not to prompt for them. Default: `{}`, and the first login prompts;
+    `acli` keeps both afterwards. Neither is in the tracked configuration,
+    because the site names the employer.
+
+                                                       *docket-setup-hostname*
+glab~
+gh~
+    Type: table of strings. `hostname`, the GitLab or GitHub host, for a
+    first login that is not to prompt for it. Default: none, and the login
+    prompts, offering the host the client last named, else `gitlab.com` or
+    `github.com`.
 
                                                       *docket-setup-cache_dir*
 cache_dir~
-    Where the dash caches rows. Type: string. Default:
-    `$XDG_CACHE_HOME/docket`, or `~/.cache/docket` when the variable is unset
-    or empty.
+    Type: string. Where the dash keeps its cached rows, as files readable by
+    their owner alone. Default: `$XDG_CACHE_HOME/docket`, or
+    `~/.cache/docket` when that variable is unset or empty.
+
+==============================================================================
+BINDING A REPOSITORY TO JIRA                                  *docket-binding*
+
+A clone is bound to its Jira projects in git's own configuration, from any
+folder of the clone: >
+
+    git config --add dotfiles.jira.project PAY
+<
+Repeat it for each further project. `acli jira project list --paginate`
+prints every project the account can see, with its key. In a clone made by
+`git wt-clone` the value lands in `.bare/config`, which every worktree of the
+clone reads, those made later included; in a plain clone it lands in
+`.git/config`. `git config --get-all dotfiles.jira.project` prints what is
+bound, and `git config --unset-all dotfiles.jira.project` clears it.
+
+The key is never guessed from the remote's name: a repository named
+`platform-utils` is not project `PLATFORM-UTILS`, and a query that silently
+returns nothing looks exactly like a missing login.
+
+These settings are read, and the first one set decides:
+
+  dotfiles.jira.jql       a complete JQL query, run as written in the first
+                          Jira section under that section's title; the other
+                          Jira sections are left out, since they differ only
+                          in the clause they add to `<projects>`
+  dotfiles.jira.project   one or more keys, which replace `<projects>` in
+                          every Jira section as `project IN (PAY, OPS)`
+  dotfiles.jira.ignore    `true` on a repository with no Jira, set with
+                          `git config --type=bool dotfiles.jira.ignore true`;
+                          no Jira section is shown
+
+With none of them set the clone is unbound, and the dash shows the account's
+own tickets from every project, |docket-dash|.
 
 ==============================================================================
 AUTHENTICATION                                                   *docket-auth*
@@ -248,142 +1127,510 @@ AUTHENTICATION                                                   *docket-auth*
                                                                *:Docket-login*
 :Docket login [{backend}]
 :Docket! login [{backend}]
-    Logs a backend in: `jira`, `glab` or `gh`. With none named, Jira and the
-    review client the clone's `origin` remote names. A backend already signed
-    in is left alone; the `!` form logs in again, which is how another account
-    is signed in. Each backend reports on its own.
+    Signs a backend in: `jira`, `glab` or `gh`. With none named, Jira, and the
+    review client the host of `origin` selects when the editor is inside a
+    clone. Each backend reports on its own.
 
-    The flow: what the client needs besides the token is prompted for -- the
-    site and the account email for Jira, the host for a review client -- then
-    the page where a token is minted is printed and offered to open, then the
-    token is prompted for with |inputsecret()| and handed to the client on its
-    standard input. It never reaches an argument list, a file, a shell history
-    or the process list. An empty answer at any prompt stops the flow with
-    nothing changed.
+    A backend already signed in is left as it is, and says so. The `!` form
+    signs in anyway: for another account, or for a token that has stopped
+    working while the state check still passes it. The `!` goes on the
+    command name; `:Docket login!` is read as an identifier and refused.
+
+    The login stops at each of these prompts:
+
+    1. Each value the client needs besides the token is taken from
+       |docket-setup| or asked for: the site and the account email for Jira,
+       the host for GitLab or GitHub.
+    2. The page where a token is minted is printed, and kept in |:messages|,
+       and `Open it?` offers to open it in the browser; the default is No.
+    3. The token is asked for with |inputsecret()|, which does not echo it,
+       and handed to the client on its standard input, so it never reaches
+       an argument list, a file, a shell history or the process list.
+
+    An empty answer or CTRL-C at any prompt stops with nothing changed.
 
     The token pages:
-        Jira    https://id.atlassian.com/manage-profile/security/api-tokens
-        GitLab  the host's own access-token page
-        GitHub  the host's own access-token page
 
-Nothing is stored by docket. Each client keeps its own credential store, and
-a token in the environment -- `GH_TOKEN`, `GITHUB_TOKEN` or `GITLAB_TOKEN` --
-makes the client report itself signed in, so `:Docket login` leaves that host
-as it is.
+      Jira     https://id.atlassian.com/manage-profile/security/api-tokens
+      GitLab   https://<host>/-/user_settings/personal_access_tokens
+      GitHub   https://<host>/settings/tokens
 
-A mode that meets a backend with no account signed in reports
+    A successful login clears every cached row of the dash and reports what
+    the client's status command prints, starting `<backend>: signed in`. A
+    failed one reports the client's own message.
+
+docket stores no credential. Each client keeps its own credential store, and
+octo.nvim reads `gh`'s, so one `gh` login serves both. A token in the
+environment -- `GH_TOKEN`, `GITHUB_TOKEN` or `GITLAB_TOKEN` -- makes its
+client report itself signed in, and `:Docket login` leaves that host as it
+is.
+
+A mode meeting a backend with no account signed in reports
 `<backend>: not signed in; run :Docket login <backend>` and the client's own
-output, and stops. A client that is not installed is reported as such, since
-a login cannot fix that.
+output, and stops. A client that is not installed is reported as
+`<backend>: the client is not installed`, since a login cannot fix that.
 
-A token without write permission fails at the first write with the client's
-own message.
+A token without write permission reads everything and fails at the first
+write, with the client's own message.
+
+Every mode asks the client for its state before anything else, and that
+check reaches the network. The dash asks without holding the editor, and
+each section reads `checking sign-in` until its backend answers,
+|docket-dash|. Opening an item or reading it again with `:e`, `:Docket
+create`, and opening a review or its `resolve` and `submit` hold the editor
+until the client answers, for at most the `client` entry of
+|docket-setup-timeouts|.
 
 ==============================================================================
 COMMANDS AND KEYMAPS                                         *docket-commands*
 
                                                                      *:Docket*
-:Docket                     the dash, |docket-dash|; `<leader>dd`.
-:Docket {id}                one item, by Jira key (`PROJ-142`) or merge
-                            request (`!482`), in the item buffer.
-:Docket login [{backend}]   |:Docket-login|.
-:Docket review {id}         a merge request's diff with its held comments. Not
-                            part of this build.
+:Docket                      the dash, |docket-dash|
+:Docket {id}                 one item: a Jira key such as `PAY-142`, a merge
+                             request such as `!482`, or a pull request such
+                             as `#12`, which opens in octo.nvim; |docket-item|
+:Docket create [{project}]   a draft of a new Jira ticket, |:Docket-create|
+:Docket login [{backend}]    signs a backend in, |:Docket-login|
+:Docket! login [{backend}]   signs it in again, for another account or a
+                             token that stopped working
+:Docket review {id}          a merge request's diff and its discussions,
+                             |:Docket-review|
+:Docket review {verb}        one of the review's verbs: `comment`, `reply`,
+                             `resolve`, `submit` or `abandon`,
+                             |docket-review-verbs|
+:Docket! review submit       submits without checking that the merge
+                             request is where the comments were held,
+                             |docket-review-submit|
 
-In an item buffer:
+<Tab> after `:Docket ` completes `create`, `login` and `review`; after
+`login`, the backend names; after `review`, the verbs; and after
+`review submit`, `approve` and `summary`.
 
-    gx              opens the item in the browser
-    <leader>dw      builds the development environment, |docket-work|
+Everywhere:
+
+    <leader>dd      the dash
 
 In the dash:
 
     <CR>            opens the item on the cursor line
-    w               builds the development environment for it
-    r               refreshes every section
-    R               starts a review on a merge request; not part of this build
+    w               builds its development environment, |docket-work|
+    r               fetches every section again
+    R               builds a merge request's environment and opens its
+                    review, |docket-review|
 
-Highlight groups. Each follows an octo.nvim group of the same role where
-octo.nvim was set up before `setup{}` ran and defines that group, and links to
-a built-in group otherwise; the octo.nvim names below are the ones followed
-where octo.nvim defines them. They are defined at `setup{}` and again after
-every colour scheme change. The state groups are read off the state's name by
-the words it holds, so a name holding one of them as part of a longer word is
-coloured by that word.
+In an item buffer:
+
+    gx              opens the item in the browser
+    <leader>dw      builds the ticket's development environment
+    <leader>dc      opens a new comment at the end, |docket-comment|
+    <leader>dt      moves the item to another state, |docket-state|
+    <leader>da      assigns the item, |docket-state|
+    <C-x><C-o>      completes an item or a person, |docket-completion|
+    :w              sends the regions that changed, |docket-save|
+    :e              reads the item again; `:e!` discards unsaved edits
+
+In a new ticket's draft:
+
+    :w              creates the ticket, |:Docket-create|
+    :e!             starts the draft afresh
+
+On each side of a review's diff, while the review's tab is open:
+
+    <leader>dc      holds a comment on this line
+    <leader>dr      holds a reply to the thread drawn at this line
+    <leader>dx      resolves the thread drawn at this line
+    <leader>ds      submits the review, |docket-review-submit|
+
+In a review's comment or summary window:
+
+    :w              holds the comment, or submits with the summary; written
+                    empty, drops the comment held there
+    :q              closes the window and keeps the text for next time
+    :q!             closes the window and discards the text
+
+==============================================================================
+HIGHLIGHT GROUPS                                           *docket-highlights*
+
+docket defines these groups at |docket-setup|, and again after every colour
+scheme change, which clears them. Each links to the octo.nvim group named
+beside it when octo.nvim has been set up by then and defines that group, so
+that docket's buffers look like octo.nvim's; otherwise it links to the
+built-in group after it.
 
                                                            *hl-DocketEditable*
-DocketEditable          the lines of an editable region; `OctoEditable`, else
-                        |hl-NormalFloat|
+DocketEditable          the lines of an editable region;
+                        `OctoEditable`, else |hl-NormalFloat|
                                                                *hl-DocketUser*
-DocketUser              the assignee and each comment's author; `OctoUser`,
-                        else |Identifier|
+DocketUser              the assignee and each comment's author;
+                        `OctoUser`, else `Identifier`
                                                               *hl-DocketLabel*
-DocketLabel             a state whose name holds none of the words below;
-                        `Label`
+DocketLabel             a state no rule below places;
+                        `OctoBubble`, else `Label`
                                                           *hl-DocketStateOpen*
-DocketStateOpen         a state whose name holds open, to do, new or backlog;
+DocketStateOpen         a state not yet started, or open;
                         `OctoStateOpen`, else |hl-DiagnosticOk|
-                                                        *hl-DocketStateClosed*
-DocketStateClosed       a state whose name holds closed, done, resolved or
-                        cancel; `OctoStateClosed`, else |hl-DiagnosticError|
-                                                        *hl-DocketStateMerged*
-DocketStateMerged       a state whose name holds merged; `OctoStateMerged`,
-                        else |hl-Special|
                                                        *hl-DocketStatePending*
-DocketStatePending      a state whose name holds review, pending, progress or
-                        blocked; `OctoStatePending`, else |hl-DiagnosticWarn|
+DocketStatePending      a state in progress;
+                        `OctoStatePending`, else |hl-DiagnosticWarn|
+                                                        *hl-DocketStateClosed*
+DocketStateClosed       a state finished or closed;
+                        `OctoStateClosed`, else |hl-DiagnosticError|
+                                                        *hl-DocketStateMerged*
+DocketStateMerged       a merged merge request or pull request;
+                        `OctoStateMerged`, else `Special`
+
+A Jira status is placed by its status category, Jira's own grouping of every
+workflow's statuses, because a status's name is the workflow's own word and
+reads differently in every project:
+
+    category       key              group
+    To Do          `new`            DocketStateOpen
+    In Progress    `indeterminate`  DocketStatePending
+    Done           `done`           DocketStateClosed
+
+A GitLab or GitHub state is one of the client's fixed words: `opened` and
+`open` are DocketStateOpen, `closed` is DocketStateClosed, and `merged` is
+DocketStateMerged. `draft`, which docket shows for a draft, and GitLab's
+`locked` are DocketLabel. A Jira status that arrives with no category is
+placed by those same words, so it is DocketLabel unless its name is one of
+them.
+
+In a review's diff, |docket-review|, each note's author is DocketUser, a
+thread's `resolved` is DocketStateOpen and its `unresolved`
+DocketStatePending, the line heading a held comment is DocketLabel, and the
+text of every note and held comment is drawn in the built-in `Comment` group.
 
 ==============================================================================
 WHAT EACH BACKEND SUPPORTS                                   *docket-backends*
 
-Jira, over `acli`~
+Jira, through acli~
 
-    An item and its thread arrive in one `view` call. Comments are read
-    through `view` and never through `comment list`, because `comment list`
-    reports an author as a display name with no account identifier, and the
-    account identifier is the ownership test.
+    Rows, the item buffer, saving, completion of keys, changing state,
+    assigning, and creating a ticket. No diff, no discussions and no review.
+    Writes go through `acli jira workitem`: `comment create`,
+    `comment update`, `edit`, `transition` and `create`.
+
+    An item and its whole thread arrive in one `acli jira workitem view`
+    call. Comments are never read through `comment list`, whose author is a
+    display name with no account identifier, and the account identifier is
+    what decides who wrote a comment. The account's own identifier comes
+    from a search, since `acli` prints none and has no user command: the
+    assignee of any work item assigned to the account, or failing that the
+    reporter of any it reported. It is asked once per editor session, and
+    again after a login.
+
+    A section's search walks every page.
 
     Transitions cannot be listed: `acli` sets a status by name and has no
-    command that says which statuses an item offers, so a status is named
-    from the ones seen across the project's own rows, and one the workflow
-    refuses surfaces `acli`'s error.
+    command naming the statuses a work item can move to, so |docket-state|
+    offers the statuses seen among one page of the project's most recently
+    updated work items.
 
-    A mention cannot be written from the buffer. `acli jira` has no user
-    command to resolve a name to the account identifier a mention carries, so
-    a region holding one is read-only and a comment that needs one is written
-    on the web.
+    Completion offers keys, from the rows the dash's Jira sections returned
+    in this editor session, matched from the start and ignoring case. It
+    offers no people: a Jira mention is a node carrying an account
+    identifier, which the buffer cannot write and `acli` cannot look up, so a
+    comment that needs a mention is written on the web.
 
-GitLab, over `glab`~
+    Not yet run against a real instance, each with what shows it:
 
-    Not part of this build. Every verb in `glab mr note` is marked
-    experimental by `glab`, and `glab api` against the `discussions` endpoint
-    is the fallback for any that does not hold.
+    - The status category the state colours come from. Every Jira state in
+      DocketLabel is the sign that it is missing, and
+      `acli jira workitem view PAY-142 --fields status --json` prints
+      whether `statusCategory` is there.
+    - Whether `acli jira auth status` reports an expired token as signed in.
+      `:Docket! login jira` signs in regardless.
+    - Whether `comment create --body-file`, and `--description-file` on
+      `edit` and on `create`, read the document docket sends as a document
+      rather than posting its text. A new comment or a description that
+      reads as JSON on the web is the sign.
+    - `--assignee` and `--remove-assignee` on `acli jira workitem edit`,
+      which `<leader>da` runs. `<leader>da` failing with `acli`'s own
+      message is the sign, and
+      `acli jira workitem view PAY-142 --fields assignee --json` prints who
+      is assigned.
+    - `acli jira workitem create`, which `:Docket create` runs, and what it
+      prints. A create failing with `acli`'s own message is the sign, and so
+      is one reported created whose key could not be read.
 
-GitHub, over `gh` and octo.nvim~
+GitLab, through glab~
 
-    Not part of this build. A pull request opens in octo.nvim, which reads the
-    same `gh` credential store, so one login serves both.
+    Rows, the item buffer, saving, completion of merge requests and people,
+    changing state, assigning, and the review, |docket-review|. No ticket is
+    created here: `:Docket create` makes Jira tickets alone.
+
+    `glab` finds the project from the folder it runs in, so docket runs each
+    call in a folder of the clone it is about. The dash runs its state check
+    and its rows in the clone it shows, the one the tab's directory was in
+    when it opened, and `r` keeps to it after a `:cd`; `<CR>` on one of its
+    rows runs the state check and the read there too, and names the buffer
+    after that clone's project. `:Docket !482` runs in the folder of the
+    current tab and names the buffer after that clone's project. Every later
+    call about the item -- `:e`, a save, `<leader>dt` and `<leader>da`, the
+    reads around them, and the state check `:e` makes first -- runs in the
+    clone the buffer's text came from, wherever the current tab is. In a
+    buffer with nothing read, `:e` makes its state check and its read in
+    the current tab's folder, |docket-item|. Completion runs in the folder
+    the latest GitLab state check ran in: the dash's clone, after it opened,
+    refreshed or opened a row; the tab's folder after `:Docket !482`,
+    `:Docket review` or `:e` in a buffer with nothing read; the buffer's
+    clone after `:e` in one holding its text. Every call a review makes
+    runs in its worktree.
+
+    A section asks for 100 rows. An item is its merge request and every note
+    of every discussion, in order, with the notes GitLab writes itself left
+    out. `glab` reports no count of discussions, so a thread cut short
+    cannot be told from a whole one.
+
+    A new comment and a review's summary are each posted as a note nobody
+    has to resolve, so a project that requires every thread resolved before
+    merging is not held up by them. Each is posted with `glab`'s `--unique`,
+    which posts nothing when a note on the merge request already holds the
+    same text.
+
+    Completion offers `!` references from the rows listed in this editor
+    session, and people from the project's members by what follows `@`:
+    letters, digits, `.`, `_` and `-`, and a name holding anything else
+    offers nobody. The lookup holds the editor for as long as the
+    `complete` entry of |docket-setup-timeouts| allows. After a lookup
+    fails, people are not asked for again for a minute, or until a GitLab
+    login, so a slow or refused lookup holds the editor once rather than at
+    every pause in typing.
+
+    A merge request's buffer is named after its project's path, read off the
+    clone's `origin` remote: `docket://glab/acme/payments/!482`. `!482`
+    opened from clones of two projects is two buffers, each reading, saving
+    and, with `gx`, opening its own project's merge request. Every read
+    holds the path the answer names against the name's, |docket-item|, and
+    on the dash every `<CR>`, `w` and `R` on a GitLab row holds the path
+    the row's address names against the paths the clone's remotes name,
+    |docket-dash|. On an instance served under a path prefix, which is in
+    its https URLs and not in its ssh ones, a clone whose `origin` is the
+    ssh URL has every read and every one of those keys refused, because the
+    address carries the prefix and `origin` does not, and each refusal
+    names the `git remote set-url origin` that makes the two agree. Two
+    clones whose `origin` URLs spell one path in two cases, `Acme/Payments`
+    beside `acme/payments`, are clones of one project, since the paths are
+    compared without case. With 'fileignorecase' set, neovim's default on
+    macOS, buffer names are compared without case as well, as the editor
+    compares them, so `:Docket !482` from the second clone opens the
+    buffer the first made, `docket://glab/Acme/Payments/!482`, under the
+    name it was opened with, and reads it again from the second clone,
+    where every later call about it then runs. With the option off the two
+    spellings are two buffers, each reading from its own clone, and `:e`
+    with nothing read in either reads it from whichever of the two clones
+    the tab is in.
+
+    Not yet run against a real instance, each with what shows it:
+
+    - Whether a description or a note comes back with CRLF line ends, and
+      that CRLF is then the ending to send it back with, |docket-save|.
+      This prints what GitLab returns for a description typed in the web
+      interface: >
+        glab api projects/:id/merge_requests/482
+<
+    - The path `origin`'s URL names, which names the buffer, read as
+      GitLab's usual clone URLs spell it. The sign is a read refused with
+      the message under |docket-item| in a clone of the project it names
+      as the answer's, and `git remote get-url origin` prints the URL the
+      name was read from.
+    - The shape of the address a merge request's `web_url` carries, which
+      the read takes the answer's project from: the path between the host
+      and `/-/merge_requests/482`. An address of another shape is compared
+      with nothing, so `gx` opening a merge request of another project than
+      the buffer's name says is the sign; this prints the address: >
+        glab mr view 482 -F json | jq -r .web_url
+<
+    - Which remote `glab` reads in a clone with `upstream` beside `origin`.
+      Every read refused from such a clone, naming `upstream`'s project as
+      the answer's, is the sign that it reads `upstream`, and
+      `git remote -v` prints both remotes, to set beside that `web_url`.
+    - The two project ids a row from a fork is recognised by,
+      `source_project_id` and `target_project_id`, which differ for a merge
+      request from a fork, |docket-work|. `w` or `R` on such a row taking
+      `origin`'s branch of the same name, or reporting it as not a branch
+      on `origin`, is the sign that the list lacks one of them; run in a
+      clone of the project, this prints both for the first page of its open
+      merge requests: >
+        glab mr list -F json |
+          jq '.[] | {iid, source_project_id, target_project_id}'
+<
+    - Every `glab mr note` verb docket runs that writes, which `glab` itself
+      marks experimental: `create`, for a comment, a review's line comment
+      and a reply; `update`; and `resolve`. A comment, an edit, a held
+      comment or a resolve failing with `glab`'s own message is the sign,
+      and `glab api` against the merge request's `discussions` endpoint is
+      the fallback.
+    - What `create --unique` answers when a note already holds the text:
+      either the save reports a failure in `glab`'s own words, or it
+      reports `new: posted` and the buffer read after it holds no new note.
+    - Who wrote a note, read from its author's `username`. Every GitLab
+      comment read-only, the account's own included, is the sign; this
+      prints the fields an author carries, through jq, the command-line
+      JSON processor: >
+        glab api projects/:id/merge_requests/482/notes \
+          | jq '.[0].author | keys'
+<
+    - The account's own `username`, from `glab api user`.
+    - The people completion offers, from
+      `glab api 'projects/:id/users?search=<name>'`. Completion offering
+      nobody after `@` is the sign.
+    - The state words. This prints the ones the instance uses: >
+        glab mr list --all -F json | jq '[.[].state] | unique'
+<
+    - Where a review draws a discussion, read from its first note's
+      `position` as `new_path` and `new_line`, or `old_path` and
+      `old_line`, names taken from GitLab's reference. A review reporting
+      discussions on lines of the diff and drawing none is the sign; this
+      prints one position as GitLab sends it: >
+        glab api projects/:id/merge_requests/482/discussions \
+          | jq '[.[].notes[0].position | select(.)][0]'
+<
+    - Which discussions GitLab moves to a new version of the diff after a
+      push, read from each position's `head_sha`: docket takes a position
+      naming another head as outdated and draws it at no line. A thread
+      whose line a push left alone drawn at no line is the sign.
+    - The lines GitLab's diff shows around a change, which docket takes to
+      be three, as git's are. A held comment near the edge of a change
+      failing at submit with `glab`'s `not found in diff` is the sign.
+    - `--sha` on `glab mr approve`, which an approving submit passes. An
+      approval failing with `glab`'s own message while the worktree is at
+      the merge request's head is the sign.
+    - `glab mr update` with `--assignee` or `--unassign`, which `<leader>da`
+      runs. `<leader>da` failing with `glab`'s own message is the sign, and
+      `glab mr view 482 -F json | jq .assignees` prints who is assigned.
+    - Whether `glab auth status` fails for a host whose token no longer
+      works. A GitLab client reported signed in whose calls fail with an
+      authentication error is the sign, and `:Docket! login glab` signs in
+      regardless.
+
+GitHub, through gh and octo.nvim~
+
+    Rows alone. A pull request opens in octo.nvim, which does everything past
+    the row -- the thread, the diff, reviewing, approving and merging -- so
+    docket has no item buffer, completion, state change or review for GitHub.
+    `<CR>` on a row hands octo.nvim the row's address, and `:Docket #12` the
+    number alone, |docket-item|. Without octo.nvim, either says so and
+    prints the pull request's address: the row's own, or, typed by hand, the
+    one a list last named for the number. A section asks for 100 rows.
+
+    A name typed by hand, `:e docket://gh/\#12`, hands octo.nvim the number
+    alone as `:Docket #12` does, and the buffer `:e` made is wiped once
+    octo.nvim's takes the window. When the handoff fails, that buffer stays,
+    empty and taking no text, and leaving it wipes it. `#` on the command
+    line stands for the alternate file's name, so it is escaped: unescaped,
+    that name replaces it, or `:e` fails with
+    `E194: No alternate file name to substitute for '#'` when there is none.
+
+    The state check is `gh auth status --active`, which needs a `gh` that has
+    `--active`; `gh auth status --help` shows whether the installed one does.
+
+    Not yet run against a real instance, each with what shows it:
+
+    - Whether `--active` keeps a second account's broken token on the same
+      host out of the check. The sign is GitHub reported as not signed in
+      while the account in use works; `gh auth status --active; echo $status`
+      in fish prints the exit code the check reads.
+    - That `Octo pr edit` shows the pull request in the current window,
+      which is what wipes the buffer `:e docket://gh/\#12` made. `:ls!`
+      listing a `docket://gh/` buffer afterwards is the sign.
+    - Whether the installed octo.nvim takes a pull request's address, which
+      `<CR>` on a row hands it, and opens it on the address's host rather
+      than on the `github_hostname` it is configured with. The shapes are
+      its README's; `:Octo https://github.com/<owner>/<repo>/pull/<n>` in
+      the editor shows it, and `:help octo-commands` there is the installed
+      release's own documentation. `<CR>` on a pull request row failing
+      with octo.nvim's own message is the sign, and `:Docket #12` from a
+      clone of the repository opens the pull request meanwhile.
+    - Which repository `gh pr list` lists in a clone `gh repo fork --clone`
+      made, with `upstream` beside `origin`. A row of either remote's
+      repository counts as the clone's own, |docket-dash|, so neither is
+      refused as another project's, and `w` and `R` refuse a pull request
+      from a fork only on a row of `origin`'s repository, |docket-work|;
+      `gh repo set-default --view` there prints the repository `gh`
+      resolves the clone to.
 
 ==============================================================================
 TROUBLESHOOTING                                                *docket-health*
 
-`:checkhealth docket` reports, in order:
+`:checkhealth docket` reports:
 
-backends~
-    For each backend: signed in, with the client's own status output; not
-    signed in, naming `:Docket login <backend>`; the client not installed; or
-    no adapter, for a backend this build has none for.
+docket: backends~
+    One line for each of Jira, GitLab and GitHub, whether or not this
+    machine uses it: `jira: signed in` and the client's status output,
+    `jira: not signed in` with `run :Docket login jira`, or
+    `jira: the client is not installed`. Only the backends in use need to be
+    signed in. Each line runs the client's status command, so the report
+    waits on the network.
 
-help~
-    Whether `doc/docket.txt` is on the runtime path and whether the `tags`
-    beside it exist. `setup{}` writes them and reports once, with
-    |vim.notify()|, when it cannot. It runs `:helptags` on the directory of a
-    help file it has already found, so what it can meet is `E152`, a `doc/`
-    that cannot be written, or `E154`, a tag defined twice.
+docket: help~
+    `help tags beside <path>` when all is well. `no tags beside <path>` means
+    `setup{}` could not write them;
+    `:lua print(require('docket').helptags())` prints `false` and the reason,
+    which for a `doc/` folder that cannot be written is `E152`.
 
-configuration~
-    The section titles and the cache directory as configured.
+    `doc/docket.txt is not on the runtime path` means neovim finds no
+    `doc/docket.txt` among the folders it loads plugins from, so the plugin
+    is not at `~/.local/share/nvim/site/pack/docket/start/docket/`, where
+    `chezmoi apply` puts it. neovim loads every plugin under a
+    `pack/*/start/` folder there without listing it in 'runtimepath', so
+    `:set runtimepath?` does not show it; this prints the help file neovim
+    finds, or `nil`: >
+        :lua print(vim.api.nvim_get_runtime_file('doc/docket.txt', false)[1])
+<
 
-When `:help docket` reports `E149`, the tags are missing, and
-`:checkhealth docket` says why under `help`.
+docket: configuration~
+    The section titles with their adapters, and the cache directory, as
+    `setup{}` left them.
+
+What a symptom means:
+
+`E149` on `:help docket`
+    The tags are missing. `:checkhealth docket` says why under
+    `docket: help`.
+
+The editor stops responding while an item or a review opens
+    A client's state check is running, and it reaches the network. It gives
+    up at the `client` entry of |docket-setup-timeouts|, and the backend is
+    then reported as not signed in, with
+    `<client>: killed after <ms> ms without exiting` beneath. The timeout
+    is what failed, not the login: run the mode again once the host
+    answers. The dash makes the same check without holding the editor, and
+    its sections read `checking sign-in` meanwhile, |docket-dash|.
+
+`<backend>: not signed in; run :Docket login <backend>`
+    Run that. When a client reports itself signed in with a token that no
+    longer works, `:Docket! login <backend>` signs in regardless.
+
+`unknown flag: --active` under GitHub
+    The installed `gh` has no `--active`, |docket-backends|; `gh --version`
+    prints which release it is.
+
+Every comment read-only, with `the account's own identifier is unknown`
+    The account has no Jira work item assigned or reported;
+    |docket-item| says what to do.
+
+`w` refuses with `is bound to no Jira project`
+    Bind the clone, |docket-binding|.
+
+`the Jira site is not known until an item or a list has been read`
+    `:e` in the item buffer reads it, which names the site.
+
+An empty item buffer after a session was restored
+    Nothing has read it yet; `:e` does. For a merge request, `:tcd` into a
+    clone of the project in its name first, |docket-item|.
+
+`glab answered !482 of acme/payments, and the name, read off origin, says`
+    The clone's remotes name two projects, or `origin` spells the one
+    project another way than the instance writes it. The message names the
+    clone to open the merge request from and the `git remote set-url origin`
+    that makes the two agree, |docket-item|.
+
+`!482 is acme/payments's, and the dash's clone is of acme/other`
+    The row came from a section that lists another project's merge
+    requests or pull requests, or `origin` spells the clone's own project
+    another way than the instance writes it. The message names the clone
+    to press the key in and the `git remote set-url origin` that makes the
+    two agree, |docket-dash|.
 
  vim:tw=78:ts=8:ft=help:norl:

@@ -105,8 +105,9 @@ reversible operation. In order:
 | ---                          | ---                                                                        |
 | `setup-xcode-cli`            | installs Xcode Command Line Tools and Rosetta 2                            |
 | `decrypt-private-key`        | writes `~/.config/chezmoi/key.txt`                                         |
+| (the files themselves)       | writes every managed file, and sets `~/.local/share/nvim` and its `site` directory to `0700` |
 | `01-install-packages-darwin` | updates or installs Homebrew, then the whole Brewfile — the list of everything macOS installs — then Rust's stable toolchain |
-| `01-install-packages-linux`  | apt/dnf, plus `starship` (the shell prompt) from its installer, `gh` (GitHub's CLI) from GitHub's repository — Fedora's dnf carries `gh` itself — and `acli` (Atlassian's command-line client for Jira) from Atlassian's; or a rootless mise, plus `acli` as the pinned release `.chezmoidata/acli.toml` names, digest-checked before it is extracted |
+| `01-install-packages-linux`  | installs the toolchain with apt or dnf, or with a rootless mise, plus `starship` (the shell prompt), `gh` (GitHub's CLI) and `acli` (Atlassian's Jira CLI) from outside the distribution |
 | `02-setup-darwin` | rewrites preferences across the Dock, Finder, Safari, trackpad, keyboard, screenshots and Software Update, then kills the affected apps to reload them |
 | `03-setup-dock`              | appends the apps it names to the Dock, leaving existing items in place     |
 | `04-setup-fish`              | adds fish to `/etc/shells` and makes it the login shell with `chsh`        |
@@ -116,9 +117,18 @@ reversible operation. In order:
 | `08-setup-ssh`               | puts each deployed key's passphrase in the login Keychain; asks for it     |
 | `09-build-aerc-filters`      | compiles aerc's `colorize` and `wrap` filters from their C sources         |
 
-Each name above is the tail of a filename at the top of the source directory —
-`03-setup-dock` is `run_once_after_install-03-setup-dock.sh.tmpl` — and
-`ls run_*` there lists every one.
+Each script named above is the tail of a filename at the top of the source
+directory — `03-setup-dock` is `run_once_after_install-03-setup-dock.sh.tmpl` —
+and `ls run_*` there lists every one. chezmoi writes the files between the
+scripts named `before` and the ones named `after`.
+
+Managing the docket plugin, under [Jira and reviews](#jira-and-reviews), puts
+`~/.local/share/nvim` and `~/.local/share/nvim/site` under chezmoi, which sets
+their mode. Both source directories carry the `private_` prefix, so a fresh
+machine gets the same `0700` neovim would have given them, and on a machine
+where something else made them `0755` the apply changes them to `0700`.
+`chezmoi diff ~/.local/share/nvim` prints what this machine's apply changes
+there.
 
 `09` needs a C compiler. macOS has `cc` from the Xcode command-line tools, and
 on Linux `.chezmoidata/packages.toml`, the file that names each tool's package
@@ -258,6 +268,11 @@ alone, because applying dotfiles can re-run bootstrap scripts.
 
 These deploy to `~/.local/bin`, which is on `PATH` on every profile.
 
+The `git wt-*` commands manage worktrees. A worktree is a second checkout of a
+repository in a folder of its own, and one clone can hold several, each on its
+own branch, tag or commit. `git wt-clone` makes a bare clone, one with no
+checkout of its own, in `.bare`, and puts each worktree in a folder beside it.
+
 | command                    | what it does                                              |
 | ---                        | ---                                                       |
 | `git wt-clone <URL> [DIR]` | clone a repository as a bare clone plus per-ref worktrees |
@@ -373,21 +388,46 @@ Ubuntu and the RHEL rebuilds take it from GitHub's own repository. `starship`
 comes from its installer everywhere, because no base repository has it and it
 is the shell prompt.
 
-`acli`, Atlassian's command-line client for Jira, comes from Atlassian's own
-apt and rpm repositories on the `sudo` profiles. Atlassian packages it for no
-rootless installer, so the no-`sudo` profile takes a pinned release tarball
-whose sha256 digest the `01` script checks before extracting it into
-`~/.local/bin`. The pin is `.chezmoidata/acli.toml`, written by hand: the
-version, and one digest per architecture. Both come from the `acli` Formula in
-the `atlassian/acli` tap, where Atlassian publishes them:
-`brew cat atlassian/acli/acli` prints it on a machine with Homebrew, and the tap
-is `github.com/atlassian/homebrew-acli` for one without. Atlassian publishes no
-digest for an unpinned `latest`, which is why a version is pinned at all. Moving
-to a newer release is an edit to that file followed by `chezmoi apply` — the
-`01` script's content changes with the pin, and a `run_once_` script whose
-content changed runs again. The `update` fish function reports when the
-installed `acli` is not the pinned one, and prints the command that runs the
-`01` script again, since an apply with the pin unchanged does not.
+`acli`, Atlassian's command-line client for Jira, comes from the Brewfile on
+macOS, through Atlassian's `atlassian/acli` tap, and from Atlassian's own apt
+and rpm repositories on the `sudo` profiles. Atlassian packages it for no
+rootless installer, so the no-`sudo` profile takes a pinned release tarball,
+which `01-install-packages-linux` checks against its sha256 digest before
+extracting it into `~/.local/bin`.
+
+The pin is `.chezmoidata/acli.toml`, written by hand. It holds:
+
+- `version`: the release the no-`sudo` profile installs.
+- `sha256.amd64` and `sha256.arm64`: that release's digest for each
+  architecture, checked before anything is extracted.
+
+Both come from the `acli` formula in the `atlassian/acli` tap, where Atlassian
+publishes a digest for each architecture. `brew cat atlassian/acli/acli` —
+the tap's name, then the formula's — prints that formula on a machine with
+Homebrew, and `github.com/atlassian/homebrew-acli` holds it for one without.
+Atlassian publishes no digest for an unpinned `latest`, which is why a version
+is pinned at all.
+
+Moving to a newer release is an edit to the version and to each digest, then
+an apply:
+
+```sh
+chezmoi cd
+$EDITOR .chezmoidata/acli.toml
+chezmoi apply -v
+```
+
+The pin is rendered into `01-install-packages-linux`, so the edit changes the
+script, and a `run_once_` script whose content changed runs again at the next
+apply. `acli --version` then prints `acli version <version>`, where
+`<version>` is the `version` value in `.chezmoidata/acli.toml`. The `update`
+fish function reports when the installed `acli` is not the pinned one — a
+binary replaced since the last apply, say — and prints this, which runs
+`01-install-packages-linux` again; an apply with the pin unchanged does not:
+
+```fish
+chezmoi execute-template --file (chezmoi source-path)/run_once_after_install-01-install-packages-linux.sh.tmpl | bash
+```
 
 One manifest entry per tool:
 
@@ -958,6 +998,169 @@ credential or config change:
 ```sh
 mbsync -a && notmuch new
 ```
+
+## Editing
+
+neovim is the editor, and `private_dot_config/nvim/init.lua`, deployed as
+`~/.config/nvim/init.lua`, is the whole of its configuration: options,
+keymaps, and the plugins with their settings. `<leader>`, the key most of its
+keymaps start with, is the space bar.
+
+The plugins are declared in one `vim.pack.add` call at the top of that file.
+`vim.pack` is neovim's own plugin manager, so there is no separate one to
+install or learn. It needs neovim 0.12 or newer; `nvim --version` prints which
+is installed. The first start after an apply asks once to confirm installing
+the plugins, then clones each with git into
+`~/.local/share/nvim/site/pack/core/opt/`. A plugin added to that call is
+installed at the next start. Updating them happens inside neovim:
+
+```vim
+:lua vim.pack.update()
+```
+
+That opens a tab listing what each update brings; `:write` there applies them
+and `:quit` discards them. The `update` fish function leaves neovim's plugins
+alone.
+
+| plugin | what it is for |
+| --- | --- |
+| catppuccin | the colour scheme, `catppuccin-mocha` |
+| mini.nvim | the file explorer (`<leader>e`), the file, grep and buffer pickers (`<leader>f`, `<leader>s`, `<leader>b`), completion, notifications, marks beside the lines changed since the last commit, and small editing helpers: surround, align, and trailing whitespace removed on save |
+| vim-bufkill | `<leader>bd` closes a buffer and keeps its window |
+| nvim-treesitter | parses each file for highlighting; the `install` call below the plugin list names the languages |
+| nvim-treesitter-context | keeps the enclosing function or block in view at the top of the window |
+| auto-session | saves the open files and window layout per directory, and restores them when neovim starts there |
+| vim-fugitive | git from inside the editor, `<leader>g` |
+| diffview.nvim | side-by-side diffs, `<leader>gdo` to open and `<leader>gdc` to close |
+| octo.nvim | GitHub issues and pull requests, `<leader>oi` and `<leader>op` |
+| plenary.nvim | a Lua library octo.nvim is built on |
+| nvim-web-devicons | the file-type icons octo.nvim and the status line show |
+| gitlinker.nvim | `<leader>gl` copies the web address of the current line, `<leader>gb` its blame page |
+| lualine.nvim | the status line |
+| vim-highlightedyank | briefly highlights what was just yanked |
+| nvim-lspconfig | the language-server definitions the `vim.lsp.enable` calls start |
+| conform.nvim | formatter settings: ruff, the Python linter and formatter, for Python, and the options of verible, the SystemVerilog formatter; no key runs it, `:lua require('conform').format()` does |
+
+docket, the plugin for Jira tickets, merge requests and pull requests under
+[Jira and reviews](#jira-and-reviews), is not in that list, because its files
+are in this repository rather than in one of the repositories `vim.pack`
+clones. neovim loads every plugin in a `pack/*/start/` folder under
+`~/.local/share/nvim/site` when it starts; the plugins `vim.pack` clones sit
+under `pack/core/opt/`, and each loads when the `vim.pack.add` call names it. This repository deploys docket
+from `dot_local/share/private_nvim/private_site/pack/docket/start/docket/` to
+`~/.local/share/nvim/site/pack/docket/start/docket/`, so it loads with nothing
+to declare; `init.lua` carries only its `setup` call, and an apply is what
+updates it. Its reference is `:help docket`.
+
+neovim writes files beside what this repository tracks, and none of them is
+tracked, because nothing a program writes is (see
+[Adding to this repository](#adding-to-this-repository)):
+
+- `~/.config/nvim/nvim-pack-lock.json`, the revision of each plugin, which
+  `vim.pack` rewrites at every install and update. Each machine installs every
+  plugin at its newest revision and moves on when `vim.pack.update()` is run
+  there.
+- `~/.local/share/nvim/sessions/`, where auto-session keeps one session per
+  directory, naming that machine's files and window layout.
+- `doc/tags` in docket's folder, the index behind `:help docket`, which
+  docket writes when neovim starts and the help file is newer than it.
+
+`chezmoi-sync` lists the lock file and `tags` among the untracked files at
+every run, because each sits in a directory that holds a tracked file.
+Neither is to be added.
+
+## Jira and reviews
+
+docket is a neovim plugin this repository deploys. It lists a clone's Jira
+tickets in one buffer, the dash, beside its merge requests on GitLab or
+its pull requests on GitHub, whichever hosts the clone's `origin` remote. It
+opens a ticket or a merge request as a buffer to read and comment on, and a
+pull request in octo.nvim. It turns any of them into a worktree with two named
+windows in tmux, the terminal multiplexer, and reviews a merge request as a
+diff in diffview.nvim, holding each line comment in the editor until the
+review is submitted.
+
+It reaches each service through that service's own command-line client:
+`acli`, Atlassian's command-line client for Jira; `glab`, GitLab's; and `gh`,
+GitHub's, with a pull request itself opening in octo.nvim. The bootstrap
+installs them. `acli` and `gh` are among the tools the Linux profiles take from
+outside the distribution, and [Packages](#packages) says where each profile
+gets them, including the release of `acli` that `.chezmoidata/acli.toml` pins
+for the no-`sudo` profile. `glab` comes from the Brewfile on macOS and from
+mise on the no-`sudo` profile; the `sudo` profiles install none, because
+`glab`'s manifest entry names no distro package. tmux is installed on macOS
+and on the `sudo` profiles, and the no-`sudo` profile uses whatever tmux the
+machine already has.
+
+### Signing in
+
+Each service needs an account that already exists: one on a Jira Cloud site,
+on a GitLab host, or on GitHub. Signing in connects the local client to that
+account and creates nothing.
+
+Each client is signed in once per machine, after the first apply, from inside
+neovim. Only the ones in use need it:
+
+```vim
+:Docket login jira
+:Docket login glab
+:Docket login gh
+```
+
+Run inside a clone, `:Docket login` with no name signs in Jira and the client
+the clone's `origin` remote points at. Each asks for what its client needs
+besides the token — the Jira site, as `example.atlassian.net`, and the
+account's email, or the GitLab or GitHub host — then prints the page where a
+token is minted and offers to open it, then asks for the token without
+echoing it:
+
+| client | token page |
+| --- | --- |
+| `acli` | `https://id.atlassian.com/manage-profile/security/api-tokens` |
+| `glab` | `https://<host>/-/user_settings/personal_access_tokens` |
+| `gh` | `https://<host>/settings/tokens` |
+
+Minting the token is the one step that needs a browser. docket hands the token
+to the client on its standard input and stores no credential; each client
+keeps it in its own credential store. So there is no token to put in a secret
+store and nothing to restore after a rebuild beyond running `:Docket login`
+again. A
+`gh` login also signs octo.nvim in, since octo.nvim reads the same store. A
+shell exporting `GH_TOKEN`, `GITHUB_TOKEN` or `GITLAB_TOKEN` is already signed
+in for that client.
+
+```vim
+:checkhealth docket
+```
+
+confirms it: under `docket: backends`, each client in use reads
+`jira: signed in`, `glab: signed in` or `gh: signed in`, followed by the
+client's own status output. A client this machine does not use shows as not
+signed in or not installed, which is expected. `:help docket-health` covers
+the other lines.
+
+### Binding a repository to its Jira projects
+
+The dash shows a repository's tickets once the clone is bound to its Jira
+projects. From any folder of the clone:
+
+```sh
+acli jira project list --paginate            # every project the account can see, with its key
+git config --add dotfiles.jira.project PAY   # the key; repeat for each further project
+```
+
+In a clone made with `git wt-clone` the value lands in `.bare/config`, and in
+a plain clone in `.git/config`; either way every worktree of the clone reads
+it, worktrees made later included, so it is set once per clone. It lives in
+the clone rather than in this repository, so a fresh clone needs it again.
+`git config --get-all dotfiles.jira.project` prints what is bound. An unbound
+clone shows only the account's own tickets, from every project, and refuses
+to build a worktree for one, since the ticket could belong to another
+repository. Binding by a complete query instead, and
+marking a repository as having no Jira, are under `:help docket-binding`.
+
+`:Docket` inside the clone, or `<leader>dd`, then opens the dash, and
+`:help docket` covers everything done from there.
 
 ## Sign-off on RISC-V commits
 
