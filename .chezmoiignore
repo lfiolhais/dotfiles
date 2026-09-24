@@ -4,6 +4,18 @@ LICENSE
 tests
 README.md
 TODO.md
+# Probe reports written while working on the neovim plugin. Every file here deploys
+# to the home directory unless it is named, and a report is not configuration.
+#
+# Unanchored, unlike the same two patterns in .gitignore. chezmoi rejects the
+# whole source state on a leading slash here -- every command then fails rather
+# than ignoring one file -- so the two files spell these differently on purpose.
+p0*.txt
+# nvim writes its log to ~/.local/state/nvim/nvim.log, and falls back to
+# nvim.log in the working directory when it cannot write there. A log is not
+# configuration, and this name does not begin with a dot, so chezmoi would
+# deploy it.
+nvim.log
 **/__pycache__
 {{ if ne .chezmoi.os "darwin" }}
 .config/aerospace

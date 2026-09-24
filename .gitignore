@@ -1,2 +1,7 @@
 **/__pycache__
 .claude/worktrees/
+# Probe reports written while working on the neovim plugin. Scratch output rather
+# than anything this repository configures.
+/p0*.txt
+# nvim falls back to this when it cannot write ~/.local/state/nvim/nvim.log.
+/nvim.log
