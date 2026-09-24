@@ -31,6 +31,12 @@ macos-option-as-alt = left
 maximize = true
 confirm-close-surface = false
 mouse-hide-while-typing = true
+# Restore windows, tabs, splits and their working directories after a quit or a
+# reboot. This is what stands in for a multiplexer's session recovery on this
+# machine, so dropping it loses every open working directory at the next restart.
+# `default` restores only after a forced termination or when Settings.app has been
+# configured for it. Restoring a working directory needs shell integration active,
+# which it is by default.
 window-save-state = always
 shell-integration-features = ssh-terminfo,ssh-env
 
