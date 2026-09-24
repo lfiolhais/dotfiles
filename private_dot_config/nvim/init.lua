@@ -238,6 +238,9 @@ require('octo').setup {
     picker = "default",
 }
 
+-- After octo's setup, so that the Docket* highlight groups follow the Octo* ones.
+require('docket').setup {}
+
 require("conform").setup({
     formatters_by_ft = {
         python = {
