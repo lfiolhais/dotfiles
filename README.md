@@ -1050,7 +1050,9 @@ under `pack/core/opt/`, and each loads when the `vim.pack.add` call names it. Th
 from `dot_local/share/private_nvim/private_site/pack/docket/start/docket/` to
 `~/.local/share/nvim/site/pack/docket/start/docket/`, so it loads with nothing
 to declare; `init.lua` carries only its `setup` call, and an apply is what
-updates it. Its reference is `:help docket`.
+updates it. Its reference is `:help docket`, and changing it starts at the
+plugin's own
+[README.md](dot_local/share/private_nvim/private_site/pack/docket/start/docket/README.md).
 
 neovim writes files beside what this repository tracks, and none of them is
 tracked, because nothing a program writes is (see
@@ -1071,14 +1073,12 @@ Neither is to be added.
 
 ## Jira and reviews
 
-docket is a neovim plugin this repository deploys. It lists a clone's Jira
-tickets in one buffer, the dash, beside its merge requests on GitLab or
-its pull requests on GitHub, whichever hosts the clone's `origin` remote. It
-opens a ticket or a merge request as a buffer to read and comment on, and a
-pull request in octo.nvim. It turns any of them into a worktree with two named
-windows in tmux, the terminal multiplexer, and reviews a merge request as a
-diff in diffview.nvim, holding each line comment in the editor until the
-review is submitted.
+docket is a neovim plugin this repository deploys. It brings a clone's Jira
+tickets into the editor, beside its merge requests on GitLab or its pull
+requests on GitHub, whichever hosts the clone's `origin` remote. `:help
+docket` is the reference for each of its modes, and changing docket starts at
+the plugin's own
+[README.md](dot_local/share/private_nvim/private_site/pack/docket/start/docket/README.md).
 
 It reaches each service through that service's own command-line client:
 `acli`, Atlassian's command-line client for Jira; `glab`, GitLab's; and `gh`,
@@ -1120,14 +1120,12 @@ echoing it:
 | `glab` | `https://<host>/-/user_settings/personal_access_tokens` |
 | `gh` | `https://<host>/settings/tokens` |
 
-Minting the token is the one step that needs a browser. docket hands the token
-to the client on its standard input and stores no credential; each client
-keeps it in its own credential store. So there is no token to put in a secret
-store and nothing to restore after a rebuild beyond running `:Docket login`
-again. A
-`gh` login also signs octo.nvim in, since octo.nvim reads the same store. A
-shell exporting `GH_TOKEN`, `GITHUB_TOKEN` or `GITLAB_TOKEN` is already signed
-in for that client.
+Minting the token is the one step that needs a browser. docket stores no
+credential: each client keeps its own token, as `:help docket-auth` says. So
+there is no token to put in a secret store and nothing to restore after a
+rebuild beyond running `:Docket login` again, and a `gh` login serves
+octo.nvim too. A shell exporting `GH_TOKEN`, `GITHUB_TOKEN` or `GITLAB_TOKEN`
+is already signed in for that client.
 
 ```vim
 :checkhealth docket

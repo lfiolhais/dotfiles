@@ -29,7 +29,9 @@ It:
 - renders the whole source with `chezmoi archive`, proving templates, age
   decryption and ignores all work;
 - confirms the repo-only files — the agent instructions, the licence, the
-  encrypted age key and `tests` itself — stay out of the target;
+  encrypted age key, `tests` itself, the root `README.md` and `TODO.md`, and
+  the docket plugin's `README.md` and `ARCHITECTURE.md` — stay out of the
+  target;
 - lints every `run_*` script. `bash -n` and `shellcheck --severity=error` are
   hard failures; `--severity=warning` is advisory. This is OS-aware: a script
   gated off for the current OS renders empty and is skipped, and `linux.py`
@@ -65,8 +67,8 @@ It:
   binary is built for one architecture and one OS, and chezmoi copies it
   unchanged to every machine; `BINARY_MAGIC` is the ELF and Mach-O magics and
   `GENERATED_NAMES` the filenames — `.DS_Store`, and `tags`, which neovim's
-  `:helptags` writes beside a help file — that no source directory should
-  carry. The match is on every path component, so a directory named `tags`
+  `:helptags` writes beside a help file — that no source directory carries.
+  The match is on every path component, so a directory named `tags`
   fails too;
 - checks the Brewfile, skipping it when `brew` is absent. `mas` entries are left
   out of that check: verifying one runs `mas list`, which talks to the App Store
@@ -140,10 +142,9 @@ It:
   review's tab, its compose windows and its keys, with diffview.nvim stood in
   for by two user commands. The calls that have to stay in one clone are made
   from two clones of one project, with a state check in the other clone before
-  each answer. Every process the plugin starts goes through its `spawn`
-  module, and a test that reaches one replaces `spawn.run` or `spawn.wait`
-  with a function that records the argument list and answers from a recorded
-  payload, so no client, git or tmux runs. The tests of `spawn` itself run
+  each answer. No client, git or tmux runs; how each process is stood in for
+  is under "The suite" in the plugin's `ARCHITECTURE.md`. The tests of
+  `spawn` itself run
   `sh`, one of them a command that exits while a child it started holds the
   output, which the timeout has to kill. The buffers and tabs it opens belong
   to the `nvim -l` instance running it and end with it. It sets its own module

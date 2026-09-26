@@ -4,6 +4,10 @@ LICENSE
 tests
 README.md
 TODO.md
+# The docket plugin's own documents describe this repository -- its layout, its
+# harness, the source tree -- and name paths that exist only here.
+.local/share/nvim/site/pack/docket/start/docket/README.md
+.local/share/nvim/site/pack/docket/start/docket/ARCHITECTURE.md
 # Probe reports written while working on the neovim plugin. Every file here deploys
 # to the home directory unless it is named, and a report is not configuration.
 #

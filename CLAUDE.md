@@ -145,47 +145,15 @@ it, so that module alone must stay stdlib-only and 3.9-clean.
 ## The neovim plugin
 
 `docket`, a neovim plugin for Jira tickets, merge requests and pull requests, is at
-`dot_local/share/private_nvim/private_site/pack/docket/start/docket/`, which deploys to
-`~/.local/share/nvim/site/pack/docket/start/docket/`. neovim loads every plugin under a
-`pack/*/start/` folder there at startup and searches it for runtime files, without
-listing it in `'runtimepath'`, so `nvim_get_runtime_file` finds `doc/docket.txt` and
-`:set rtp?` does not show the folder. Every document calls docket a plugin, the word
-`README.md`'s "Editing" section uses for everything `vim.pack` installs.
-`plugin/docket.lua` declares the `:Docket` command, the `<leader>dd` map and the
-autocommands, and requires a module only when one of them runs. `doc/docket.txt` is the reference behind `:help docket`.
-
-The modules under `lua/docket/` import strictly downwards, as the Python families do:
-each imports only modules above it in this table. Each opens with a comment saying what
-it holds and what it imports. `adapters` in the imports column is
-`adapters/init.lua`, the registry, which loads an adapter module by name the first time
-it is asked for, so no row below lists the adapters it loads.
-
-| module | holds | imports |
-| --- | --- | --- |
-| `config.lua` | the defaults: the dashboard's sections, the cache directory, each kind of process's timeout; `configure()` for `setup{}` | nothing local |
-| `row.lua` | the one row shape every adapter normalises to, and its ordering | nothing local |
-| `item.lua` | an item's header fields, body and comments, and each region's descriptor with the ownership half of the editable judgement | nothing local |
-| `adf.lua` | a Jira document tree to lines, text back to a minimal tree, and whether a tree survives that round trip | nothing local |
-| `diff.lua` | the region compare that decides which calls a save makes | nothing local |
-| `flight.lua` | one request in flight per key and the rule for joining it: `new()` returns a join with `join`, `invalidate`, `invalidate_all` and `pending` | nothing local |
-| `highlight.lua` | the `Docket*` groups, what each links to, and `state_group()`, which colours a Jira state by its `category` and a review's by its state word | nothing local |
-| `render.lua` | an item to buffer lines, and the range each region occupies | `adf`, `item` |
-| `spawn.lua` | the only process spawn: `run()` with a callback, `wait()` blocking; both end the command's process group at its timeout | `config` |
-| `repo.lua` | the clone's root, its Jira binding and query assembly, the review client its remote implies and the project path it names, its worktrees | `config`, `spawn` |
-| `env.lua` | the branch and window-name rules, `git wt-add`, the two tmux windows or an editor tab, and `teardown()` | `config`, `repo`, `spawn` |
-| `adapters/init.lua` | the adapter contract, the capability set, and the registry | `row` |
-| `adapters/jira.lua` | Jira, over `acli`: each region written back as a document through `adf`, assigning, and creating a work item; a row and an item carry `category`, the status's `statusCategory.key` | `adapters`, `adf`, `flight`, `item`, `row`, `spawn` |
-| `adapters/glab.lua` | GitLab, over `glab`, including the calls the review mode makes | `adapters`, `config`, `flight`, `item`, `row`, `spawn` |
-| `adapters/gh.lua` | GitHub's rows, and the handoff of an item to octo.nvim | `env`, `flight`, `row`, `spawn` |
-| `cache.lua` | cached rows on disk and their age, fetched one request per key through `flight` | `config`, `flight`, `row` |
-| `auth.lua` | the login flow; `ready()`, the blocking state check every mode makes first, and `check()`, its callback-taking form, which the dashboard makes | `adapters`, `cache`, `config`, `spawn` |
-| `complete.lua` | the `omnifunc` an item buffer names: the trigger rule, and the adapter's candidates, each answer kept for `TTL` seconds | `adapters` |
-| `review.lua` | the review mode: the diff in diffview.nvim, the discussions drawn at their lines, the comments held until a submit, and the compose windows | `adapters`, `auth`, `config`, `flight`, `highlight`, `spawn` |
-| `list.lua` | the dashboard buffer, its sections, one state check per backend through `flight`, and the row under the cursor | `auth`, `cache`, `config`, `flight`, `highlight`, `item`, `repo` |
-| `buffer.lua` | the item buffer: its read path, which names a merge request's buffer after its clone's project and hands a pull request's name to octo.nvim; its region marks; `compose()` for a new comment; and its write path — the conflict check, one call per changed region, and the read that names a posted comment; it requires `complete` under `pcall` and sets `omnifunc` only when that loads | `adapters`, `auth`, `cache`, `diff`, `highlight`, `item`, `render`, `repo` |
-| `commands.lua` | what `:Docket` dispatches to, every keymap, a new ticket's draft, and the review's verbs and the keys set on its diff | `adapters`, `auth`, `buffer`, `cache`, `config`, `env`, `list`, `repo`, `review`, `row` |
-| `init.lua`, required as `docket` | `setup()`: the options, the highlight groups, the help tags; `help_files()`, the one lookup of the help file and its tags | `config`, `highlight` |
-| `health.lua` | `:checkhealth docket` | `adapters`, `auth`, `config`, `init`, `row` |
+`dot_local/share/private_nvim/private_site/pack/docket/start/docket/`. The plugin's own
+`README.md`, in that folder, is the entry point for a person changing it — how neovim
+finds and loads it from there, what `plugin/docket.lua` declares, running the source
+tree, the gate and the suite — and its `ARCHITECTURE.md` holds the module table, every
+module with what it holds and what it imports, under "The shape of the plugin", beside
+the rule that orders it and the `grep` that checks the imports column after a change.
+Neither is restated here. `doc/docket.txt` is the reference behind `:help docket`. Every
+document calls docket a plugin, the word `README.md`'s "Editing" section uses for
+everything `vim.pack` installs.
 
 The adapter contract is written once, above `M.REQUIRED` in `adapters/init.lua`, with
 `M.ARITY` beside it, and `verify()` there holds every adapter to both; it is not

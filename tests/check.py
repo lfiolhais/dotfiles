@@ -137,8 +137,20 @@ UNIT_TESTS_LUA = (REPO / "tests" / "docket.lua",)
 # source: the checkout's own metadata, the agent's worktrees, ruff's cache,
 # and this harness.
 NOT_DEPLOYED = frozenset({".git", ".claude", ".ruff_cache", "tests"})
-# Target paths that must never be deployed (kept out via .chezmoiignore).
-MUST_NOT_DEPLOY = ("CLAUDE.md", "LICENSE", "key.txt.age", "tests")
+# Target paths that must never be deployed (kept out via .chezmoiignore): the
+# agent instructions, the licence, the encrypted key, the harness, the root
+# README and TODO, and the docket plugin's documents, which describe this
+# repository.
+MUST_NOT_DEPLOY = (
+    "CLAUDE.md",
+    "LICENSE",
+    "key.txt.age",
+    "tests",
+    "README.md",
+    "TODO.md",
+    ".local/share/nvim/site/pack/docket/start/docket/README.md",
+    ".local/share/nvim/site/pack/docket/start/docket/ARCHITECTURE.md",
+)
 # Deployed shell that `_scripts()` does not find, because it is not named run_*
 # and does not live at the repo root. An rc file has no shebang, so it carries a
 # `# shellcheck shell=` directive instead.
