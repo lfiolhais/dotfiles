@@ -117,6 +117,10 @@ note = "no binary release; a source build is too heavy for a bootstrap"
 brew = "chezmoi"
 note = "already installed -- it is what runs this bootstrap"
 
+[packages."claude-code@latest"]
+brew = "claude-code@latest"
+note = "linux needs to use the official installer"
+
 [packages.cmake]
 brew = "cmake"
 apt = "cmake"
