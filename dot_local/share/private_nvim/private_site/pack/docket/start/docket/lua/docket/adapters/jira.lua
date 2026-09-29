@@ -8,8 +8,9 @@
 -- a field list and `comment` is a field. The thread is never read through
 -- `comment list`: its `author` is a display name with no `accountId`, and
 -- `accountId` is the one field a comment's author and the account's own user
--- object share, so it is the ownership test. `search --fields comment` is
--- refused by acli, so a row never carries a comment count.
+-- object share, so it is the ownership test. `search` holds `--fields` to a
+-- list of its own, which ROW_FIELDS' comment describes, and `comment` is
+-- outside it, so a row never carries a comment count.
 --
 -- Writes send a document, never text. Plain text through `--body-file` came
 -- back as one paragraph whatever it held, so each write serialises the
@@ -38,10 +39,13 @@
 --
 -- The account's own identifier comes from a query, since `auth status` prints
 -- no identifier and `acli jira` has no user command: the assignee on any row
--- of `assignee = currentUser()` is the account itself, and `reporter =
--- currentUser()` stands in when nothing is assigned. The answer is held in
--- this module for as long as the editor runs -- one query per session, nothing
--- on disk -- and dropped by auth_login, since a different account may have
+-- of `assignee = currentUser()` is the account itself, and when nothing is
+-- assigned the reporter of a work item from `reporter = currentUser()` is,
+-- read by `view <KEY> --fields reporter`, because `reporter` is outside
+-- search's documented default list, the only names known to pass its
+-- `--fields` check, and `view` checks no name. The answer is held in this
+-- module for as long as the editor runs -- one query per session, nothing on
+-- disk -- and dropped by auth_login, since a different account may have
 -- signed in. Callers asking while the query runs join it, under flight.lua's
 -- rule.
 --
@@ -84,13 +88,21 @@ M.KEY = "^(%u[%u%d]+)%-%d+$"
 -- A project key alone, the same prefix; `--project` takes a list as well.
 M.PROJECT = "^%u[%u%d]+$"
 
--- What `view` is asked for. Its own default list is not `search`'s, so both
--- are named explicitly.
+-- What `view` is asked for. `view` checks no name -- `--fields transitions`
+-- answers null rather than an error -- and its own default list is not
+-- `search`'s, so both are named explicitly.
 M.VIEW_FIELDS = "summary,status,assignee,reporter,updated,description,comment"
--- What `search` is asked for: what a row renders, plus the assignee, the
--- reporter and the update time, which a row carries and the dashboard's line
--- does not show.
-M.ROW_FIELDS = "summary,status,assignee,reporter,updated"
+-- What `search` is asked for: the key, the status and the title a row
+-- renders, and nothing else. `search` holds `--fields` to a list of its own,
+-- which neither its help nor Atlassian's reference prints, and refuses a name
+-- outside it: `comment` as `field 'comment' is not allowed`, and `updated` on
+-- the pinned 1.3.36 with a refusal naming it whose exact wording was not
+-- captured. The one list documented is its default,
+-- `issuetype,key,assignee,priority,status,summary`. Its help calls them the
+-- fields "to display in the output" and no search payload has been seen, so
+-- `key` is asked for rather than assumed. Every search here names fields from
+-- that list and the suite holds them to it.
+M.ROW_FIELDS = "key,summary,status"
 
 M.TOKEN_URL = "https://id.atlassian.com/manage-profile/security/api-tokens"
 
@@ -481,9 +493,6 @@ function M.rows(section, on_done)
         title = fields.summary,
       })
       if ok then
-        built.assignee = person(fields.assignee)
-        built.reporter = person(fields.reporter)
-        built.updated = fields.updated
         rows[#rows + 1] = built
       else
         reasons[#reasons + 1] = tostring(built)
@@ -506,12 +515,31 @@ function M.rows(section, on_done)
   end)
 end
 
+-- The `accountId` of a user object as acli returns one, or nil.
+local function identifier_of(user)
+  if type(user) == "table" and user.accountId then
+    return user.accountId
+  end
+  return nil
+end
+
 -- The identifier off the first row that carries one under `field`.
 local function identifier_in(found, field)
   for _, entry in ipairs(found) do
-    local user = entry.fields and entry.fields[field]
-    if type(user) == "table" and user.accountId then
-      return user.accountId
+    local id = identifier_of(entry.fields and entry.fields[field])
+    if id then
+      return id
+    end
+  end
+  return nil
+end
+
+-- The key off the first row that carries one of a work item's shape. Only that
+-- shape reaches `view`, for the reason KEY states.
+local function key_in(found)
+  for _, entry in ipairs(found) do
+    if type(entry.key) == "string" and entry.key:match(M.KEY) then
+      return entry.key
     end
   end
   return nil
@@ -520,14 +548,20 @@ end
 --- The account's own identifier, asked once per session.
 ---
 --- The assignee on any row of `assignee = currentUser()` is the account
---- itself; with nothing assigned, the reporter on any row of `reporter =
---- currentUser()`; with neither, the reason says to assign the account one
---- work item, and nothing is remembered so the next call asks again. Callers
---- during the query join it. An answer landing after forget() has run was
---- asked under whatever account was signed in then, so it is replaced by a
---- reason to open the item again rather than trusted: a login drops the
---- identity whether it succeeded or not, because either way the client's
---- stored credentials may have changed.
+--- itself. With nothing assigned, the reporter of a work item from
+--- `reporter = currentUser()` is, read by `view <KEY> --fields reporter`:
+--- `reporter` is outside search's documented default list, the only names
+--- known to pass its `--fields` check, and `view` checks no name. A view that
+--- fails, or prints no JSON, answers with the key it read and acli's own
+--- words beneath, and one that prints no reporter with the line to run by
+--- hand. With nothing assigned or reported, or with no reported key of a
+--- work item's shape, the reason says to assign the account one work item.
+--- No failure is remembered, so the next call asks again. Callers during the
+--- query join it. An answer landing after forget() has run was asked under
+--- whatever account was signed in then, so it is replaced by a reason to open
+--- the item again rather than trusted: a login drops the identity whether it
+--- succeeded or not, because either way the client's stored credentials may
+--- have changed.
 ---@param on_done fun(id: string|nil, err: string|nil)
 function M.whoami(on_done)
   if identity then
@@ -542,18 +576,62 @@ function M.whoami(on_done)
       if id then
         return settle(id)
       end
-      search("reporter = currentUser()", "reporter", false, function(reported, err_reported)
+      -- The key alone: `view` is given it, and `key` is in the list
+      -- ROW_FIELDS' comment gives.
+      search("reporter = currentUser()", "key", false, function(reported, err_reported)
         if not reported then
           return settle(nil, err_reported)
         end
-        id = identifier_in(reported, "reporter")
-        if id then
-          return settle(id)
+        local key = key_in(reported)
+        if not key and #reported > 0 then
+          local first = type(reported[1]) == "table" and reported[1].key or reported[1]
+          return settle(
+            nil,
+            ("the account's own identifier is unknown: no work item is assigned to it, and no work item it reported has a key of the shape PROJ-123, the first being %s. Assign it one work item and open the item again"):format(
+              tostring(first)
+            )
+          )
         end
-        settle(
-          nil,
-          "the account's own identifier is unknown: no work item is assigned to it or reported by it, and acli has no user command. Assign it one work item and open the item again"
-        )
+        if not key then
+          return settle(
+            nil,
+            "the account's own identifier is unknown: no work item is assigned to it or reported by it, and acli has no user command. Assign it one work item and open the item again"
+          )
+        end
+        local argv = { "workitem", "view", key, "--fields", "reporter", "--json" }
+        acli(argv, nil, function(result)
+          -- A failure names the lookup and the key: the reason reaches the
+          -- buffer of whatever work item was opened, not `key`'s, and acli's
+          -- words alone say nothing about why `key` was read.
+          local function unknown(reason)
+            return settle(
+              nil,
+              ("the account's own identifier is unknown: reading the reporter of %s, a work item it reported, failed\n%s"):format(
+                key,
+                reason
+              )
+            )
+          end
+          if not result.ok then
+            return unknown(spawn.message(result))
+          end
+          local decoded, err_decoded = spawn.decode(result)
+          if err_decoded then
+            return unknown(err_decoded)
+          end
+          local fields = type(decoded) == "table" and decoded.fields or nil
+          id = identifier_of(type(fields) == "table" and fields.reporter or nil)
+          if id then
+            return settle(id)
+          end
+          settle(
+            nil,
+            ("acli: view %s printed no reporter carrying an accountId, so the account's own identifier is unknown; run\n  %s\nby hand to see what it prints"):format(
+              key,
+              shell_line(result.argv)
+            )
+          )
+        end)
       end)
     end)
   end, on_done)

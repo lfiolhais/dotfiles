@@ -545,8 +545,8 @@ changes that test too. `cache.read` holds every row to `row.new` and treats
 a file with one bad row as a miss, because a row the dash cannot render
 would break the paint until the file was removed by hand; it keeps the
 file's entry rather than what `row.new` built, so what an adapter adds
-beyond the fields `row.new` returns — `updated` on every row, a merge
-request's `url` — survives the round trip.
+beyond the fields `row.new` returns — such as the `url` on a merge request's
+or a pull request's row — survives the round trip.
 
 Nothing in the module raises: an absent directory, a file that is not JSON
 or is of another format, a read that fails part way are each a miss, because

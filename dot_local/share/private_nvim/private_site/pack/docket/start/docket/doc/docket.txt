@@ -1316,10 +1316,17 @@ Jira, through acli~
     what decides who wrote a comment. The account's own identifier comes
     from a search, since `acli` prints none and has no user command: the
     assignee of any work item assigned to the account, or failing that the
-    reporter of any it reported. It is asked once per editor session, and
+    reporter of one it reported, which `acli jira workitem view` reads
+    because `reporter` is outside the names `search` is known to accept,
+    given in the next paragraph. It is asked once per editor session, and
     again after a login.
 
-    A section's search walks every page.
+    A section's search walks every page and asks for the key, the status
+    and the summary alone: `acli jira workitem search --fields` refuses a
+    name outside a list of its own that its help does not print, and the
+    names known to be in it are its default,
+    `issuetype,key,assignee,priority,status,summary`. docket asks for
+    nothing outside them.
 
     Transitions cannot be listed: `acli` sets a status by name and has no
     command naming the statuses a work item can move to, so |docket-state|

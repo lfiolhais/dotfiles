@@ -139,8 +139,8 @@ end
 --- render inside whatever command opened the dashboard, and the file would
 --- stay until it was removed by hand. The entry itself is kept rather than
 --- row.new's return, which holds the rendered fields alone, so what an adapter
---- adds beyond them -- `updated` on every row, a merge request's `url` --
---- survives the round trip.
+--- adds beyond them -- such as the `url` on a merge request's or a pull
+--- request's row -- survives the round trip.
 ---@param key string
 ---@return { rows: table[], written: integer }|nil cached
 function M.read(key)

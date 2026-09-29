@@ -1857,16 +1857,54 @@ local function view_payload()
   }
 end
 
-local ASSIGNEE_QUERY = argv_of("workitem", "search", "--jql", "assignee = currentUser()", "--json", "--fields", "assignee")
-local REPORTER_QUERY = argv_of("workitem", "search", "--jql", "reporter = currentUser()", "--json", "--fields", "reporter")
+-- The names `acli jira workitem search --fields` takes are a list of acli's
+-- own, which neither its help nor Atlassian's reference prints, and a name
+-- outside it is refused: `comment` as `field 'comment' is not allowed`, and
+-- `updated` on the pinned 1.3.36 with a refusal whose exact wording was not
+-- captured. The one list documented is search's default, printed by `acli
+-- jira workitem search --help`, so every search the adapter runs is held to
+-- these names.
+local SEARCH_FIELDS = { issuetype = true, key = true, assignee = true, priority = true, status = true, summary = true }
 
-test("jira: whoami falls back to reporter, and then answers without asking again", function()
+-- What a section's search asks for per row, spelled out rather than read off
+-- jira.ROW_FIELDS: a name added there that search refuses, or dropped while
+-- rows() still reads it, is the defect, and an assertion that reads the list
+-- cannot see either.
+local JIRA_FIELDS = "key,summary,status"
+
+-- The value after `--fields` in an argument list, or nil.
+local function fields_of(argv)
+  for index, word in ipairs(argv) do
+    if word == "--fields" then
+      return argv[index + 1]
+    end
+  end
+  return nil
+end
+
+local ASSIGNEE_QUERY = argv_of("workitem", "search", "--jql", "assignee = currentUser()", "--json", "--fields", "assignee")
+local REPORTER_QUERY = argv_of("workitem", "search", "--jql", "reporter = currentUser()", "--json", "--fields", "key")
+local REPORTER_VIEW = argv_of("workitem", "view", "TIG-7", "--fields", "reporter", "--json")
+
+-- An abridged answer to `view <KEY> --fields reporter --json`: `id`, `key`,
+-- `self`, and `fields` holding the reporter alone. view_payload() has the
+-- full set of top-level keys `view` prints.
+local function reporter_payload(key, reporter)
+  return { id = "1" .. key:match("%d+$"), key = key, self = "https://example.atlassian.net/rest/api/3/issue/1" .. key:match("%d+$"), fields = { reporter = reporter } }
+end
+
+test("jira: whoami falls back to a reported work item's reporter through view, and then answers without asking again", function()
   jira.forget()
   local calls, restore = stub_run(function(argv)
+    if argv[4] == "view" then
+      return done(argv, reporter_payload(argv[5], user("acc-me", "Me Myself")))
+    end
     if jql_of(argv) == "assignee = currentUser()" then
       return done(argv, {})
     end
-    return done(argv, { found("TIG-7", { reporter = user("acc-me", "Me Myself") }) })
+    -- The row carries what `--fields key` returns and no reporter, so the
+    -- identifier has to come from the view.
+    return done(argv, { found("TIG-7", {}) })
   end)
   local answers = {}
   jira.whoami(function(id, err)
@@ -1877,10 +1915,12 @@ test("jira: whoami falls back to reporter, and then answers without asking again
   end)
   restore()
   eq(answers, { { "acc-me" }, { "acc-me" } })
-  eq(#calls, 2, "two searches for the first answer, none for the second")
+  eq(#calls, 3, "two searches and a view for the first answer, none for the second")
   eq(calls[1].argv, ASSIGNEE_QUERY)
   eq(calls[2].argv, REPORTER_QUERY)
+  eq(calls[3].argv, REPORTER_VIEW)
   eq(has(calls[1].argv, "--paginate"), false, "the first page is enough")
+  eq(has(calls[2].argv, "--paginate"), false, "and one key is enough")
 end)
 
 test("jira: whoami with nothing assigned or reported says to assign one work item, and asks again next time", function()
@@ -1897,6 +1937,151 @@ test("jira: whoami with nothing assigned or reported says to assign one work ite
   jira.whoami(function() end)
   restore()
   eq(#calls, 4, "an empty answer is not remembered")
+  for _, call in ipairs(calls) do
+    eq(call.argv[4], "search", "no key to view, so no view: " .. table.concat(call.argv, " "))
+  end
+end)
+
+test("jira: whoami views no reported key outside a work item key's shape, and names the first", function()
+  jira.forget()
+  local calls, restore = stub_run(function(argv)
+    if jql_of(argv) == "assignee = currentUser()" then
+      return done(argv, {})
+    end
+    -- A key Jira Data Center's configurable pattern allows and KEY does not.
+    return done(argv, { found("MY_PROJ-3", {}) })
+  end)
+  local got
+  jira.whoami(function(id, err)
+    got = { id, err }
+  end)
+  restore()
+  eq(got[1], nil)
+  eq(#calls, 2, "no view: " .. table.concat(calls[#calls].argv, " "))
+  eq(got[2]:find("no work item it reported has a key of the shape PROJ-123, the first being MY_PROJ-3", 1, true) ~= nil, true, got[2])
+  eq(got[2]:find("Assign it one work item", 1, true) ~= nil, true, got[2])
+end)
+
+test("jira: whoami reports a view that prints no JSON with the key it read and the decode error", function()
+  jira.forget()
+  local _, restore = stub_run(function(argv)
+    if argv[4] == "view" then
+      return done(argv, "not json")
+    end
+    if jql_of(argv) == "assignee = currentUser()" then
+      return done(argv, {})
+    end
+    return done(argv, { found("TIG-7", {}) })
+  end)
+  local got
+  jira.whoami(function(id, err)
+    got = { id, err }
+  end)
+  restore()
+  eq(got[1], nil)
+  eq(got[2]:find("reading the reporter of TIG-7, a work item it reported, failed\n", 1, true) ~= nil, true, got[2])
+  eq(got[2]:find("output is not JSON", 1, true) ~= nil, true, got[2])
+end)
+
+test("jira: whoami reports a failed reporter search with acli's own words and views nothing", function()
+  jira.forget()
+  local calls, restore = stub_run(function(argv)
+    if jql_of(argv) == "assignee = currentUser()" then
+      return done(argv, {})
+    end
+    return failed(argv, 1, "Error: JQL is invalid")
+  end)
+  local got
+  jira.whoami(function(id, err)
+    got = { id, err }
+  end)
+  restore()
+  eq(got, { nil, "acli exited 1\nError: JQL is invalid" })
+  eq(#calls, 2)
+end)
+
+test("jira: whoami reports a failed view with acli's own words, and a view printing no reporter with the command to run, and asks again after either", function()
+  jira.forget()
+  local views = 0
+  local calls, restore = stub_run(function(argv)
+    if argv[4] == "view" then
+      views = views + 1
+      if views == 1 then
+        return failed(argv, 1, "Error: work item TIG-7 does not exist")
+      end
+      return done(argv, reporter_payload(argv[5], vim.NIL))
+    end
+    if jql_of(argv) == "assignee = currentUser()" then
+      return done(argv, {})
+    end
+    return done(argv, { found("TIG-7", { summary = "Seven" }) })
+  end)
+  local got
+  jira.whoami(function(id, err)
+    got = { id, err }
+  end)
+  eq(got, {
+    nil,
+    "the account's own identifier is unknown: reading the reporter of TIG-7, a work item it reported, failed\nacli exited 1\nError: work item TIG-7 does not exist",
+  })
+  jira.whoami(function(id, err)
+    got = { id, err }
+  end)
+  restore()
+  eq(#calls, 6, "neither answer was remembered, so the second call searched and viewed again")
+  eq(got[1], nil)
+  eq(got[2]:find("view TIG-7 printed no reporter carrying an accountId", 1, true) ~= nil, true, got[2])
+  eq(got[2]:match("\n  (.-)\n"), "acli jira workitem view TIG-7 --fields reporter --json", "the line to paste")
+end)
+
+test("jira: every search names --fields from search's default list, ROW_FIELDS among them, and so does the search a create prints", function()
+  jira.forget()
+  local calls, restore = stub_run(function(argv)
+    if argv[4] == "view" then
+      return done(argv, reporter_payload(argv[5], user("acc-me", "Me Myself")))
+    end
+    if argv[4] == "create" then
+      return done(argv, "Created TIG-48 and TIG-49")
+    end
+    if jql_of(argv) == "assignee = currentUser()" then
+      return done(argv, {})
+    end
+    return done(argv, { found("TIG-7", { summary = "Seven", status = { name = "To Do" } }) })
+  end)
+  jira.rows({ query = "project = TIG" }, function() end)
+  jira.whoami(function() end)
+  jira.states("TIG-7", function() end)
+  local printed
+  jira.item_create({ project = "TIG", type = "Task", summary = "Probe" }, "", function(_, err)
+    printed = err
+  end)
+  restore()
+  local function held(fields, where)
+    eq(type(fields), "string", "--fields is passed: " .. where)
+    for _, name in ipairs(vim.split(fields, ",", { plain = true })) do
+      eq(SEARCH_FIELDS[name], true, ("%s is outside search's default list: %s"):format(name, where))
+    end
+  end
+  held(jira.ROW_FIELDS, "jira.ROW_FIELDS")
+  local searched = {}
+  for _, call in ipairs(calls) do
+    if call.argv[4] == "search" then
+      searched[#searched + 1] = jql_of(call.argv)
+      held(fields_of(call.argv), table.concat(call.argv, " "))
+    end
+  end
+  table.sort(searched)
+  -- Every search site in the adapter ran: rows(), both of whoami()'s, and
+  -- states(). A site added to the adapter is added here too, or it is not held.
+  eq(searched, {
+    "assignee = currentUser()",
+    "project = TIG",
+    "project = TIG ORDER BY updated DESC",
+    "reporter = currentUser()",
+  })
+  local line = printed:match("\n  (acli jira workitem search [^\n]*)")
+  eq(type(line), "string", "the create's report names the search to run by hand: " .. printed)
+  held(line:match("%-%-fields (%S+)"), line)
 end)
 
 test("jira: whoami reports a failed search with acli's own words, and joins callers during one query", function()
@@ -2374,7 +2559,7 @@ test("jira: a search that prints an unknown shape is refused with a command a sh
   eq(
     line,
     "acli jira workitem search --jql 'project IN (PAY, TIG) AND statusCategory != Done' --json --fields "
-      .. jira.ROW_FIELDS
+      .. JIRA_FIELDS
       .. " --paginate",
     "the JQL is quoted, so `(PAY,` opens no substitution in fish"
   )
@@ -2437,8 +2622,11 @@ test("jira: states are the distinct statuses across the project's rows, sorted",
     { label = "In Progress", target = "In Progress" },
     { label = "To Do", target = "To Do" },
   })
-  eq(jql_of(calls[1].argv), "project = TIG ORDER BY updated DESC")
-  eq(has(calls[1].argv, "--paginate"), false, "one page of recent rows carries the workflow's statuses")
+  eq(
+    calls[1].argv,
+    argv_of("workitem", "search", "--jql", "project = TIG ORDER BY updated DESC", "--json", "--fields", "status"),
+    "one page of recent rows carries the workflow's statuses, and `status` is what is read off them"
+  )
 end)
 
 test("jira: states refuses an identifier that is not a key, because a query reaches acli as written", function()
@@ -2478,9 +2666,17 @@ test("jira: rows are normalised, either search shape is read, and complete answe
     if jql_of(argv):find("issues", 1, true) then
       return done(argv, { issues = { found("TIG-9", { summary = "Nine", status = { name = "Done" } }) }, startAt = 0, maxResults = 50 })
     end
+    -- The first row carries fields the search is not asked for, as a client
+    -- that ignored `--fields` would return them; none reaches the row.
     return done(argv, {
-      found("TIG-12", { summary = "Twelve", status = { name = "To Do" }, assignee = user("acc-me", "Me Myself"), updated = "2024-05-03T10:00:00.000+0000" }),
-      found("TIG-3", { summary = "Three", status = { name = "In Progress" }, assignee = vim.NIL }),
+      found("TIG-12", {
+        summary = "Twelve",
+        status = { name = "To Do" },
+        assignee = user("acc-me", "Me Myself"),
+        reporter = user("acc-ana", "Ana"),
+        updated = "2024-05-03T10:00:00.000+0000",
+      }),
+      found("TIG-3", { summary = "Three", status = { name = "In Progress" } }),
     })
   end)
   local got
@@ -2488,13 +2684,16 @@ test("jira: rows are normalised, either search shape is read, and complete answe
     got = { rows, err }
   end)
   eq(got[2], nil)
-  eq(calls[1].argv, argv_of("workitem", "search", "--jql", "project = TIG", "--json", "--fields", jira.ROW_FIELDS, "--paginate"))
+  eq(calls[1].argv, argv_of("workitem", "search", "--jql", "project = TIG", "--json", "--fields", JIRA_FIELDS, "--paginate"))
   eq(got[1][1].id, "TIG-12")
   eq(got[1][1].state, "To Do")
   eq(got[1][1].title, "Twelve")
   eq(got[1][1].source, "jira")
-  eq(got[1][1].assignee, { id = "acc-me", name = "Me Myself" })
-  eq(got[1][2].assignee, nil)
+  eq(
+    { got[1][1].assignee, got[1][1].reporter, got[1][1].updated },
+    { nil, nil, nil },
+    "a row carries what it renders: the fields the search does not ask for are not read"
+  )
   eq(jira.complete("item", "tig-1"), { { id = "TIG-12", title = "Twelve" } })
   eq(jira.complete("item", "Tig-1"), { { id = "TIG-12", title = "Twelve" } }, "matched in any case")
   eq(jira.complete("item", ""), { { id = "TIG-3", title = "Three" }, { id = "TIG-12", title = "Twelve" } }, "in the dashboard's order, by number")
