@@ -46,6 +46,29 @@ inherit the session model:
 Set these via `opts.model` and `opts.effort` in workflow scripts and `model` on
 the Agent tool.
 
+## Planning — a plan is peer-reviewed before it is presented
+
+Any plan goes through more than one model before the user sees it, and is
+presented only once every reviewer agrees on its contents.
+
+- One model drafts. At least one different model reviews, checking the draft's
+  claims against the system rather than against the draft's own reasoning.
+- A review returns findings with replacement wording, so the next pass is an
+  application rather than a reinterpretation.
+- Every correction pass is itself reviewed. A pass that fixes many claims
+  introduces new ones, and the model that wrote them cannot see them.
+- Convergence is stated, not assumed: a review ends either with numbered findings
+  or with a statement that none remain, and the plan is presented on that
+  statement.
+- Tell the reviewer what changed as each change is made, rather than batching the
+  changes into one handover at the end, so it never reviews a superseded draft.
+- Choose the reviewing model with `model` on the Agent tool; drafting and
+  verification are strong-model work.
+
+A plan is executed rather than read, so a wrong claim in it becomes wrong code,
+and the claims that survive a self-review are exactly the ones its author cannot
+see.
+
 ## Python — ruff ruleset (default for all Python projects)
 
 Every Python project must pass this exact ruff config and be ruff-formatted, UNLESS the project ships its own explicit ruff config (in which case that one wins). When starting or adding Python to a project without a ruff config, create one with these contents and keep the code `ruff check` + `ruff format` clean.
