@@ -149,7 +149,10 @@ It:
   output, which the timeout has to kill. The buffers and tabs it opens belong
   to the `nvim -l` instance running it and end with it. It sets its own module
   path from its location, so `nvim -u NONE -l tests/docket.lua` runs it by
-  hand from any directory. A host without `nvim` is a warning;
+  hand from any directory. It reads every docket module from the source tree
+  and takes any installed copy of docket off the runtime path and
+  `'packpath'` first, so a machine with the plugin deployed runs the same
+  suite as one without it. A host without `nvim` is a warning;
 - runs `chezmoi-packages --help` through `uv run --script`, which is how that
   command really runs: its shebang is a PEP 723 script, so uv supplies both the
   interpreter and `tomlkit`. This proves the dependency block resolves and that

@@ -3,5 +3,7 @@
 # Probe reports written while working on the neovim plugin. Scratch output rather
 # than anything this repository configures.
 /p0*.txt
-# nvim falls back to this when it cannot write ~/.local/state/nvim/nvim.log.
-/nvim.log
+# nvim falls back to nvim.log in its working directory, which can be any folder
+# here, when it cannot write ~/.local/state/nvim/nvim.log. A pattern without a
+# slash matches at every depth.
+nvim.log

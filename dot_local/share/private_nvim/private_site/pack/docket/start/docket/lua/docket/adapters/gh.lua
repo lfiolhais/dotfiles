@@ -382,11 +382,14 @@ end
 --- "a specific GitHub Enterprise instance" alone and open one without a host
 --- "from the default GitHub instance (github.com or configured
 --- github_hostname)", so a github.com row would open on a configured
---- Enterprise host; the address carries its own. UNVERIFIED against the
---- octo.nvim installed, whose source is not in this repository: the shapes
---- are its README's, and `:Octo https://github.com/<owner>/<repo>/pull/<n>`
---- in the editor shows whether the release installed takes an address, with
---- `:help octo-commands` there as that release's own documentation. There is
+--- Enterprise host; the address carries its own. `<CR>` on a pull request
+--- row opens the pull request in octo.nvim through its address. UNVERIFIED:
+--- which host octo.nvim opens an address on when its `github_hostname` names
+--- another; the neovim configuration this repository deploys sets none, so
+--- an address has been opened only with octo.nvim on its default host. `:Octo
+--- https://github.com/<owner>/<repo>/pull/<n>` in an editor whose octo.nvim
+--- setup names an Enterprise `github_hostname` shows it, with `:help
+--- octo-commands` there as the installed release's own documentation. There is
 --- no item to hand back, so on success the callback gets neither an item nor
 --- an error, and commands reads `handoff` to call this in place of opening
 --- an item buffer. The command runs on the main loop, so the callback

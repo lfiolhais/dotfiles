@@ -1049,7 +1049,10 @@ clones. neovim loads every plugin in a `pack/*/start/` folder under
 under `pack/core/opt/`, and each loads when the `vim.pack.add` call names it. This repository deploys docket
 from `dot_local/share/private_nvim/private_site/pack/docket/start/docket/` to
 `~/.local/share/nvim/site/pack/docket/start/docket/`, so it loads with nothing
-to declare; `init.lua` carries only its `setup` call, and an apply is what
+to declare; `init.lua` carries its `setup` call, and beside auto-session's
+setup the hook that keeps docket's buffers off a saved session's buffer list
+and the `shada` entry that keeps them out of neovim's record of marks and
+recent files; `:help docket-setup-sessions` describes both. An apply is what
 updates it. Its reference is `:help docket`, and changing it starts at the
 plugin's own
 [README.md](dot_local/share/private_nvim/private_site/pack/docket/start/docket/README.md).
@@ -1131,11 +1134,12 @@ is already signed in for that client.
 :checkhealth docket
 ```
 
-confirms it: under `docket: backends`, each client in use reads
-`jira: signed in`, `glab: signed in` or `gh: signed in`, followed by the
-client's own status output. A client this machine does not use shows as not
-signed in or not installed, which is expected. `:help docket-health` covers
-the other lines.
+run from inside a clone, confirms it: under `docket: backends`, each client
+the clone uses reads `jira: signed in`, `glab: signed in` or
+`gh: signed in`, followed by the client's own status output. A client no
+configured section needs there, such as `gh` in a clone on GitLab, reads
+`gh: no configured section needs it here; not checked`, and is not run.
+`:help docket-health` covers the other lines.
 
 ### Binding a repository to its Jira projects
 
@@ -1145,17 +1149,22 @@ projects. From any folder of the clone:
 ```sh
 acli jira project list --paginate            # every project the account can see, with its key
 git config --add dotfiles.jira.project PAY   # the key; repeat for each further project
+git config dotfiles.jira.epic PAY-10         # optional: only that epic's children
 ```
 
-In a clone made with `git wt-clone` the value lands in `.bare/config`, and in
+In a clone made with `git wt-clone` the values land in `.bare/config`, and in
 a plain clone in `.git/config`; either way every worktree of the clone reads
-it, worktrees made later included, so it is set once per clone. It lives in
-the clone rather than in this repository, so a fresh clone needs it again.
-`git config --get-all dotfiles.jira.project` prints what is bound. An unbound
-clone shows only the account's own tickets, from every project, and refuses
-to build a worktree for one, since the ticket could belong to another
-repository. Binding by a complete query instead, and
-marking a repository as having no Jira, are under `:help docket-binding`.
+them, worktrees made later included, so they are set once per clone. They
+live in the clone rather than in this repository, so a fresh clone needs
+them again. `git config --get-all dotfiles.jira.project` prints the projects
+bound, and `git config --get dotfiles.jira.epic` the epic. The epic narrows
+every Jira section of the dash to that epic's children, and set alone it
+binds the clone to the epic's project; `git config --unset
+dotfiles.jira.epic` clears it. An unbound clone shows only the account's own
+tickets, from every project, and refuses to build a worktree for one, since
+the ticket could belong to another repository. Binding by a complete query
+instead, and marking a repository as having no Jira, are under `:help
+docket-binding`.
 
 `:Docket` inside the clone, or `<leader>dd`, then opens the dash, and
 `:help docket` covers everything done from there.

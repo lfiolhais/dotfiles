@@ -16,22 +16,22 @@
 -- back as one paragraph whatever it held, so each write serialises the
 -- region through adf and hands acli a file holding the tree: `comment create
 -- --body-file`, `comment update --body-adf`, and `--description-file` on
--- `edit` and `create`.
--- UNVERIFIED: no document has been written yet. `--body-adf` is documented as
--- taking one. `--body-file` and `--description-file` are documented as taking
--- "plain text or Atlassian Document Format", and whether they parse a file
--- holding a document as one, rather than posting its JSON as text, is
--- unobserved. What adf.serialise writes for two paragraphs is
+-- `edit` and `create`. All but `--description-file` on `create` parse the
+-- file as a document rather than posting its JSON as text.
+-- UNVERIFIED: `--description-file` on `create`, which item_create() passes
+-- and acli documents as taking "plain text or Atlassian Document Format", as
+-- it documents `edit`'s. What adf.serialise writes for two paragraphs is
 --
 --   {"type":"doc","version":1,"content":[
 --     {"type":"paragraph","content":[{"type":"text","text":"one"}]},
 --     {"type":"paragraph","content":[{"type":"text","text":"two"}]}]}
 --
--- and a file holding it, posted with `acli jira workitem comment create --key
--- <KEY> --body-file <FILE>` on a work item where a test comment does no harm
--- and read back with `acli jira workitem view <KEY> --fields comment --json`,
--- settles it: two paragraphs back means the file was parsed, a comment reading
--- as JSON means it was not.
+-- and a file holding it, passed with `acli jira workitem create --project
+-- <KEY> --type Task --summary probe --description-file <FILE> --json` to a
+-- project where a test work item does no harm and read back with `acli jira
+-- workitem view <NEW-KEY> --fields description --json`, settles it: two
+-- paragraphs back means the file was parsed, a description reading as JSON
+-- means it was not.
 -- `--yes` goes on `transition` and `edit` because both prompt without it,
 -- and a prompt behind a pipe is a hang. `create` lists no `--yes` and gets
 -- none; spawn gives every client a closed standard input, so a build that did
@@ -41,13 +41,12 @@
 -- no identifier and `acli jira` has no user command: the assignee on any row
 -- of `assignee = currentUser()` is the account itself, and when nothing is
 -- assigned the reporter of a work item from `reporter = currentUser()` is,
--- read by `view <KEY> --fields reporter`, because `reporter` is outside
--- search's documented default list, the only names known to pass its
--- `--fields` check, and `view` checks no name. The answer is held in this
--- module for as long as the editor runs -- one query per session, nothing on
--- disk -- and dropped by auth_login, since a different account may have
--- signed in. Callers asking while the query runs join it, under flight.lua's
--- rule.
+-- read by `view <KEY> --fields reporter`, although `search --fields` on the
+-- pinned 1.3.36 accepts `reporter` too, as ROW_FIELDS' comment lists. The
+-- answer is held in this module for as long as the editor runs -- one query
+-- per session, nothing on disk -- and dropped by auth_login, since a
+-- different account may have signed in. Callers asking while the query runs
+-- join it, under flight.lua's rule.
 --
 -- Transitions cannot be listed: `view --fields transitions` returns null. So
 -- states() offers the distinct statuses seen across the project's own rows,
@@ -95,13 +94,14 @@ M.VIEW_FIELDS = "summary,status,assignee,reporter,updated,description,comment"
 -- What `search` is asked for: the key, the status and the title a row
 -- renders, and nothing else. `search` holds `--fields` to a list of its own,
 -- which neither its help nor Atlassian's reference prints, and refuses a name
--- outside it: `comment` as `field 'comment' is not allowed`, and `updated` on
--- the pinned 1.3.36 with a refusal naming it whose exact wording was not
--- captured. The one list documented is its default,
--- `issuetype,key,assignee,priority,status,summary`. Its help calls them the
--- fields "to display in the output" and no search payload has been seen, so
--- `key` is asked for rather than assumed. Every search here names fields from
--- that list and the suite holds them to it.
+-- outside it: `comment` as `field 'comment' is not allowed`. On the pinned
+-- 1.3.36 it accepts `summary`, `status`, `assignee`, `reporter`, `priority`,
+-- `issuetype` and `description`, and refuses `updated` and `created`. The
+-- one list documented is its default,
+-- `issuetype,key,assignee,priority,status,summary`.
+-- Its help calls them the fields "to display in the output", so `key` is
+-- asked for rather than assumed. Every search here names fields from that
+-- default list and the suite holds them to it.
 M.ROW_FIELDS = "key,summary,status"
 
 M.TOKEN_URL = "https://id.atlassian.com/manage-profile/security/api-tokens"
@@ -200,11 +200,9 @@ end
 
 -- The category of a status: `new`, `indeterminate` or `done`, Jira's own
 -- grouping of every workflow's statuses, which a state is coloured by because
--- a status name is the workflow's own word. nil when the payload carries none.
--- UNVERIFIED: the probe printed no status object, so `statusCategory.key`
--- comes from Jira's REST reference rather than from a payload; `acli jira
--- workitem view <KEY> --fields status --json`, with any work item key, prints
--- it.
+-- a status name is the workflow's own word. A status carries it as
+-- `statusCategory.key` in both payloads that hold one: a `search` row's and a
+-- `view`'s. nil when the payload carries none.
 local function category_of(status)
   local grouping = type(status) == "table" and status.statusCategory or nil
   if type(grouping) == "table" and type(grouping.key) == "string" then
@@ -213,11 +211,16 @@ local function category_of(status)
   return nil
 end
 
--- The rows in a decoded search payload. Neither shape has been seen: the
--- probe printed a count it computed rather than the payload. Both are read
--- -- a bare list, and an object holding `issues` as the search endpoint
--- returns one and `view --json` passes its own payload through -- and
--- anything else is refused at the decode point with the command to run.
+-- The rows in a decoded search payload. Which of the two shapes acli 1.3.36
+-- prints is not recorded: the probes printed a count and a row's status
+-- category, each computed from the rows, and neither printed the payload.
+-- Both are read -- a bare list, and an object holding `issues` as the search
+-- endpoint returns one and `view --json` passes its own payload through --
+-- and anything else is refused at the decode point with the command to run.
+-- With any work item key, this prints `[` for a bare list and `{` for an
+-- object:
+--
+--   acli jira workitem search --jql 'key = <KEY>' --json --fields key | head -c 1
 local function rows_of(decoded)
   if vim.islist(decoded) then
     return decoded
@@ -549,13 +552,12 @@ end
 ---
 --- The assignee on any row of `assignee = currentUser()` is the account
 --- itself. With nothing assigned, the reporter of a work item from
---- `reporter = currentUser()` is, read by `view <KEY> --fields reporter`:
---- `reporter` is outside search's documented default list, the only names
---- known to pass its `--fields` check, and `view` checks no name. A view that
---- fails, or prints no JSON, answers with the key it read and acli's own
---- words beneath, and one that prints no reporter with the line to run by
---- hand. With nothing assigned or reported, or with no reported key of a
---- work item's shape, the reason says to assign the account one work item.
+--- `reporter = currentUser()` is, read by `view <KEY> --fields reporter`.
+--- `search --fields` accepts `reporter` too, as ROW_FIELDS' comment lists. A
+--- view that fails, or prints no JSON, answers with the key it read and
+--- acli's own words beneath, and one that prints no reporter with the line to
+--- run by hand. With nothing assigned or reported, or with no reported key of
+--- a work item's shape, the reason says to assign the account one work item.
 --- No failure is remembered, so the next call asks again. Callers during the
 --- query join it. An answer landing after forget() has run was asked under
 --- whatever account was signed in then, so it is replaced by a reason to open
@@ -576,8 +578,8 @@ function M.whoami(on_done)
       if id then
         return settle(id)
       end
-      -- The key alone: `view` is given it, and `key` is in the list
-      -- ROW_FIELDS' comment gives.
+      -- The key alone: `view` is given it, and `key` is in search's default
+      -- list, which ROW_FIELDS' comment gives.
       search("reporter = currentUser()", "key", false, function(reported, err_reported)
         if not reported then
           return settle(nil, err_reported)
@@ -742,8 +744,7 @@ function M.project_of(_)
   return nil
 end
 
---- Adds a comment, as a document. UNVERIFIED: whether `--body-file` parses the
---- file as a document is unobserved; the header says what settles it.
+--- Adds a comment, as a document, which `--body-file` parses as one.
 ---@param id string the key
 ---@param text string the region's text
 ---@param on_done fun(ok: boolean, err: string|nil)
@@ -781,9 +782,8 @@ function M.comment_delete(id, comment_id, on_done)
   end)
 end
 
---- Replaces the description, as a document. UNVERIFIED: whether
---- `--description-file` parses the file as a document is unobserved; the
---- header says what settles it.
+--- Replaces the description, as a document, which `edit --description-file`
+--- parses as one.
 ---@param id string the key
 ---@param text string the region's text
 ---@param on_done fun(ok: boolean, err: string|nil)
@@ -895,11 +895,10 @@ end
 --- `edit --assignee` with `--yes`, which `edit` prompts without, or `edit
 --- --remove-assignee` for NOBODY. ME goes to acli as its own `@me`, so it
 --- works whether or not whoami() can answer -- which is the account with
---- nothing assigned that most needs it. UNVERIFIED: both flags are in the
---- `edit --help` the pinned release printed, and no edit carrying either has
---- been run; `acli jira workitem edit --key <KEY> --assignee @me --yes --json`
---- on a work item where it does no harm, read back with `acli jira workitem
---- view <KEY> --fields assignee --json`, settles both at once.
+--- nothing assigned that most needs it. On the pinned 1.3.36, `edit --key
+--- <KEY> --assignee @me --yes --json` assigns the work item to the account
+--- and `edit --key <KEY> --remove-assignee --yes --json` leaves it with
+--- nobody, as `view <KEY> --fields assignee --json` reads back.
 ---@param id string the key
 ---@param who string ME, NOBODY, or an `accountId` as a person's `id` carries it
 ---@param on_done fun(ok: boolean, err: string|nil)
@@ -936,16 +935,16 @@ local creating = flight.new({
 -- The key a create printed, or nil. `project` is the one asked for; a key of
 -- any other project is not this create's.
 --
--- UNVERIFIED: no create has been run, so what `create --json` prints is
--- unobserved. It is read three ways, the first that answers winning: an object
--- carrying `key`, which is what Jira's own create endpoint answers with
--- beside `id` and `self`; the bulk summary outcome() reads, whose `results`
--- carry `key`; and, for any other shape, the output as text, where exactly one
+-- The output is read three ways, the first that answers winning: an object
+-- carrying `key`; the bulk summary outcome() reads, whose `results` carry
+-- `key`; and, for any other shape, the output as text, where exactly one
 -- distinct key of the project, other than a key the summary itself mentions,
 -- is the answer. Two or more is no answer rather than a guess, because the
--- buffer reopens at whatever this returns. `acli jira workitem create
--- --project <KEY> --type Task --summary probe --json`, on a project where a
--- test work item does no harm, prints which shape it is.
+-- buffer reopens at whatever this returns. On the pinned 1.3.36, `acli jira
+-- workitem create --project <KEY> --type Task --summary probe --json` prints
+-- the whole work item with `key` at the top level, so the first reading is
+-- the one that answers; the other two are kept for a release that prints
+-- another shape.
 local function created_key(result, project, summary)
   local function ours(key)
     return type(key) == "string" and key:match(M.KEY) == project
@@ -988,15 +987,17 @@ end
 --- its help also lists `--editor` -- is unobserved. `project` is one project
 --- key, because `--project` takes a list and would make an item in each.
 ---
---- UNVERIFIED: every flag here is read from the `create --help` of acli
---- 1.3.39, a later release than the pinned 1.3.36, whose own help is not
---- recorded; no create has been run against a real instance; and whether
---- `--description-file` parses a document is the question the header leaves
---- open for `edit`. How the key is read off the output is created_key()'s
---- note. A create that acli reports as done and whose key cannot be read, and
---- one killed at the timeout after it was sent, answer with `made` set beside
---- the error, which names the search that lists the project's newest items:
---- the item exists, or may, and creating it again would make a second one.
+--- The pinned 1.3.36 accepts `--project`, `--type`, `--summary` and
+--- `--json`: `create --project <KEY> --type Task --summary probe --json` made
+--- a work item there. UNVERIFIED: `--assignee` on `create`, which no run has
+--- passed and which is read from the `create --help` of acli 1.3.39, a later
+--- release; and whether `--description-file` on `create` parses a document,
+--- the question the header leaves open. How the key is read off the output
+--- is created_key()'s note. A create that acli reports as done and whose key
+--- cannot be read, and one killed at the timeout after it was sent, answer
+--- with `made` set beside the error, which names the search that lists the
+--- project's newest items: the item exists, or may, and creating it again
+--- would make a second one.
 ---@param fields { project: string, type: string, summary: string, assignee: string|nil }
 ---@param text string the body region's text
 ---@param on_done fun(id: string|nil, err: string|nil, made: boolean|nil)

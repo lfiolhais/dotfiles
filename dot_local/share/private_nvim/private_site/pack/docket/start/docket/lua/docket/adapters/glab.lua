@@ -4,13 +4,15 @@
 -- what runs can be read off this file; every flag is one glab's own `--help`
 -- lists. The payload shapes the run against the real instance returned are a
 -- discussion, its notes and `diff_refs`; the fields read off `mr list -F json`
--- and `mr view -F json` come from GitLab's REST reference for the merge
--- request object and are unverified here. The parts marked unverified where
--- they are used are the write half of the `note` family, which glab itself
--- marks experimental and which has not been exercised; the identity route,
--- which the instance has not answered; the user search behind completion,
--- whose endpoint the instance has not printed either; assigning, which has
--- not been run; and the two project ids a row from a fork is recognised by.
+-- and `mr view -F json` come from GitLab's REST reference for the merge request
+-- object and are unverified here. The `note` verbs that write a body, `create`
+-- and `update`, have been run with the body on standard input. The parts marked
+-- unverified where they are used are the `note` verbs that take no body,
+-- `resolve` and `delete`, which glab itself marks experimental; the identity
+-- route, which the instance has not answered; the user search behind
+-- completion, whose endpoint the instance has not printed either; assigning,
+-- which has not been run; and the two project ids a row from a fork is
+-- recognised by.
 --
 -- A body here is markdown, not a document tree, so the read-write asymmetry
 -- that constrains the Jira buffer does not exist: a description or a note
@@ -196,22 +198,27 @@ local function person(user)
   return { id = user.username, name = user.name }
 end
 
--- Whether a merge request comes from a fork, which is the row's `fork` and
--- what makes `w` and `R` refuse it in a clone of its target project: its
+-- Whether a merge request comes from a fork: the row's `fork`, read off
+-- `mr list`, and the `fork` M.item() stores, read off `mr view`. It is what
+-- makes `w` and `R` on the dash, and `<leader>dw` and `<leader>dR` in the
+-- merge request's buffer, refuse it in a clone of its target project: its
 -- source branch lives in the fork, so origin's branch of the same name is
 -- somebody else's code. commands.lua has the rule for a fork's clone. GitLab's
 -- merge request object carries `source_project_id` and `target_project_id`,
 -- and the two differ for a merge request from a fork. UNVERIFIED: neither
--- field has been printed from the instance, and both come from GitLab's REST
--- reference; run in a clone of the project, this prints them for the first
--- page of its open merge requests, and a merge request from a fork shows two
--- different numbers:
+-- field has been printed from the instance, from either command, and both
+-- come from GitLab's REST reference. Run in a clone of the project, the first
+-- line prints them for the first page of its open merge requests, and the
+-- second for one merge request, 482 here, the number after `!` in its
+-- buffer's name; a merge request from a fork shows two different numbers:
 --
 --   glab mr list -F json |
 --     jq '.[] | {iid, source_project_id, target_project_id}'
+--   glab mr view 482 -F json |
+--     jq '{source_project_id, target_project_id, source_branch}'
 --
 -- An object carrying one of the two or neither is not marked, and the
--- launcher's own question to origin is what stands for such a row.
+-- launcher's own question to origin is what stands for such a merge request.
 local function forked(mr)
   local source, target = mr.source_project_id, mr.target_project_id
   if type(source) ~= "number" or type(target) ~= "number" then
@@ -258,11 +265,9 @@ local function read(args, on_done, cwd)
 end
 
 -- Runs a write whose body goes to glab on standard input, with the newline a
--- `<` redirection would carry. UNVERIFIED: `mr note create --help` and `mr
--- note update --help` both document reading the body from standard input
--- when `-m` is absent, and neither has been run that way; `-m <text>` is the
--- alternative, and `glab api` against the `discussions` endpoint the fallback.
--- `cwd` is as read() takes it.
+-- `<` redirection would carry. `mr note create` and `mr note update` read the
+-- body from standard input when `-m` is absent, as their help documents and
+-- as both do on the instance. `cwd` is as read() takes it.
 local function write(args, text, on_done, cwd)
   glab(args, { stdin = text .. "\n", cwd = cwd }, function(result)
     on_done(outcome(result))
@@ -536,7 +541,10 @@ end
 --- The item carries `ref`, the reference naming the directory it was read in,
 --- which the item buffer hands to every later call about it; `root` says why.
 --- It carries `project` as well, the path its `web_url` names through
---- project_of(), which the item buffer holds against the project in its name.
+--- project_of(), which the item buffer holds against the project in its name,
+--- and `branch` and `fork`, the source branch and whether it lives in a fork,
+--- as rows() reads them, which the item buffer's `<leader>dw` and
+--- `<leader>dR` build the environment from.
 ---@param id string|table `!482`, the bare number, or a reference
 ---@param on_done fun(item: table|nil, err: string|nil, me_err: string|nil)
 function M.item(id, on_done)
@@ -597,6 +605,8 @@ function M.item(id, on_done)
           me = me,
           ref = { id = M.PREFIX .. tostring(mr.iid), cwd = cwd },
           project = M.project_of(mr.web_url),
+          branch = mr.source_branch,
+          fork = forked(mr),
         })
         if not ok then
           return on_done(nil, tostring(built))
@@ -670,15 +680,20 @@ end
 -- whether the first post landed is unknown, cannot make a second note. Both
 -- flags are from the help of glab 1.119.0, which lets them be combined and
 -- refuses either with `--reply` or `--file`, so line_comment() uses neither.
+--
+-- A note already holding the text makes glab print that note's address and
+-- exit 0, so the save reports `new: posted` and reads the merge request
+-- again. The loaded snapshot already holds that note, so identify() in
+-- buffer.lua finds no new comment, conclude() fills the buffer from the read,
+-- and the comment just typed leaves the buffer, its text shown as the note's
+-- that was there. It is held read-only under buffer.POSTED instead only when
+-- that read fails, another call of the same save fails, or text was typed
+-- while the save ran.
 local function create_note(iid, text, on_done, cwd)
   write({ "mr", "note", "create", iid, "--resolvable=false", "--unique" }, text, on_done, cwd)
 end
 
 --- Adds a comment, as a note nobody has to resolve.
----
---- UNVERIFIED: `mr note create` is marked experimental by glab and has not
---- been run; `glab api projects/:id/merge_requests/<iid>/notes` is the
---- fallback.
 ---@param id string|table the identifier, or the item's reference
 ---@param text string the region's text, markdown
 ---@param on_done fun(ok: boolean, err: string|nil)
@@ -697,9 +712,7 @@ end
 --- binary carries, `update [<id> | <branch>] <note-id>`. The USAGE line the
 --- help prints is assembled rather than quoted: it appends `[--flags]` and
 --- moves the optional merge request behind the required note, which is what
---- leaves the double space in the parent command's own table. UNVERIFIED: the
---- verb has not been run; the `notes` endpoint through `glab api` is the
---- fallback.
+--- leaves the double space in the parent command's own table.
 ---@param id string|table the identifier, or the item's reference
 ---@param comment_id string the note's `id`
 ---@param text string the region's text, markdown
@@ -1036,9 +1049,8 @@ end
 --- latest diff version on the server rather than against the diff in the
 --- worktree, so a held line is only right while the branch has not moved; the
 --- shas diff() returns are what pins a version, through the `discussions`
---- endpoint. UNVERIFIED: `create` with `--file` and `--line`, and with
---- `--reply`, have not been run; the `discussions` endpoint through `glab api`,
---- with the shas diff() returns, is the fallback.
+--- endpoint. `create` with `--file` and `--line`, and with `--reply`, takes
+--- the body on standard input as a plain `create` does.
 ---@param id string|table the identifier, or the review's reference
 ---@param position { file: string|nil, line: integer|string|nil, old_line: integer|string|nil, thread: string|nil }
 ---@param text string the comment, markdown
@@ -1093,7 +1105,8 @@ end
 --- `verdict.head` is the head the reviewer saw. It goes to `mr approve` as
 --- `--sha`, which glab 1.119.0's help documents as having to match the merge
 --- request's head, so a push after the diff was read makes GitLab refuse the
---- approval rather than approve commits nobody reviewed.
+--- approval rather than approve commits nobody reviewed. `mr approve --sha
+--- <head>` approves on the instance.
 ---
 --- An approval that fails once the note is out is reported as that rather than
 --- as a plain failure, so that the retry is the approval alone. Both run in the

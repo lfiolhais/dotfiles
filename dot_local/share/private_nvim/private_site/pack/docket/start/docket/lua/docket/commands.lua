@@ -5,8 +5,11 @@
 -- assignment makes stale. plugin/docket.lua declares the command, the
 -- `<leader>dd` map and the autocommands and calls in here, so that nothing
 -- below is loaded until the first use. The other `<leader>d` keys are set per
--- buffer, by attach() on an item buffer, attach_dash() on the dashboard and
--- attach_review() on each buffer that shows a side of a review's diff.
+-- buffer, each kind's from a table of its own: by attach() on an item buffer,
+-- attach_dash() on the dashboard and attach_review() on each buffer that
+-- shows a side of a review's diff. Each also sets `g?`, which lists that
+-- buffer's keys, and so do a new ticket's draft and a review's compose
+-- buffers, which have no keymap of their own.
 --
 -- Every mode asks its adapter for the authentication state before it asks
 -- for anything else -- through auth.ready(), or on the dashboard through
@@ -35,9 +38,10 @@
 -- tab; the bang on `submit` is review.lua's `force`, which posts comments held
 -- against a merge request that has moved since. `R` on a merge request row
 -- builds the environment and hands the editor window `:Docket review <id>`,
--- which is how a row reaches the review. A pull request goes to octo.nvim, as
--- `:Docket #12` sends it, since the GitHub adapter names that handoff and
--- implements no review call.
+-- which is how a row reaches the review, and `<leader>dR` in the merge
+-- request's item buffer does the same from the branch its read stored. A
+-- pull request goes to octo.nvim, as `:Docket #12` sends it, since the GitHub
+-- adapter names that handoff and implements no review call.
 --
 -- The review's keys are set on each buffer that shows a side of its diff, and
 -- taken off again when the review's tab closes: the new side is the
@@ -48,12 +52,12 @@
 -- A pull request never opens in the item buffer: the GitHub adapter names a
 -- `handoff`, and open_item() then calls its item(), which opens octo.nvim.
 -- From the dash the row's address goes with the identifier, and octo.nvim is
--- handed the address, which names the repository and its host, as gh.item()
--- says, UNVERIFIED; `:Docket #12` typed by hand, and a `docket://gh/` name,
--- which the read command hands off the same way, carry no address, so the
--- number goes alone, and octo.nvim's README says the repository then comes
--- from `<cwd>/.git/config`; gh.item() says what settles it against the
--- release installed.
+-- handed the address, which names the repository and its host. Which host
+-- octo.nvim opens it on when its `github_hostname` names another is
+-- unverified, as gh.item() says. `:Docket #12` typed by hand, and a
+-- `docket://gh/` name, which the read command hands off the same way, carry
+-- no address, so the number goes alone, and octo.nvim's README says the
+-- repository then comes from `<cwd>/.git/config`.
 --
 -- A dash row whose address names another project than the dash's clone -- a
 -- section naming `glab` or `gh` as its adapter runs in every clone, and `-R
@@ -99,12 +103,134 @@ M.SUBMIT_WORDS = { "approve", "summary" }
 
 -- The keys of a review, set on each buffer that shows a side of its diff.
 -- Abandoning discards every held comment, so it has no key: it is typed out.
+-- `<leader>ds` submits with no words, so it never approves.
 M.REVIEW_KEYS = {
   { lhs = "<leader>dc", verb = "comment", desc = "Docket: hold a review comment on this line" },
   { lhs = "<leader>dr", verb = "reply", desc = "Docket: reply to the thread on this line" },
   { lhs = "<leader>dx", verb = "resolve", desc = "Docket: resolve the thread on this line" },
-  { lhs = "<leader>ds", verb = "submit", desc = "Docket: submit the review" },
+  { lhs = "<leader>ds", verb = "submit", desc = "Docket: submit the held comments, without approving" },
 }
+
+-- `g?`, set on every docket buffer: it lists the keys of the buffer it is
+-- pressed in through keys_help(), and the list ends with this entry.
+M.HELP = { lhs = "g?", desc = "Docket: list the keys" }
+
+-- The keys of an item buffer, each set by attach() with its `desc`. An entry
+-- naming `sources` is set only on those backends' buffers, so a ticket's
+-- buffer carries no key that always refuses there. `descs` gives a backend a
+-- description of its own: on GitLab `<leader>dt` is where a merge request is
+-- approved and merged, and the map and the `g?` list say so.
+M.ITEM_KEYS = {
+  {
+    lhs = "gx",
+    desc = "Docket: open the item on the web",
+    run = function(buf)
+      M.browse(buf)
+    end,
+  },
+  {
+    lhs = "<leader>dw",
+    desc = "Docket: build the development environment",
+    run = function(buf)
+      M.work(buf)
+    end,
+  },
+  {
+    lhs = "<leader>dR",
+    desc = "Docket: review the merge request",
+    sources = { "glab" },
+    run = function(buf)
+      M.review_item(buf)
+    end,
+  },
+  {
+    lhs = "<leader>dc",
+    desc = "Docket: open a new comment",
+    run = function(buf)
+      M.comment(buf)
+    end,
+  },
+  {
+    lhs = "<leader>dt",
+    desc = "Docket: move the item to another state",
+    descs = { glab = "Docket: approve, merge or close the merge request (reopen a closed one)" },
+    run = function(buf)
+      M.transition(buf)
+    end,
+  },
+  {
+    lhs = "<leader>da",
+    desc = "Docket: assign the item",
+    run = function(buf)
+      M.assign(buf)
+    end,
+  },
+}
+
+-- The keys of the dashboard, each set by attach_dash(). list.KEYS, the
+-- footer, names each of them, `za` and `g?`.
+M.DASH_KEYS = {
+  {
+    lhs = "<CR>",
+    desc = "Docket: open the item",
+    run = function(buf)
+      M.open_row(buf)
+    end,
+  },
+  {
+    lhs = "w",
+    desc = "Docket: build the development environment",
+    run = function(buf)
+      M.work_row(buf)
+    end,
+  },
+  {
+    lhs = "r",
+    desc = "Docket: refresh",
+    run = function(buf)
+      list.refresh(buf)
+    end,
+  },
+  {
+    lhs = "R",
+    desc = "Docket: review the merge request",
+    run = function(buf)
+      M.review_row(buf)
+    end,
+  },
+}
+
+-- What each kind of buffer offers beside its maps, typed rather than mapped,
+-- which `g?` lists after them. The draft acts on no item that exists, so it
+-- carries `g?` and these alone.
+M.TYPED = {
+  item = {
+    { lhs = "<C-x><C-o>", desc = "Docket: complete an item or a person" },
+    { lhs = ":w", desc = "Docket: send the regions that changed" },
+    { lhs = ":e", desc = "Docket: read the item again; :e! discards unsaved edits" },
+  },
+  draft = {
+    { lhs = ":w", desc = "Docket: create the ticket" },
+    { lhs = ":e!", desc = "Docket: start the draft afresh" },
+  },
+  dash = {
+    { lhs = "za", desc = "Docket: close the section under the cursor, or open it" },
+  },
+  review = {
+    { lhs = ":Docket review submit approve", desc = "Docket: submit the held comments, then approve" },
+    { lhs = ":Docket review abandon", desc = "Docket: discard every held comment and close the diff" },
+  },
+  compose = {
+    { lhs = ":w", desc = "Docket: hold the comment; in a summary's window, submit the review" },
+    { lhs = ":q", desc = "Docket: close the window and keep the text for next time" },
+    { lhs = ":q!", desc = "Docket: close the window and discard the text" },
+  },
+}
+
+-- The line under a review's `g?` list. diffview.nvim sets `g?` on each side
+-- of a two-way diff to open its help panel, and attach_review() replaces it,
+-- so the list says where diffview's own keys are.
+M.DIFFVIEW_HELP = ":help diffview-maps lists diffview's own keys, whose g? this list replaces"
 
 -- A Jira project key, which is what `:Docket create` takes: the prefix of a
 -- key such as `PROJ-142`.
@@ -129,6 +255,54 @@ M.WEB = "gx opens the item on the web"
 
 local function notify(message, level)
   vim.notify(message, level or vim.log.levels.INFO)
+end
+
+--- Reports a buffer's keys at INFO, one line each, the key and then what it
+--- does, ending with `g?` itself so the report covers the map that produced
+--- it; `after`, when given, is one line more under the list.
+---@param keys { lhs: string, desc: string }[]
+---@param after string|nil
+---@return string text what was reported
+function M.keys_help(keys, after)
+  local all = vim.list_extend(vim.list_slice(keys), { M.HELP })
+  local width = 0
+  for _, key in ipairs(all) do
+    width = math.max(width, vim.api.nvim_strwidth(key.lhs))
+  end
+  local lines = {}
+  for _, key in ipairs(all) do
+    lines[#lines + 1] = key.lhs .. string.rep(" ", width - vim.api.nvim_strwidth(key.lhs) + 2) .. key.desc
+  end
+  if after then
+    lines[#lines + 1] = after
+  end
+  local text = table.concat(lines, "\n")
+  notify(text)
+  return text
+end
+
+-- Sets `g?` on a buffer, listing `keys` and then `after`.
+local function key_help(buf, keys, after)
+  vim.keymap.set("n", M.HELP.lhs, function()
+    M.keys_help(keys, after)
+  end, { buffer = buf, noremap = true, silent = true, desc = M.HELP.desc })
+end
+
+-- Sets each entry of a key table on a buffer, under the description
+-- `describe` gives it, and answers the entries set with those descriptions,
+-- for `g?` to list ahead of `typed`.
+local function set_keys(buf, keys, opts, describe, typed)
+  local listed = {}
+  for _, key in ipairs(keys) do
+    local desc = describe(key)
+    if desc then
+      vim.keymap.set("n", key.lhs, function()
+        key.run(buf)
+      end, vim.tbl_extend("force", opts, { desc = desc }))
+      listed[#listed + 1] = { lhs = key.lhs, desc = desc }
+    end
+  end
+  return vim.list_extend(listed, typed)
 end
 
 --- The adapter an identifier belongs to.
@@ -162,9 +336,9 @@ end
 -- and the editor's directory is read. `url` is the address a dash row
 -- carries, and `:Docket <id>` passes none: a pull request is handed to
 -- octo.nvim as `{ id, url }`, and gh.item() hands over the address, so that
--- octo.nvim is named the row's repository, as gh.item() says, UNVERIFIED;
--- with no address the number goes alone. `cwd` reaches a pull request's
--- state check and nothing after it.
+-- octo.nvim is named the row's repository; gh.item() says what is unverified
+-- about the host. With no address the number goes alone. `cwd` reaches a pull
+-- request's state check and nothing after it.
 local function open_item(source, id, cwd, url)
   local adapter, reason = auth.ready(source, cwd)
   if not adapter then
@@ -228,11 +402,15 @@ end
 ---
 --- The warning is printed beside the path rather than dropped, because a
 --- launch that returns one has already made a usable environment: inside
---- tmux both windows exist before `allow-rename` is set, and away from tmux
---- the tab is open before a review command runs in it. The warning is the
---- only sign that the option or the command did not take, so a caller that
---- prints the path alone reports a review buffer that never opened as a
---- success.
+--- tmux the editor's window has been selected, and away from tmux the tab is
+--- open before a review command runs in it. The warning is the only sign that
+--- the option or the command did not take, so a caller that prints the path
+--- alone reports a review buffer that never opened as a success.
+---
+--- A launch inside tmux that names no companion carries a warning, and the
+--- warning says what happened: the listing held no window of the companion's
+--- name, it held two, or a step addressed to it failed. The line before it
+--- names none of them, since only the warning knows.
 ---@param opened table what env.launch() returned
 ---@return string message
 ---@return integer level
@@ -242,7 +420,9 @@ function M.describe(opened)
     if opened.shell then
       lines[#lines + 1] = ("tmux windows %s and %s"):format(opened.editor, opened.shell)
     else
-      lines[#lines + 1] = ("tmux window %s; the companion window closed before it was settled"):format(opened.editor)
+      lines[#lines + 1] = ("tmux window %s; the companion window is not confirmed, and the warning below names what went wrong first"):format(
+        opened.editor
+      )
     end
   else
     lines[#lines + 1] = "a tab of this editor is at the worktree; the windows that tmux would hold:"
@@ -284,10 +464,69 @@ function M.launch(opts)
   notify(M.describe(opened))
 end
 
---- Builds the development environment for the ticket an item buffer holds.
----
---- A ticket alone: the item buffer keeps no branch, and a merge request's
---- comes from its dashboard row, where `w` reads it.
+-- The refusal for a merge request or a pull request from a fork. Its branch
+-- lives in the fork, and a branch of the same name on origin, or a worktree
+-- already on one, is somebody else's code under that name: `main` and
+-- `patch-1` are the usual cases. The launcher's own check asks origin whether
+-- the name exists, which such a branch passes, so the row's `fork` is what
+-- refuses it, where refused_fork() says it does.
+local function from_fork(r)
+  return ("%s comes from a fork, so origin's %s is not its branch and no worktree is made for it"):format(r.id, r.branch)
+end
+
+-- Whether a row marked `fork` is refused in this clone. `fork` says the row's
+-- source project is not its target's, and its branch lives in the source. In
+-- a clone of the target -- the row's address names origin's project -- the
+-- branch is in some fork and never on origin, so the row is refused. In a
+-- fork's clone, where the client lists upstream's rows, foreign() has passed
+-- the row because its address names a remote, and origin is itself a fork:
+-- it holds the branch of every merge request made from it, so the row is
+-- not refused, and the launcher's question to origin decides. The row of
+-- another fork on a branch origin also has is what that does not catch. A
+-- row whose address names no project, and one in a clone whose origin names
+-- none, are refused: nothing says the clone is a fork. A merge request's
+-- item buffer hands in a row built from what its read stored, and its read
+-- was held against origin's project, so there every merge request marked
+-- `fork` is refused.
+local function refused_fork(r, root)
+  if not r.fork then
+    return false
+  end
+  local adapter = adapters.get(r.source)
+  local theirs = adapter and adapter.project_of(r.url) or nil
+  local ours = theirs and repo.project(root) or nil
+  return not (theirs and ours) or repo.same_project(theirs, ours)
+end
+
+-- Builds the environment for the merge request an item buffer holds, from
+-- the source branch and the fork mark its read stored, in the clone its text
+-- came from: the reference's directory, or the editor's for a buffer whose
+-- adapter answers none. `review_id` is the identifier the editor window opens
+-- the review of, nil to open none.
+local function launch_merge_request(state, review_id)
+  if not state.branch then
+    return notify(("%s carries no branch, so no worktree is made for it"):format(state.id), vim.log.levels.ERROR)
+  end
+  local found, err = repo.root(state.ref and state.ref.cwd or vim.fn.getcwd())
+  if not found then
+    return notify(err, vim.log.levels.ERROR)
+  end
+  local r = { fork = state.fork, source = state.source, url = state.url, id = state.id, branch = state.branch }
+  if refused_fork(r, found.root) then
+    return notify(from_fork(r), vim.log.levels.ERROR)
+  end
+  local binding
+  binding, err = repo.binding(found.root)
+  if not binding then
+    return notify(err, vim.log.levels.ERROR)
+  end
+  M.launch({ root = found.root, binding = binding, branch = state.branch, review = review_id })
+end
+
+--- Builds the development environment for the item an item buffer holds: a
+--- ticket from its key and summary, in the clone the editor is in, and a
+--- merge request from the source branch its read stored, in the clone its
+--- text came from.
 ---@param buf integer
 function M.work(buf)
   local state = vim.b[buf].docket
@@ -295,7 +534,7 @@ function M.work(buf)
     return notify("nothing loaded in this buffer; :e reads the item", vim.log.levels.ERROR)
   end
   if state.source ~= "jira" then
-    return notify(("%s is not a ticket; the launcher takes a ticket here"):format(state.id), vim.log.levels.ERROR)
+    return launch_merge_request(state, nil)
   end
   local found, err = repo.root(vim.fn.getcwd())
   if not found then
@@ -307,6 +546,23 @@ function M.work(buf)
     return notify(err, vim.log.levels.ERROR)
   end
   M.launch({ root = found.root, binding = binding, key = state.id, summary = state.title })
+end
+
+--- Starts a review on the merge request an item buffer holds: the
+--- environment work() builds for it, with the editor window opening the
+--- review, as `R` on its dash row does. A ticket is refused, for a call made
+--- other than through `<leader>dR`, which attach() sets on a merge request's
+--- buffer alone.
+---@param buf integer
+function M.review_item(buf)
+  local state = vim.b[buf].docket
+  if not state then
+    return notify("nothing loaded in this buffer; :e reads the item", vim.log.levels.ERROR)
+  end
+  if state.source == "jira" then
+    return notify(("%s is a ticket; a review is of a merge request"):format(state.id), vim.log.levels.ERROR)
+  end
+  launch_merge_request(state, state.id)
 end
 
 --- Opens the item an item buffer holds in the browser.
@@ -515,29 +771,23 @@ local function is_draft(buf)
 end
 
 --- The buffer-local keymaps of an item buffer, set from the FileType
---- autocommand. A new ticket's draft carries the same filetype and gets
---- none: each of them acts on an item that exists.
+--- autocommand: each entry of ITEM_KEYS that applies to the backend the
+--- buffer's name carries, and `g?` listing them. A new ticket's draft carries
+--- the same filetype and gets `g?` alone: each item key acts on an item that
+--- exists.
 ---@param buf integer
 function M.attach(buf)
   if is_draft(buf) then
-    return
+    return key_help(buf, M.TYPED.draft)
   end
-  local opts = { buffer = buf, noremap = true, silent = true }
-  vim.keymap.set("n", "gx", function()
-    M.browse(buf)
-  end, vim.tbl_extend("force", opts, { desc = "Docket: open the item on the web" }))
-  vim.keymap.set("n", "<leader>dw", function()
-    M.work(buf)
-  end, vim.tbl_extend("force", opts, { desc = "Docket: build the development environment" }))
-  vim.keymap.set("n", "<leader>dc", function()
-    M.comment(buf)
-  end, vim.tbl_extend("force", opts, { desc = "Docket: open a new comment" }))
-  vim.keymap.set("n", "<leader>dt", function()
-    M.transition(buf)
-  end, vim.tbl_extend("force", opts, { desc = "Docket: move the item to another state" }))
-  vim.keymap.set("n", "<leader>da", function()
-    M.assign(buf)
-  end, vim.tbl_extend("force", opts, { desc = "Docket: assign the item" }))
+  local source = buffer.parse(vim.api.nvim_buf_get_name(buf))
+  local listed = set_keys(buf, M.ITEM_KEYS, { buffer = buf, noremap = true, silent = true }, function(key)
+    if key.sources and not vim.tbl_contains(key.sources, source) then
+      return nil
+    end
+    return key.descs and key.descs[source] or key.desc
+  end, M.TYPED.item)
+  key_help(buf, listed)
 end
 
 --- The header and the body a draft holds, in the shape item_create() takes.
@@ -658,6 +908,8 @@ end
 --- Jira ticket in the current window, its Project line filled from the
 --- argument or from where the editor is. A draft already holding text is
 --- switched to rather than replaced, and so is one whose create is in flight.
+--- A draft `:bdelete` left unloaded is wiped and made afresh, so it is filled
+--- once rather than by both this and the load that showing it makes.
 ---@param project string|nil
 ---@return integer|nil buf
 function M.create(project)
@@ -676,7 +928,7 @@ function M.create(project)
     notify(("%s: the %s adapter has no item_create"):format(name, source), vim.log.levels.WARN)
     return nil
   end
-  local buf = buffer.named(name)
+  local buf = buffer.reusable(name)
   if buf and (creating[buf] or vim.bo[buf].modified) then
     vim.api.nvim_set_current_buf(buf)
     notify(
@@ -694,6 +946,9 @@ function M.create(project)
   vim.b[buf].docket_draft = { source = source, project = project }
   M.draft(buf)
   vim.api.nvim_set_current_buf(buf)
+  -- draft() ran before this window showed the draft, so the wrap options its
+  -- prepare() sets did not reach this window.
+  buffer.prepare(buf)
   -- The summary is what every draft still needs, so the cursor starts at the
   -- end of its line.
   for index, field in ipairs(M.HEADER) do
@@ -707,10 +962,13 @@ end
 -- Puts the item buffer of a created key where the draft was: in every window
 -- showing the draft, which is then deleted, and read through the adapter the
 -- create went through. A draft shown nowhere leaves the item buffer hidden,
--- and the message names the command that shows it.
+-- and the message names the command that shows it. An item buffer of the
+-- key that `:bdelete` left unloaded is wiped and made afresh, so the item is
+-- read once rather than by both the load that showing it makes and the read
+-- here.
 local function reopen(draft, source, key, adapter)
   local name = buffer.name(source, key)
-  local buf = buffer.named(name)
+  local buf = buffer.reusable(name)
   if not buf then
     buf = vim.api.nvim_create_buf(false, false)
     vim.api.nvim_buf_set_name(buf, name)
@@ -832,37 +1090,6 @@ local function dash_clone(buf)
   return state
 end
 
--- The refusal for a merge request or a pull request from a fork. Its branch
--- lives in the fork, and a branch of the same name on origin, or a worktree
--- already on one, is somebody else's code under that name: `main` and
--- `patch-1` are the usual cases. The launcher's own check asks origin whether
--- the name exists, which such a branch passes, so the row's `fork` is what
--- refuses it, where refused_fork() says it does.
-local function from_fork(r)
-  return ("%s comes from a fork, so origin's %s is not its branch and no worktree is made for it"):format(r.id, r.branch)
-end
-
--- Whether a row marked `fork` is refused in this clone. `fork` says the row's
--- source project is not its target's, and its branch lives in the source. In
--- a clone of the target -- the row's address names origin's project -- the
--- branch is in some fork and never on origin, so the row is refused. In a
--- fork's clone, where the client lists upstream's rows, foreign() has passed
--- the row because its address names a remote, and origin is itself a fork:
--- it holds the branch of every merge request made from it, so the row is
--- not refused, and the launcher's question to origin decides. The row of
--- another fork on a branch origin also has is what that does not catch. A
--- row whose address names no project, and one in a clone whose origin names
--- none, are refused: nothing says the clone is a fork.
-local function refused_fork(r, root)
-  if not r.fork then
-    return false
-  end
-  local adapter = adapters.get(r.source)
-  local theirs = adapter and adapter.project_of(r.url) or nil
-  local ours = theirs and repo.project(root) or nil
-  return not (theirs and ours) or repo.same_project(theirs, ours)
-end
-
 -- Whether a row is another project's than the dash's clone, in which case it
 -- is refused at ERROR level and not taken into the clone. A section naming
 -- `glab` or `gh` as its adapter runs its query in every clone, and `-R
@@ -917,9 +1144,9 @@ end
 --- Opens the item on the dashboard's cursor line, after the state check,
 --- from the clone the dashboard shows, where the row was fetched. A pull
 --- request is handed to octo.nvim with its address, so that octo.nvim is
---- named the row's repository, as gh.item() says, UNVERIFIED; a merge
---- request is read in the clone, so a row of another project is refused,
---- through foreign().
+--- named the row's repository, and gh.item() says what is unverified about
+--- the host; a merge request is read in the clone, so a row of another
+--- project is refused, through foreign().
 ---@param buf integer
 function M.open_row(buf)
   local r = row_under_cursor(buf)
@@ -1010,22 +1237,14 @@ function M.review_row(buf)
   M.launch({ root = clone.root, binding = clone.binding, branch = r.branch, review = r.id })
 end
 
---- The buffer-local keymaps of the dashboard.
+--- The buffer-local keymaps of the dashboard: each entry of DASH_KEYS, and
+--- `g?` listing them.
 ---@param buf integer
 function M.attach_dash(buf)
-  local opts = { buffer = buf, noremap = true, silent = true, nowait = true }
-  vim.keymap.set("n", "<CR>", function()
-    M.open_row(buf)
-  end, vim.tbl_extend("force", opts, { desc = "Docket: open the item" }))
-  vim.keymap.set("n", "w", function()
-    M.work_row(buf)
-  end, vim.tbl_extend("force", opts, { desc = "Docket: build the development environment" }))
-  vim.keymap.set("n", "r", function()
-    list.refresh(buf)
-  end, vim.tbl_extend("force", opts, { desc = "Docket: refresh" }))
-  vim.keymap.set("n", "R", function()
-    M.review_row(buf)
-  end, vim.tbl_extend("force", opts, { desc = "Docket: review the merge request" }))
+  local listed = set_keys(buf, M.DASH_KEYS, { buffer = buf, noremap = true, silent = true, nowait = true }, function(key)
+    return key.desc
+  end, M.TYPED.dash)
+  key_help(buf, listed)
 end
 
 --- Runs one of the review's verbs on the review in the current tab.
@@ -1069,22 +1288,29 @@ function M.review_verb(verb, words, force)
   review.submit(verdict)
 end
 
---- Sets the review's keys on a buffer.
+--- Sets the review's keys on a buffer, and `g?` listing them. On a side of
+--- the diff that replaces diffview's own `g?`, so the list ends with
+--- DIFFVIEW_HELP.
 ---@param buf integer
 function M.attach_review(buf)
   local opts = { buffer = buf, noremap = true, silent = true }
+  local listed = {}
   for _, key in ipairs(M.REVIEW_KEYS) do
     vim.keymap.set("n", key.lhs, function()
       M.review_verb(key.verb, {}, false)
     end, vim.tbl_extend("force", opts, { desc = key.desc }))
+    listed[#listed + 1] = { lhs = key.lhs, desc = key.desc }
   end
+  key_help(buf, vim.list_extend(listed, M.TYPED.review), M.DIFFVIEW_HELP)
 end
 
---- Takes the review's keys off a buffer, and no other map: one is known as
---- the review's by its description.
+--- Takes the review's keys and its `g?` off a buffer, and no other map: one
+--- is known as the review's by its description. The buffers a review keys
+--- include the worktree's own files, where `g?` is neovim's own operator
+--- again once the review is over.
 ---@param buf integer
 function M.detach_review(buf)
-  local ours = {}
+  local ours = { [M.HELP.desc] = true }
   for _, key in ipairs(M.REVIEW_KEYS) do
     ours[key.desc] = true
   end
@@ -1138,6 +1364,29 @@ local review_group = nil
 -- review's, and until then nothing answers review.current(). BufWinEnter
 -- covers every file diffview puts in a window, and TabEnter every return to
 -- the tab.
+--
+-- diffview takes its maps off a file's buffer by left-hand side whenever it
+-- detaches the file, and the review's `g?` goes with them. It sets its own
+-- maps again, `g?` among them, when it opens the file, and then fires `User
+-- DiffviewDiffBufWinEnter`. It also reopens the file already on screen, in
+-- the window already showing it, where no BufWinEnter fires: on each return
+-- to the tab, after a write while the tab is current, and when its poll of
+-- the git index sees a change. So the keying runs on that event as well,
+-- scheduled, which puts the review's `g?` back after each reopen. This is
+-- read from diffview's main branch -- `attach_buffer()` and
+-- `detach_buffer()` in `lua/diffview/vcs/file.lua`, `Window:open_file()` in
+-- `lua/diffview/scene/window.lua`, and the `tab_enter` and `buf_write_post`
+-- listeners in `lua/diffview/scene/views/diff/listeners.lua` -- and is
+-- UNVERIFIED against the revision installed: in a review, `gt` to another
+-- tab, `gT` back, a second's wait, and then `g?` in a side of the diff
+-- prints the review's list, and diffview's help panel does not open, when it
+-- holds.
+--
+-- A compose buffer, `docket-review://…`, which review.compose() makes for a
+-- held comment, a reply or a summary, gets `g?` when it enters a window:
+-- compose() opens it with nvim_open_win(buf, true, …), which fires
+-- BufWinEnter for it, and a verb that is refused or cancelled opens no
+-- window and keys nothing.
 local function review_autocommands()
   if review_group ~= nil then
     return
@@ -1147,6 +1396,20 @@ local function review_autocommands()
     group = review_group,
     callback = function()
       vim.schedule(M.key_review_tab)
+    end,
+  })
+  vim.api.nvim_create_autocmd("User", {
+    group = review_group,
+    pattern = "DiffviewDiffBufWinEnter",
+    callback = function()
+      vim.schedule(M.key_review_tab)
+    end,
+  })
+  vim.api.nvim_create_autocmd("BufWinEnter", {
+    group = review_group,
+    pattern = review.SCHEME .. "*",
+    callback = function(event)
+      key_help(event.buf, M.TYPED.compose)
     end,
   })
   vim.api.nvim_create_autocmd("TabClosed", {

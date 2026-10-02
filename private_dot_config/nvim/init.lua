@@ -224,7 +224,15 @@ require('lualine').setup()
 require("auto-session").setup {
     log_level = "error",
     suppressed_dirs = { "~/", "~/Projects", "~/Downloads", "/", "~/Documents" },
+    -- docket's buffers are listed, and this keeps them off the buffer list of
+    -- a saved session, which would otherwise read each ticket again when its
+    -- buffer is first entered. :help docket-setup-sessions
+    pre_save_cmds = { function() require("docket").before_session_save() end },
 }
+-- No marks, jumps or :oldfiles entries for a name starting with `docket`,
+-- which docket's buffers have and no file's full path does: <C-o> to one
+-- after a restart would read the ticket again.
+vim.opt.shada:append("rdocket")
 
 require('nvim-treesitter').install {
     'rust', 'systemverilog', 'zig', 'lua', 'tcl', 'python', 'markdown', 'bash', 'fish', 'bibtex',
@@ -238,7 +246,6 @@ require('octo').setup {
     picker = "default",
 }
 
--- After octo's setup, so that the Docket* highlight groups follow the Octo* ones.
 require('docket').setup {}
 
 require("conform").setup({

@@ -1,15 +1,17 @@
 -- What the docket package declares at startup: the `:Docket` command, the
 -- `<leader>dd` map to the dashboard, and the autocommands that route the read
 -- and write of an item buffer and of a new ticket's draft, and attach an item
--- buffer's keymaps. Every other `<leader>d` key belongs to one kind of buffer
--- and is set on it, by commands.attach(), commands.attach_dash() and, on the
--- buffers of a review's diff, commands.attach_review(); the autocommands that
--- key a review are made when `:Docket review` first opens one, since until
--- then there is no review to key. Every body here requires its module on the
--- first use, so this file loads nothing. The configuration's init.lua carries
--- `require('docket').setup{}` alone, which loads init, config and highlight
--- at startup: the options and the highlight groups. The read path, the
--- adapters and every client load at the first command that needs them.
+-- buffer's keymaps and list the buffer. Every other `<leader>d` key, and
+-- `g?`, which lists a buffer's keys, belongs to one kind of buffer and is set
+-- on it, by commands.attach(), commands.attach_dash() and, on the buffers of
+-- a review's diff, commands.attach_review(); the autocommands that key a
+-- review are made when `:Docket review` first opens one, since until then
+-- there is no review to key. Every body here requires its module on the
+-- first use, so this file loads nothing. The configuration's init.lua calls
+-- `require('docket').setup{}`, which loads init, config and highlight at
+-- startup: the options and the highlight groups. Its auto-session hook
+-- requires docket only when a session is saved. The read path, the adapters
+-- and every client load at the first command that needs them.
 
 if vim.g.loaded_docket then
   return
@@ -77,10 +79,19 @@ vim.api.nvim_create_autocmd("BufWriteCmd", {
   end,
 })
 
+-- An item buffer and a draft are listed, and the FileType event lists one
+-- again where its options were set without a read: a session restores a
+-- shown docket buffer with `setlocal nobuflisted`, written while
+-- before_session_save() had it off the list, and sets the filetype after
+-- that line. Listing it there loads nothing and reads nothing.
 vim.api.nvim_create_autocmd("FileType", {
   group = group,
   pattern = "docket",
   callback = function(event)
+    local name = vim.api.nvim_buf_get_name(event.buf)
+    if vim.startswith(name, "docket://") or vim.startswith(name, "docket-new://") then
+      vim.bo[event.buf].buflisted = true
+    end
     require("docket.commands").attach(event.buf)
   end,
 })

@@ -29,13 +29,33 @@
 -- autocommand; without it `:w` tries to create a file of that name. It is
 -- `bufhidden=hide` and never `wipe`, because `wipe` overrides `hidden` and a
 -- modified buffer then refuses every switch away with E37, trapping the editor
--- in it. It is unlisted, which keeps it out of the `badd` lines `:mksession`
--- writes and out of `:ls` and the buffer picker; a buffer shown in a window is
--- still recorded, as a `file docket://…` line. Restoring that session renames
--- an empty buffer to the item's name and fires no BufReadCmd, so no client
--- spawns at startup. What is left is an empty buffer that looks like a
--- ticket, with the item keymaps attached and no `docket` variable, where
--- `:w` reports that nothing is loaded and `:e` reads the item.
+-- in it. It is listed, so `:ls`, the buffer picker and `:bnext` reach it.
+-- `:bdelete`, or vim-bufkill's `BD`, unlists it and unloads it, which drops
+-- its options and its `docket` variable, and the next load of a buffer so
+-- left fires BufReadCmd. reusable() wipes one it finds unloaded, so open()
+-- makes the buffer afresh and the item is read once; commands.lua finds a
+-- draft and a created ticket's buffer through it for the same reason.
+--
+-- Listed, every docket buffer would be a `badd` line in the session
+-- `:mksession` writes, and the restored session would read the item when
+-- that buffer is first entered. init.lua's before_session_save(), which the
+-- configuration runs from auto-session's save hook, takes each one off the
+-- list for the save and lists it again after. A buffer shown in a window is
+-- recorded all the same, as `enew` and a `file docket://…` line, and under
+-- `localoptions` with its options, `nobuflisted` and the filetype among
+-- them. Restoring that session renames an empty buffer to the item's name
+-- and fires no BufReadCmd, so no client spawns at startup, and the FileType
+-- autocommand in plugin/docket.lua lists it again. What is left is an empty
+-- buffer that looks like a ticket, with the item keymaps attached and no
+-- `docket` variable, where `:w` reports that nothing is loaded and `:e`
+-- reads the item.
+--
+-- Listing also lets the buffer into neovim's ShaDa file, which keeps the
+-- marks, the jumps and the `:oldfiles` entries of listed buffers, so `<C-o>`
+-- after a restart, or a pick from `:oldfiles`, would edit the name and read
+-- the item. The configuration's `'shada'` carries `rdocket`, which stores
+-- nothing for a name that starts with `docket`; `:help docket-setup-sessions`
+-- gives the hook and that entry.
 --
 -- The region rules, stated because this is the part that gets built wrong:
 --
@@ -231,15 +251,37 @@ function M.parse(name)
   return source, id, project
 end
 
---- Sets the options every item buffer carries. Idempotent, because the read
---- command runs on a buffer `:e docket://…` made as well as on one open()
---- made, and both need them.
+-- The window options an item buffer is shown with: a long line wraps at a
+-- word, and its continuation is indented as the line is. Wrapping is display
+-- alone; the buffer's lines, which are what a save sends, keep the breaks
+-- typed into them.
+M.WINDOW = { wrap = true, linebreak = true, breakindent = true }
+
+--- Sets the options every item buffer carries, and WINDOW in every window
+--- showing it. Idempotent, because the read command runs on a buffer `:e
+--- docket://…` made as well as on one open() made, and both need them.
+---
+--- The window options are set as `:setlocal` sets them, for this buffer in
+--- that window, so another buffer shown there keeps the editor's own values,
+--- which the repository's configuration makes `nowrap`. neovim keeps the
+--- values with the buffer: a window that has never shown it takes them from
+--- the window where it was last shown, so once a read has set them they
+--- follow it into a split, `:sbuffer`, and `:b` in another window (`:help
+--- local-options`). A window that showed the buffer before that read gets
+--- back what it had then until the next read. Only this function sets them,
+--- and it runs at every read, so a `:setlocal nowrap` lasts until the item
+--- is read again.
 ---@param buf integer
 function M.prepare(buf)
   vim.bo[buf].buftype = "acwrite"
   vim.bo[buf].bufhidden = "hide"
-  vim.bo[buf].buflisted = false
+  vim.bo[buf].buflisted = true
   vim.bo[buf].swapfile = false
+  for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+    for option, value in pairs(M.WINDOW) do
+      vim.wo[win][0][option] = value
+    end
+  end
   if pcall(require, M.COMPLETE) then
     vim.bo[buf].omnifunc = M.OMNIFUNC
     -- mini.completion's fallback is keyword completion; this buffer-local
@@ -266,7 +308,7 @@ local function decorate(buf, it, lines, regions)
   local sep = #render.SEPARATOR
   local col = #it.id + sep
   if it.state ~= "" then
-    run(buf, 0, col, #it.state, highlight.state_group(it.state, it.category))
+    run(buf, 0, col, #it.state, highlight.state_group(it.state, it.category, it.source))
     col = col + #it.state + sep
   end
   local assignee = lines[1]:sub(col + 1):match("^(.-)" .. render.SEPARATOR) or lines[1]:sub(col + 1)
@@ -523,8 +565,9 @@ end
 --- comment's `updated` as loaded under `stamps`, which the write path's
 --- conflict check compares, the account's own identifier under `me`, the
 --- item's `ref`, which every later call about the item is given -- see
---- M.target() -- and the `project` the buffer's name carries, nil when it
---- carries none.
+--- M.target() -- the `project` the buffer's name carries, nil when it
+--- carries none, and a merge request's `branch` and `fork`, which
+--- commands.work() and commands.review_item() build the environment from.
 ---
 --- The lines are set with undo off, so that an undo after the read does not
 --- empty the buffer; `modified` is cleared after, because the read is not an
@@ -580,6 +623,8 @@ function M.populate(buf, it, opts)
     me = it.me,
     ref = it.ref,
     project = select(3, M.parse(vim.api.nvim_buf_get_name(buf))),
+    branch = it.branch,
+    fork = it.fork,
     load = loads,
     snapshot = snapshot,
     marks = marks,
@@ -714,11 +759,9 @@ end
 -- Hands the buffer's item to the plugin its adapter names, for read(). On `:e`
 -- this runs inside the buffer's own read command, and the handoff shows the
 -- plugin's buffer in the current window, so it is scheduled to run once `:e`
--- has finished with this one. UNVERIFIED: that `Octo pr edit`, and `Octo
--- <address>` for a dashboard row, show the pull request in the current
--- window, which is what wipes this buffer, was run only against a stand-in
--- command. `:e docket://gh/\#<n>` with octo.nvim installed settles it: `:ls!`
--- then lists no `docket://gh/` buffer.
+-- has finished with this one. `Octo pr edit` shows the pull request in the
+-- current window, which wipes this buffer: after `:e docket://gh/\#<n>` with
+-- octo.nvim installed, `:ls!` lists no `docket://gh/` buffer.
 local function read_handed_off(buf, source, id, adapter, finish)
   vim.bo[buf].buflisted = false
   vim.bo[buf].bufhidden = "wipe"
@@ -901,6 +944,22 @@ function M.named(name)
   return nil
 end
 
+--- The loaded buffer with this name, found as named() finds it, or nil. One
+--- of the name that `:bdelete` left unloaded is wiped first and nil is
+--- answered: showing it would load it, which resets its options and fires
+--- BufReadCmd, so the read or the fill the caller makes next would be the
+--- second. The caller makes the buffer afresh on nil.
+---@param name string
+---@return integer|nil buf
+function M.reusable(name)
+  local buf = M.named(name)
+  if buf and not vim.api.nvim_buf_is_loaded(buf) then
+    vim.api.nvim_buf_delete(buf, { force = true })
+    return nil
+  end
+  return buf
+end
+
 --- Hands an item to the plugin its adapter names in `handoff`, through the
 --- adapter's item(), which opens it there and answers no item. `on_done` is
 --- called once, on the main loop, with whether it opened and, when it did
@@ -937,7 +996,9 @@ end
 --- repo.project() names no project -- outside a clone, or in one whose
 --- origin is missing or names none -- nothing opens and the reason is
 --- reported, naming the directory it read when that is `cwd`, since a `:tcd`
---- changes nothing for a caller that passes one.
+--- changes nothing for a caller that passes one. A buffer of the name that
+--- `:bdelete` left unloaded is wiped and made afresh, so the item is read
+--- once rather than by both the load and this read.
 ---@param source string the adapter's name
 ---@param id string
 ---@param on_done fun(ok: boolean, message: string|nil)|nil
@@ -977,7 +1038,7 @@ function M.open(source, id, on_done, adapter, cwd)
     end
   end
   local name = M.name(source, id, project)
-  local buf = M.named(name)
+  local buf = M.reusable(name)
   if not buf then
     buf = vim.api.nvim_create_buf(false, false)
     vim.api.nvim_buf_set_name(buf, name)

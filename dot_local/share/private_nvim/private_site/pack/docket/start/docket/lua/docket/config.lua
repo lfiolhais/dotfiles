@@ -1,16 +1,18 @@
--- The defaults docket ships: the dashboard's sections, the cache directory and
--- the timeouts spawn allows each kind of process. Imports nothing local and
+-- The defaults docket ships: the dashboard's sections, the cache directory,
+-- the timeouts spawn allows each kind of process, and the Jira statuses given a
+-- colour of their own, none by default. Imports nothing local and
 -- reaches no process; everything here is a value, which is what lets the suite
 -- read it without an editor. setup{} overrides it through configure().
 
 local M = {}
 
 -- A Jira section's query carries PLACEHOLDER, which repo.jql() fills from the
--- repository's binding: `<projects>` becomes `project IN (A, B)`. A review
--- section names no client, because the client is chosen from the remote when
--- the dashboard opens, so its query is one argument list per client, keyed by
--- the adapter's name. `Mine` as `reporter = currentUser()` is a default chosen
--- here; changing it is this one string in setup{}.
+-- repository's binding: `<projects>` becomes `project IN (PAY, OPS)`, or
+-- `project IN (PAY) AND parent = PAY-10` in a repository bound to an epic. A
+-- review section names no client, because the client is chosen from the
+-- remote when the dashboard opens, so its query is one argument list per
+-- client, keyed by the adapter's name. `Mine` as `reporter = currentUser()`
+-- is a default chosen here; changing it is this one string in setup{}.
 M.PLACEHOLDER = "<projects>"
 
 --- The cache directory: `$XDG_CACHE_HOME/docket`, with `~/.cache` standing in
@@ -96,6 +98,10 @@ M.defaults = {
   -- prompt for them. Empty by default, because the site names the employer and
   -- this file is tracked; acli keeps both after the first login in any case.
   jira = {},
+  -- Jira statuses with a colour of their own, keyed by the status as Jira
+  -- prints it: `#rrggbb` as the foreground, a highlight group's name to link
+  -- to, or the table nvim_set_hl() takes. highlight.define() sets them.
+  statuses = {},
 }
 
 -- The live options: the defaults, plus cache_dir, which defaults does not name

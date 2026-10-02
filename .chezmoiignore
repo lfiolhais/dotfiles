@@ -11,15 +11,18 @@ TODO.md
 # Probe reports written while working on the neovim plugin. Every file here deploys
 # to the home directory unless it is named, and a report is not configuration.
 #
-# Unanchored, unlike the same two patterns in .gitignore. chezmoi rejects the
-# whole source state on a leading slash here -- every command then fails rather
-# than ignoring one file -- so the two files spell these differently on purpose.
+# Written without the leading slash of .gitignore's `/p0*.txt`, because chezmoi
+# rejects the whole source state on a leading slash here: `diff`, `status`,
+# `managed` and every other command that reads the source state then fail with
+# `invalid path`. chezmoi matches a pattern with no slash in the top folder
+# only, so both files ignore a report there alone.
 p0*.txt
 # nvim writes its log to ~/.local/state/nvim/nvim.log, and falls back to
-# nvim.log in the working directory when it cannot write there. A log is not
-# configuration, and this name does not begin with a dot, so chezmoi would
-# deploy it.
-nvim.log
+# nvim.log in the working directory when it cannot write there, which can be
+# any folder of this repository. A log is not configuration, and this name does
+# not begin with a dot, so chezmoi would deploy it from whichever folder it is
+# in; `**/` matches it at every depth, the top included.
+**/nvim.log
 **/__pycache__
 {{ if ne .chezmoi.os "darwin" }}
 .config/aerospace

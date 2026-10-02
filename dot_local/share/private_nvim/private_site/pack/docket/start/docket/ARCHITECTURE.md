@@ -56,16 +56,16 @@ grep -o 'require("docket[^"]*")' lua/docket/*.lua lua/docket/adapters/*.lua | so
 
 | module | holds | imports |
 | --- | --- | --- |
-| `config.lua` | the defaults: the dash's sections, the cache directory, each kind of process's timeout; `configure()` for `setup{}` | nothing local |
+| `config.lua` | the defaults: the dash's sections, the cache directory, each kind of process's timeout, the Jira statuses given a colour of their own; `configure()` for `setup{}` | nothing local |
 | `row.lua` | `SOURCES`, the backend names in dash order; the one row shape every adapter normalises to, `fork` among its fields, and its ordering | nothing local |
-| `item.lua` | an item's header fields, body and comments; `regions()`, the ownership half of whether a region may be written; `parse_time()` and `ago()` | nothing local |
+| `item.lua` | an item's header fields, body and comments, and a merge request's source branch and fork mark; `regions()`, the ownership half of whether a region may be written; `parse_time()` and `ago()` | nothing local |
 | `adf.lua` | Atlassian Document Format, Jira's body tree: `render()` to lines, `serialise()` from text to the minimal tree a write sends, `editable()` for whether a tree survives that | nothing local |
 | `diff.lua` | `plan()`, the region compare that decides which calls a save makes | nothing local |
 | `flight.lua` | one request in flight per key and the rule for joining it | nothing local |
-| `highlight.lua` | the `Docket*` groups, what each links to, and `state_group()` | nothing local |
+| `highlight.lua` | the `Docket*` groups, what each links to or takes its background from, a group per status `setup{}` colours through `status_group()`, `configured()` for what was set, and `state_group()` | nothing local |
 | `render.lua` | an item to buffer lines, with the range each region occupies | `adf`, `item` |
 | `spawn.lua` | the only process spawn: `run()` with a callback, `wait()` blocking, and the timeout that ends a command's whole process group | `config` |
-| `repo.lua` | the clone in hand: its root, its Jira binding and the query assembly, the review client its `origin` names and the project path, the paths its other remotes name and `same_project()`, the compare without case, its worktrees | `config`, `spawn` |
+| `repo.lua` | the clone in hand: its root, its Jira binding, an epic included, and the query assembly, the review client its `origin` names and the project path, the paths its other remotes name and `same_project()`, the compare without case, its worktrees | `config`, `spawn` |
 | `env.lua` | the launcher: the branch and window-name rules, `git wt-add`, the two tmux windows or an editor tab, and `teardown()` | `config`, `repo`, `spawn` |
 | `adapters/init.lua` | the adapter contract, the capability set and `verify()`, all under "The adapter contract" below, and the registry `get()` | `row` |
 | `adapters/jira.lua` | Jira over `acli`: each region written back as a document through `adf`; states, assigning, creating a work item | `adapters`, `adf`, `flight`, `item`, `row`, `spawn` |
@@ -78,16 +78,16 @@ grep -o 'require("docket[^"]*")' lua/docket/*.lua lua/docket/adapters/*.lua | so
 | `list.lua` | the dash buffer: its sections, one state check per backend, the row under the cursor | `auth`, `cache`, `config`, `flight`, `highlight`, `item`, `repo` |
 | `buffer.lua` | the item buffer: its read path, its region marks, `compose()` for a new comment, and its write path | `adapters`, `auth`, `cache`, `diff`, `highlight`, `item`, `render`, `repo`; `complete` under `pcall`, so an item buffer works without it |
 | `commands.lua` | what `:Docket` dispatches to, every keymap, the dash's refusals of a row through `foreign()` and `refused_fork()`, a new ticket's draft, the review's verbs | `adapters`, `auth`, `buffer`, `cache`, `config`, `env`, `list`, `repo`, `review`, `row` |
-| `init.lua`, required as `docket` | `setup()`: the options, the highlight groups, the help tags; `help_files()`, the one lookup of the help file and its tags | `config`, `highlight` |
-| `health.lua` | `:checkhealth docket` | `adapters`, `auth`, `config`, `docket`, `row` |
+| `init.lua`, required as `docket` | `setup()`: the options, the highlight groups, the help tags; `help_files()`, the one lookup of the help file and its tags; `before_session_save()`, which takes every docket buffer off the buffer list for a session save and lists it again after | `config`, `highlight` |
+| `health.lua` | `:checkhealth docket`: each backend a configured section needs in the working directory, the help tags, the configuration | `adapters`, `auth`, `config`, `docket`, `highlight`, `repo`, `row` |
 
 `plugin/docket.lua`, outside `lua/`, is what neovim sources at startup. It
 declares the `:Docket` command, the `<leader>dd` map and the autocommands,
 and requires `docket.commands` or `docket.buffer` only inside a callback, so
 startup loads no module; `README.md`, under "How neovim finds and loads it",
-shows the two states. The item buffer's other `<leader>d` keys are set on
-the buffer itself, by `commands.attach()`, `attach_dash()` and
-`attach_review()`.
+shows the two states. Every other key is set on the buffer it belongs to,
+by `commands.attach()`, `attach_dash()` and `attach_review()`, each from its
+kind's table, and each sets `g?` as well.
 
 ## Processes
 
@@ -270,8 +270,24 @@ functions where a breakpoint goes. Every one starts in `commands.run`, which
 `repo.sections(binding, config.options.sections, review)` turns the
 configured list into the sections shown, filling `<projects>` through
 `repo.jql` or replacing a section by one line saying why it cannot run.
-`list.buffer()` makes or reuses the one `docket-dash://` buffer. Each
-section's state gets a cache key from `cache.key(adapter, query, scope)` and
+`dotfiles.jira.epic` is read beside the projects: `repo.binding` keeps it as
+the binding's `epic`, filling `projects` from the key's own prefix when no
+project is set, and `repo.clause` adds `AND parent = <KEY>` to the project
+clause, so every Jira section narrows to the epic's children and the cache
+key, which carries the query, keeps them apart from the project's rows.
+Beside `dotfiles.jira.jql` the epic narrows nothing, and `repo.sections`
+gives that section a `reason` saying so. A value that is not a key is the
+binding's error, which `list.assemble` puts under a `Tickets` section.
+`list.buffer()` makes or reuses the one `docket-dash://` buffer, listed and
+`bufhidden=hide`, so it keeps its state while hidden. One that `:bdelete`
+left unloaded is wiped and made afresh, because showing it would load it
+with its options reset, and a loaded one of that name, a restored session's
+or one entered after `:bdelete`, is taken over. Its `BufWipeout`
+autocommand drops its state. `:e` and `:bdelete` both fire `BufUnload`, and
+only `:bdelete` clears `buftype`, so the `BufUnload` autocommand drops the
+state from a scheduled callback, and only when `buftype` is no longer
+`nofile`; after `:e` the dash keeps its state and its keys, and `r` paints
+it again. Each section's state gets a cache key from `cache.key(adapter, query, scope)` and
 whatever `cache.read(key)` holds, so the buffer shows cached rows the moment
 it opens, with their age. Then `list.refresh(buf)`.
 
@@ -285,17 +301,50 @@ leads to the file-local `fetch()`: `cache.fetch(key, request, on_done)`,
 whose request is the adapter's `rows(section, deliver)` with the clone's
 root as the section's `cwd`, and whose answer is painted inside
 `vim.schedule` only while `current(buf, state, round)` still holds — the
-buffer is the dash, holds that state, and no refresh has started since.
+buffer is the dash, is loaded and `nofile`, holds that state, and no refresh
+has started since.
 
 `list.lines(state, now)` is the pure part: the buffer's lines from a state,
-with the row on each line in `at`, the highlight of each run, and each
-section's header line. `list.render(buf)` sets the lines and the highlights,
+the first naming the clone and, for a binding by project that carries one,
+the epic, with the row on each line in `at`, the highlight of each run, each
+section's header line, and `folds`, each line's fold level in the form
+`'foldexpr'` answers. `list.render(buf)` sets the lines and the highlights,
 as extmarks in `list.NS`, and puts each window's cursor back on the row it
-was on. `commands.attach_dash(buf)` sets the keys: `<CR>` runs
-`commands.open_row`, which opens a ticket or a merge request from the clone
-the dash shows, as `w` builds its environment from that clone, and hands a
-pull request to octo.nvim as `Octo <address>`, the row's URL, which names
-the repository and its host; octo.nvim's README, at
+was on. A cursor on a header, or anywhere in a closed section, which `j` and
+`k` enter at its header line, goes back to that section's header.
+
+Each section is a fold. The file-local `dress()` sets, on a window showing
+the dash, `nowrap`, `foldmethod=expr`, a `foldexpr` calling
+`list.fold(<buf>, v:lnum)` with the buffer's number written in, and an empty
+`foldtext`, so a closed section shows its header line as painted.
+`list.open()` calls it for each window showing the dash, and a `BufWinEnter`
+autocommand `list.buffer()` sets calls it for each window the dash enters
+while it is `nofile`, because a window that showed the dash before
+`list.open()` dressed it, as a restored session's does, gets back the values
+it had then. It sets them through `vim.wo[win][0]`, which `:help vim.wo`
+documents as `:setlocal` for the buffer the window shows, so another buffer
+shown in that window keeps its own. It sets `foldlevel` to 99, which opens
+every section, only in a window whose `foldexpr` is not yet the dash's, so a
+second `:Docket` leaves closed sections closed. `fold()` answers from the
+file-local `painted`, which `render()` fills before it replaces the lines,
+because replacing them evaluates `'foldexpr'` again. `painted` is kept per
+buffer rather than in the state because it describes the lines on screen: a
+second `open()` files a state that has painted nothing and sets the fold
+options again, which re-evaluates every line, and levels read from that
+state would open every closed section before the first paint. A paint that
+changes the line count moves a closed fold onto another section, so
+`render()` first records, in each window carrying the dash's `foldexpr`,
+which sections are closed, by title and, where titles repeat, by order, from
+`painted`'s header lines, and after the paint opens every fold in that
+window and closes the recorded ones. `za` is neovim's own and needs no map.
+
+`commands.attach_dash(buf)` sets each entry of `commands.DASH_KEYS`, and
+`g?`, which lists them and `za` through `commands.keys_help()`; `list.KEYS`,
+the footer, names each of them, and the suite holds the two together. `<CR>`
+runs `commands.open_row`, which opens a ticket or a merge request from the
+clone the dash shows, as `w` builds its environment from that clone, and
+hands a pull request to octo.nvim as `Octo <address>`, the row's URL, which
+names the repository and its host; octo.nvim's README, at
 <https://github.com/pwntester/octo.nvim>, documents that form for github.com
 and Enterprise addresses, and `gh.item()`'s comment says what is unverified
 against the release installed and the `:Octo` line that settles it. `w` and
@@ -338,20 +387,60 @@ opened from clones of two projects is two buffers. `buffer.named(name)`
 finds the buffer to reuse, and under `'fileignorecase'`, the editor's
 default on macOS, it matches names without case as the editor does (`:help
 'fileignorecase'`), so two clones whose origins spell one project's path in
-two cases open one buffer; with the option off they are two. It then runs
-the file-local `read`, which `buffer.read` also fronts for `:e`: the state
-check when no adapter was handed in, made in the clone the buffer's
-reference names, the adapter's `item(asked, on_done)`, and, scheduled,
-`buffer.populate(buf, it)`. A read whose answer names a project other than
+two cases open one buffer; with the option off they are two.
+`buffer.reusable(name)` answers that buffer only while it is loaded, and
+wipes one that `:bdelete` left unloaded, so `buffer.open` makes it afresh,
+because showing it would fire `BufReadCmd` and the item would be read
+twice. `commands.create()` finds the draft through it, and so does the
+`reopen` that puts a created ticket's buffer in the draft's place, for the
+same reason. `buffer.open` then runs the file-local `read`, which
+`buffer.read` also fronts for `:e`: the state check when no adapter was
+handed in, made in the clone the buffer's reference names, the adapter's
+`item(asked, on_done)`, and, scheduled, `buffer.populate(buf, it)`. A read
+whose answer names a project other than
 the buffer's name, compared through `repo.same_project()` and so without
 case, is refused with nothing filled, so a merge request of another project
 never lands under this one's name. `populate` runs `render.render(it)` for
 the lines and the region ranges, sets the lines with undo off, marks each
 region, and stores the snapshot in the buffer variable `vim.b[buf].docket`;
 the section on the item buffer's regions below says what is in it. The
-`FileType` autocommand in
-`plugin/docket.lua` runs `commands.attach(buf)`, which sets `gx`,
-`<leader>dw`, `<leader>dc`, `<leader>dt` and `<leader>da` on the buffer.
+`FileType` autocommand in `plugin/docket.lua` runs `commands.attach(buf)`,
+which sets each entry of `commands.ITEM_KEYS` on the buffer. An entry naming
+`sources` is set only where `buffer.parse()` reads one of them off the
+buffer's name, which keeps `<leader>dR` off a ticket's buffer, and one
+carrying `descs` takes the description given for that source, which is how
+`<leader>dt` in a merge request's buffer says it approves and merges. `g?`
+lists the entries set, then `commands.TYPED.item`, the keys typed rather
+than mapped, through `commands.keys_help()`. A draft gets `g?` alone, over
+`commands.TYPED.draft`.
+
+`buffer.prepare()` lists the buffer, so `:ls`, a picker and `:bnext` reach
+it. `docket.before_session_save()`, which the configuration runs from the
+`pre_save_cmds` of auto-session, the plugin that saves a session per
+directory, takes every listed docket buffer off the
+list for the save, which keeps it out of the session's `badd` lines, and
+lists it again from a scheduled callback. A session still records each
+docket buffer shown in a window, with `setlocal nobuflisted` before the
+filetype, so the same `FileType` autocommand lists a `docket://` or
+`docket-new://` buffer again; `:help docket-setup-sessions` gives the hook
+and the `'shada'` entry that keeps docket names out of the ShaDa file, where
+neovim keeps marks, jumps and recent files across restarts.
+
+`buffer.prepare()` also sets `buffer.WINDOW` — `wrap`, `linebreak` and
+`breakindent` — in every window showing the buffer, through
+`vim.wo[win][0]`, so a long line wraps at a word while another buffer in
+the same window keeps the configuration's `nowrap`. The read calls it before
+the client is asked and `populate()` calls it again, so it reaches the
+window `:e` or `buffer.open` reads into; `commands.create()` calls it once
+more after the draft is in its window, because `draft()` fills the buffer
+before the window shows it. neovim keeps window-local values with the
+buffer and gives them to a window that has not shown it (`:help
+local-options`), so the options follow the buffer into a split or a `:b`
+elsewhere without an autocommand, and a `:setlocal nowrap` lasts until the
+next read. Wrapping is display alone: `diff.plan` joins a region's lines at
+the line breaks the buffer holds, and `adf.serialise` makes a single line
+break a `hardBreak` and a blank line the end of a paragraph on Jira, so a
+save sends the breaks typed and no others.
 
 `:w` reaches `buffer.write(buf)` through the `BufWriteCmd` autocommand,
 because the buffer's `'buftype'` is `acwrite`, which routes a write of a name
@@ -397,6 +486,24 @@ request row with no branch; and a row from a fork, through the file-local
 `dash_clone()` between `foreign()` and the branch check, because a ticket's
 launch needs it, and `review_row` reads it after `refused_fork()`.
 
+From an item buffer, `commands.work(buf)` launches a ticket from its key and
+summary in the clone the editor is in. A merge request's buffer goes to the
+file-local `launch_merge_request(state, review_id)`, which `<leader>dR`'s
+`commands.review_item(buf)` reaches as well with the merge request's
+identifier as `review_id`. It reads `branch` and `fork` from
+`vim.b[buf].docket`, where `buffer.populate()` stored them off the item:
+`glab.item()` passes the merge request's `source_branch` and `forked(mr)` to
+`item.new`, which keeps the branch only as a non-empty string and the mark
+only when it is `true`, and `jira.item()` passes neither. It refuses a
+buffer with no branch in the dash's words, finds the clone with
+`repo.root()` on the directory the item's reference names, `state.ref.cwd`,
+which is the clone the text came from, holds a row built from the state to
+`refused_fork()`, reads the binding, and calls `commands.launch`. The read
+was held against `origin`'s project, so `refused_fork()` refuses every merge
+request marked `fork` from there. `review_item` refuses a ticket for a call
+made other than through `<leader>dR`, which `attach()` sets on a merge
+request's buffer alone.
+
 `refused_fork()` starts from `row.fork`, which each review adapter's
 `rows()` sets and `row.new` keeps only when it is `true`, so a ticket and a
 merge request or pull request within its own project carry none and pass.
@@ -417,12 +524,14 @@ docket-work` shows it, and the launcher's own refusal, which a row not
 marked meets in its place.
 
 The mark is set where the rows are built. `glab.rows()` sets `fork` through
-the file-local `forked(mr)`: true when the merge request's
-`source_project_id` and `target_project_id` are both numbers and differ, nil
-when either is missing, so a list lacking the fields marks nothing. Both
-fields come from GitLab's REST reference and neither has been printed from
-the instance, which `forked()`'s comment marks as unverified, with the `glab
-mr list -F json | jq` line that prints them. `gh.rows()` sets it from
+the file-local `forked(mr)`, and `glab.item()` through the same function on
+`mr view`'s answer: true when the merge request's `source_project_id` and
+`target_project_id` are both numbers and differ, nil when either is missing,
+so an answer lacking the fields marks nothing. Both fields come from
+GitLab's REST reference and neither has been printed from the instance, by
+`mr list` or by `mr view`, which `forked()`'s comment marks as unverified,
+with the `glab mr list -F json | jq` and `glab mr view 482 -F json | jq`
+lines that print them. `gh.rows()` sets it from
 `isCrossRepository`, kept only when `gh` printed `true`; `gh.ROW_FIELDS`'
 comment records the release whose `pr list --json` field list has it, and
 `gh pr list --json` with no value prints the installed release's. What is
@@ -450,8 +559,27 @@ the review's tab through `commands.key_review_tab` and take the keys off
 again through `commands.unkey_reviews`. `review_verb` calls `review.comment`,
 `review.reply`, `review.resolve`, `review.submit(verdict)` or
 `review.abandon`. `R` on the dash is `commands.review_row`, the launcher
-with `nvim -c 'Docket review <id>'` as the editor command. `:help
-docket-review` is the reference.
+with `nvim -c 'Docket review <id>'` as the editor command, and `<leader>dR`
+in a merge request's buffer is `commands.review_item`, traced under "Working
+on an item" above.
+
+`commands.attach_review(buf)` sets each entry of `commands.REVIEW_KEYS`, and
+`g?`, which lists them, `commands.TYPED.review` and
+`commands.DIFFVIEW_HELP`. diffview.nvim sets `g?` on each side of the diff
+to open its help panel, and takes its maps off a file's buffer by left-hand
+side when it detaches the file, the review's `g?` among them; it sets its
+own again when it opens the file, and then fires `User
+DiffviewDiffBufWinEnter`. It also reopens the file already on screen, in
+the window showing it, where no `BufWinEnter` fires. So the
+`docket/review-keys` group runs `commands.key_review_tab`, scheduled, on that
+`User` event as well as on `BufWinEnter` and `TabEnter`; the comment above
+`review_autocommands()` names the diffview functions this is read from, and
+that it is unverified against the installed revision. The same group sets
+`g?` over `commands.TYPED.compose` on a `docket-review://` compose buffer
+from `BufWinEnter` with that pattern, since `review.compose()` opens its
+window with `nvim_open_win(buf, true, …)`. `commands.detach_review` takes
+the review's `g?` off with its keys. `:help docket-review` is the
+reference.
 
 ## The adapter contract
 
@@ -665,21 +793,27 @@ one hyphen, because tmux reads `:` and `.` in a target as separators; it
 truncates nothing, since two long branches sharing a prefix would collide.
 
 The sequence: `repo.worktrees(root)` lists the clone's worktrees; a ticket
-in an unbound clone, or from a project the clone is not bound to, is
-refused with the binding command; `repo.worktree_for_key` reuses a worktree
-whose branch starts with the key, `repo.worktree_for_branch` one on the
-exact branch; a review branch that is not on `origin`, which
+in an unbound clone, or from a project the clone is not bound to, is refused
+with the binding command; `repo.worktree_for_key` reuses a worktree whose
+branch starts with the key, `repo.worktree_for_branch` one on the exact
+branch; a review branch that is not on `origin`, which
 `env.remote_has_branch` asks with `git ls-remote`, is refused, because `git
 wt-add` would create a new branch of that name; `env.add_worktree` runs `git
 wt-add`; then `env.open_windows`. Inside tmux, which `env.in_tmux` decides
 from `$TMUX` and not from a running server, `env.tmux_windows` makes the two
-windows with `new-window -S -n <name>`, which finds or creates, addresses
-each as `=<name>`, an exact match, and sets `allow-rename off`; the focus
-move is what decides success, as the function's comment explains. Away from
-tmux, `open_windows` opens a tab of the running editor and runs `:tcd` into
-the worktree, since it is tab-local (`:help :tcd`), and returns
-`env.tmux_script` for the report to print, so a shell inside tmux can reach
-the same place.
+windows with `new-window -S -n <name>`, which finds or creates, then runs
+one `list-windows -F '#{window_id} #{window_name}'`, which
+`env.parse_windows` reads, and `env.window_id` gives each name's id, or none
+when no window or several carry the name. Each later step addresses its
+window by that id, because tmux reads an id as a window under every target
+type, while `set-option` takes a pane target and reads `=<name>` as a name
+with the `=` in it. It sets `allow-rename off` on both and selects the
+editor's; the function's comment says which failures stop the launch and
+which are a warning. `env.close_windows`, for the teardown, kills by the
+same listing's ids. Away from tmux, `open_windows` opens a tab of the
+running editor and runs `:tcd` into the worktree, since it is tab-local
+(`:help :tcd`), and returns `env.tmux_script` for the report to print, so a
+shell inside tmux can reach the same place.
 
 `env.teardown(opts)` closes both windows and then removes the worktree
 through `git wt-rm`, in that order because a window left in a removed
@@ -757,15 +891,63 @@ offers no people.
 
 ## Highlights
 
-`highlight.lua` names the `Docket*` groups and, for each, the `Octo*` group
-it follows when octo.nvim has been set up and a built-in group otherwise;
-`highlight.define()` links them with `nvim_set_hl` and runs from `setup()`
-and again from a `ColorScheme` autocommand, since a colour scheme change
-clears the groups. `highlight.state_group(state, category)` picks a state's
-group: a Jira status by its `statusCategory.key`, which each Jira row and
-item carries as `category`, because a status name is the workflow's own
+`highlight.lua` names the `Docket*` groups and, in `GROUPS`, the built-in
+group each links to, `DocketEditable` aside. `highlight.define()` links them
+with `nvim_set_hl` and `default = true`, so a colour scheme or the
+configuration that defines a `Docket*` group keeps its own definition.
+`DocketEditable` has no fixed link: its point is a background different from
+`Normal`'s, and which built-in group has one depends on the colour scheme.
+`define()` reads the backgrounds of `EDITABLE_FROM` with `nvim_get_hl` and
+`link = false`, gives `DocketEditable` the first that is set and differs from
+`Normal`'s, with its `ctermbg` beside it, and links it to `EDITABLE_FALLBACK`
+when none differs. Every group `GROUPS`, `EDITABLE_FROM` and
+`EDITABLE_FALLBACK` name is built in, so each exists whether or not octo.nvim
+is installed. `define()` sets `DocketEditable` without `default`, and only
+when the group is empty or holds what the last `define()` set, which it keeps
+in `chosen`: `default`
+refuses a group holding any value, and `DocketEditable` still holds the
+background chosen before when the colours change without a `:hi clear` — a
+`'background'` change under neovim's own colours, or a scheme that loads
+without one. Anything else in the group was set by a colour scheme or the
+configuration, and stays. `define()` runs from `setup()` and again from
+autocommands in the `docket/highlights` group: `ColorScheme`, because a colour
+scheme's `:hi clear` puts each default link back by itself and empties
+`DocketEditable` and the configured statuses' groups; `OptionSet` for
+`background`, which changes neovim's own colours and fires no `ColorScheme`
+when no scheme is loaded; and `VimEnter`, because `OptionSet` does not fire
+during startup. `highlight.state_group(state, category, source)` picks a
+state's group: a Jira status by its `statusCategory.key`, which each Jira row
+and item carries as `category`, because a status name is the workflow's own
 word; a GitLab or GitHub state by its fixed word. `:help docket-highlights`
 lists the groups and the mapping.
+
+The statuses `setup{}` gives a colour of their own reach `highlight.lua` as
+`define()`'s argument, so the module imports nothing. `define()` sets one
+group per status after the fixed ones, named by `status_group()`, and without
+`default`: a configured status is the user's own setting, and a second
+`setup()` replaces the first, which `default` refuses once the group holds a
+value. It keeps the table, keyed by the name lower-cased; called with no
+argument it sets the kept statuses again, which is what each of those
+autocommands does. Their callback is a function of its own, because a callback
+named directly receives the event's table, which `define()` would take for the
+statuses, and because a callback that returns anything but `nil` or `false`
+deletes its autocommand, and `define()` returns a table. `state_group()` looks
+a state up among them before its category when `source` is `jira`, so
+`list.lines()` passes each row's `source` and the item buffer's `decorate()`
+the item's. A status whose value cannot be set, because it is no colour, group
+name or table, because a table's `link` is no group name, or because
+`nvim_set_hl` refuses it, is left out, so it keeps its category's group. So is
+a status whose group a name earlier in byte order already took: `define()`
+walks the names sorted and refuses a group it has set once, compared in lower
+case as neovim compares group names, so the same status takes the group at
+every setup and every time the colours change. `define()` returns the
+refusals, which `setup()` reports with `vim.notify`, and `configured()`
+answers what was set, with the group each status links to, and what was
+refused, which `health.lua` reports. A link to a group that sets nothing is
+accepted by `define()`, because a colour scheme loaded later may set it;
+`health.lua` warns of it, reading the target with `nvim_get_hl` and
+`link = false`, since the link itself creates the group and `hlexists()` then
+answers 1.
 
 ## Help tags
 
@@ -789,7 +971,14 @@ the source tree", gives the scratch-copy route to reading edited help.
 -l`), because the modules call into `vim.*`; the buffers, windows and tabs a
 test opens belong to that instance and end with it. It sets `package.path`
 from its own location to the package's `lua/` directory, so it runs from any
-directory, and it requires every module and the adapters up front.
+directory, and it requires every module and the adapters up front. Before
+that it drops every `'runtimepath'` entry holding a copy of docket and
+empties `'packpath'`, because neovim's module loader searches both ahead of
+`package.path`: on a machine with docket deployed, a `require` would
+otherwise read the deployed copy, and its help file would be on the runtime
+path. The last test, `suite: every docket module is read from the source
+tree, and an installed copy is on neither path`, fails when a module was
+read from anywhere else.
 
 Each test is `test(name, body)`, appended to a list the runner at the end of
 the file walks, calling each body under `pcall` and printing `ok` or `FAIL`
@@ -840,8 +1029,9 @@ Each procedure below names the places the code reads, walked against it.
 1. Add the name to `row.SOURCES` in `row.lua`. Its position is the order the
    dash shows the backend's sections in and sorts its rows by. `row.new`
    refuses a row whose `source` is not in the list, `adapters.get` refuses a
-   name that is not, `health.lua` checks each name, and `commands.complete`
-   offers each after `login`.
+   name that is not, `health.lua` checks each name a configured section
+   needs and names the rest as not checked, and `commands.complete` offers
+   each after `login`.
 2. Write `lua/docket/adapters/<name>.lua`: a table with every call in
    `adapters.REQUIRED` at the arity `adapters.ARITY` gives it, a
    `capabilities` list naming each call in `adapters.OPTIONAL` the module
@@ -893,9 +1083,15 @@ Each procedure below names the places the code reads, walked against it.
 3. The body follows the pattern above: `auth.ready` before the first client
    call, an optional capability only through `adapters.can`, and every
    buffer change inside `vim.schedule` when it follows a client's answer. A
-   key belongs to one kind of buffer and is set in `commands.attach`,
-   `attach_dash` — whose footer is `list.KEYS` — or `commands.REVIEW_KEYS`,
-   never in `plugin/docket.lua`, which holds `<leader>dd` alone.
+   key belongs to one kind of buffer and is an entry of that kind's table:
+   `commands.ITEM_KEYS`, which `commands.attach` sets, `commands.DASH_KEYS`,
+   which `attach_dash` sets and `list.KEYS`, the footer, names, or
+   `commands.REVIEW_KEYS`; never `plugin/docket.lua`, which holds
+   `<leader>dd` alone. `g?` lists each table's entries with their `desc`, so
+   the entry is all a new key needs to be listed; a command typed rather
+   than mapped is listed by an entry of `commands.TYPED`. The suite asserts
+   that `g?` names every map, and that `list.KEYS` names every entry of
+   `DASH_KEYS`.
 4. Document it under `docket-commands` in `doc/docket.txt`, and test it in
    the `the commands` section of `tests/docket.lua`; the test `commands: gx
    opens the adapter's url, and completion offers the subcommands then the

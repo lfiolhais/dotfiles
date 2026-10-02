@@ -101,10 +101,11 @@ end
 --- counted, that would make every later save LF. As the body's only line
 --- break it is the only evidence of the ending, so a body whose only break is
 --- a final CRLF answers true, and a line added under it is sent with CRLF.
---- UNVERIFIED: whether GitLab returns a body ending in CRLF, and that CRLF is
---- then the ending to send it, are both reasoned from the ending the body
---- arrived with; `glab api projects/:id/merge_requests/<iid>` on a
---- description typed in the web interface shows what it returns.
+---
+--- The GitLab instance returns descriptions and notes with LF line ends, for
+--- which this answers false; the CRLF path is for a body that arrives with
+--- CRLF. UNVERIFIED: that CRLF, where a body arrives with it, is the ending to
+--- send it back with, which is reasoned from the ending it arrived with.
 ---@param body table|string|nil
 ---@return boolean
 function M.crlf(body)

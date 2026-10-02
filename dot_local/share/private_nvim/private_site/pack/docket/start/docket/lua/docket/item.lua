@@ -53,12 +53,17 @@ end
 --- takes the identifier alone. `project` is the project path the backend's
 --- answer names, on a backend that numbers its items within a project and
 --- whose answer says which; nil where it does not say, and the item buffer
---- then holds nothing against its name.
+--- then holds nothing against its name. `branch` is a merge request's source
+--- branch, kept only as a non-empty string, and `fork` is kept only when it
+--- is true, for a merge request whose branch lives in another project: the
+--- item buffer stores both, and `<leader>dw` and `<leader>dR` there build
+--- the environment from them as `w` and `R` do from a dash row. A ticket
+--- carries neither.
 ---
 --- The refusals are raised at level 0, so the message carries no source
 --- location: an adapter catches them with pcall and the buffer shows the text
 --- after the item's name, where a path into this file is noise.
----@param fields { source: string, id: string, title: string, state: string|nil, category: string|nil, url: string|nil, assignee: table|nil, reporter: table|nil, updated: string|nil, body: table|nil, comments: table[]|nil, total: integer|nil, start_at: integer|nil, me: string|nil, ref: table|nil, project: string|nil }
+---@param fields { source: string, id: string, title: string, state: string|nil, category: string|nil, url: string|nil, assignee: table|nil, reporter: table|nil, updated: string|nil, body: table|nil, comments: table[]|nil, total: integer|nil, start_at: integer|nil, me: string|nil, ref: table|nil, project: string|nil, branch: string|nil, fork: boolean|nil }
 ---@return table item
 function M.new(fields)
   for _, name in ipairs({ "source", "id", "title" }) do
@@ -99,6 +104,8 @@ function M.new(fields)
     me = nilled(fields.me),
     ref = type(fields.ref) == "table" and fields.ref or nil,
     project = (type(fields.project) == "string" and fields.project ~= "") and fields.project or nil,
+    branch = (type(fields.branch) == "string" and fields.branch ~= "") and fields.branch or nil,
+    fork = fields.fork == true or nil,
   }
 end
 

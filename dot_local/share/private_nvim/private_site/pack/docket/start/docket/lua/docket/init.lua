@@ -1,8 +1,10 @@
--- setup(), and the help tags. Imports config and highlight alone, so setup(),
--- which runs at every start, loads no part of the read path. The command and
--- the maps are declared by plugin/docket.lua, so setup() takes the options,
--- defines the highlight groups and keeps them defined across a colour scheme
--- change, and writes the help tags.
+-- setup(), the help tags, and before_session_save(), which the configuration
+-- runs from auto-session's `pre_save_cmds` hook. Imports config and highlight
+-- alone, so setup(), which runs at every start, and the hook, which runs at
+-- every session save, load no part of the read path. The command and the
+-- maps are declared by plugin/docket.lua, so setup() takes the options,
+-- defines the highlight groups and keeps them defined as the colours change,
+-- and writes the help tags.
 --
 -- The tags are written here rather than by a bootstrap script because a
 -- script would have to run nvim on a fresh machine -- on the rootless profile
@@ -21,6 +23,14 @@ M.HELP = "doc/docket.txt"
 -- Whether a failure to write the tags has been reported, so that a repeated
 -- setup() reports it once rather than at every call.
 local reported = false
+
+-- The names of every docket buffer that is ever listed start with one of
+-- these: an item buffer's, buffer.SCHEME; a new ticket's draft,
+-- commands.DRAFT; and the dashboard, list.NAME, which is the whole name. A
+-- review's compose buffers, review.SCHEME, are never listed, and so never
+-- reach a session's buffer list. Spelled here rather than read from those
+-- modules, because requiring them loads the read path.
+M.NAMES = { "docket://", "docket-new://", "docket-dash://" }
 
 --- The help file and the tags file beside it: the one lookup both
 --- helptags() and `:checkhealth docket` read.
@@ -72,23 +82,82 @@ function M.helptags(help)
   return false, message
 end
 
+--- Keeps every docket buffer out of the session about to be saved: each
+--- listed one is taken off the buffer list, which is what keeps it from the
+--- `badd` lines `:mksession` writes, and listed again from a scheduled
+--- callback.
+---
+--- The configuration calls this from auto-session's `pre_save_cmds`. On
+--- auto-session's main branch those hooks and the `:mksession` that writes
+--- the file run in one synchronous call, so the callback runs after the file
+--- is written, and runs whether or not the save went through. The installed
+--- release is not known to be that revision; `:help docket-setup-sessions`
+--- gives the `grep` that shows it is.
+---
+--- A buffer that was not listed is left so: `:bdelete` or `BD` took it off
+--- the list, or it is the buffer a GitHub handoff unlists, and listed again,
+--- `:bnext` would reach it and read the item. A buffer wiped before the
+--- callback runs is passed over.
+---@return integer[] bufs the buffers taken off the list
+function M.before_session_save()
+  local unlisted = {}
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.bo[buf].buflisted then
+      local name = vim.api.nvim_buf_get_name(buf)
+      for _, prefix in ipairs(M.NAMES) do
+        if vim.startswith(name, prefix) then
+          vim.bo[buf].buflisted = false
+          unlisted[#unlisted + 1] = buf
+          break
+        end
+      end
+    end
+  end
+  vim.schedule(function()
+    for _, buf in ipairs(unlisted) do
+      if vim.api.nvim_buf_is_valid(buf) then
+        vim.bo[buf].buflisted = true
+      end
+    end
+  end)
+  return unlisted
+end
+
 --- Configures docket.
 ---
 --- The options are config.defaults with `opts` merged over them, every one
---- described under `docket-setup` in `:help docket`. The Docket* highlight
---- groups are defined here and again from a ColorScheme autocommand, since
---- a colour scheme change clears them; a call after octo.nvim's own setup
---- is what lets them follow the Octo* groups.
+--- described under `docket-setup` in `:help docket`: `sections`, `timeouts`,
+--- `jira`, `glab`, `gh`, `cache_dir` and `statuses`. The Docket* highlight
+--- groups, and one per status in `statuses`, are defined here and again
+--- whenever the colours change: from a ColorScheme autocommand, since a
+--- colour scheme's `:hi clear` empties DocketEditable and the statuses'
+--- groups; from an OptionSet autocommand for 'background', since neovim's
+--- own colours change with it and fire no ColorScheme event when no colour
+--- scheme is loaded; and from a VimEnter autocommand, since OptionSet does
+--- not fire during startup. A status whose colour cannot be set is reported
+--- with vim.notify, and renders in its category's colour.
 ---@param opts table|nil
 ---@return table options
 function M.setup(opts)
   local options = config.configure(opts)
-  highlight.define()
+  local problems = highlight.define(options.statuses)
+  if #problems > 0 then
+    vim.notify("docket: " .. table.concat(problems, "\ndocket: "), vim.log.levels.WARN)
+  end
   local group = vim.api.nvim_create_augroup("docket/highlights", { clear = true })
-  vim.api.nvim_create_autocmd("ColorScheme", {
-    group = group,
-    callback = highlight.define,
-  })
+  -- A function of its own, because a callback named directly receives the
+  -- event's table, which define() would take for the statuses. It returns
+  -- nothing, because a callback that returns anything but nil or false
+  -- deletes its autocommand, and define() returns a table.
+  local function again()
+    highlight.define()
+  end
+  vim.api.nvim_create_autocmd("ColorScheme", { group = group, callback = again })
+  vim.api.nvim_create_autocmd("OptionSet", { group = group, pattern = "background", callback = again })
+  -- OptionSet does not fire during startup, so a 'background' set after this
+  -- by the rest of the configuration's init.lua, or by neovim once the
+  -- terminal reports its colour, is caught when startup ends.
+  vim.api.nvim_create_autocmd("VimEnter", { group = group, callback = again })
   M.helptags()
   return options
 end

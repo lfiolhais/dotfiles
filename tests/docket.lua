@@ -7,7 +7,8 @@
 -- Jira, GitLab and GitHub adapters, the login flow, the item buffer's marks
 -- and its write path, completion, the dashboard, the commands -- a
 -- transition, an assignment and a new ticket's draft among them -- the review
--- mode, the help tags, the health report and the plugin file.
+-- mode, the help tags, the health report, the plugin file, and last, that the
+-- suite read every module from the source tree.
 --
 -- No git runs, no client is called, no tmux window opens: every process call
 -- goes through spawn, and the tests that reach one replace spawn.run or
@@ -32,12 +33,64 @@
 --
 -- The module path is set from this file's own location to the package's
 -- `lua/` directory, so it runs by hand from any directory as well as from
--- tests/check.py.
+-- tests/check.py. What it tests is the source tree whatever copy of docket
+-- the machine has installed; isolate() below says how.
 
 local here = debug.getinfo(1, "S").source:sub(2)
 local root = vim.uv.fs_realpath(vim.fs.dirname(here) .. "/..")
 local lua = root .. "/dot_local/share/private_nvim/private_site/pack/docket/start/docket/lua"
+
+-- Whether a runtime directory holds a copy of docket: its modules, its plugin
+-- file or its help file.
+local function holds_docket(dir)
+  for _, path in ipairs({ "lua/docket", "lua/docket.lua", "plugin/docket.lua", "doc/docket.txt" }) do
+    if vim.uv.fs_stat(dir .. "/" .. path) then
+      return true
+    end
+  end
+  return false
+end
+
+-- Takes every installed copy of docket out of the editor's sight. neovim's
+-- own module loader runs ahead of package.path and searches each
+-- 'runtimepath' entry and every `pack/*/start/*` folder under each 'packpath'
+-- entry, and `-u NONE` leaves both at their defaults, which name
+-- ~/.local/share/nvim/site. On a machine this repository has configured
+-- docket is deployed there, so without this a require() reads the deployed
+-- copy, and its help file is on the runtime path, where the help and health
+-- tests assert there is none. Every 'runtimepath' entry that holds a copy is
+-- dropped, and 'packpath' is emptied, since the suite needs no package from
+-- the machine and a copy can sit in any package under any folder name. The
+-- source tree is on neither, so the help file is found nowhere, and its
+-- modules come from package.path.
+local function isolate()
+  vim.opt.runtimepath = vim.tbl_filter(function(dir)
+    return not holds_docket(dir)
+  end, vim.opt.runtimepath:get())
+  vim.o.packpath = ""
+end
+isolate()
 package.path = lua .. "/?.lua;" .. lua .. "/?/init.lua;" .. package.path
+
+-- Where each docket module was read from, by module name, which the last test
+-- checks is the source tree. The recorder sits after package.preload, the
+-- first searcher, because the tests stand a module in through preload, and
+-- before neovim's loader; it asks the searchers after it in their order, so
+-- the module found is the one require() would have found without it.
+local origins = {}
+table.insert(package.loaders, 2, function(name)
+  if name ~= "docket" and not vim.startswith(name, "docket.") then
+    return nil
+  end
+  for index = 3, #package.loaders do
+    local loader = package.loaders[index](name)
+    if type(loader) == "function" then
+      origins[name] = debug.getinfo(loader, "S").source:gsub("^@", "")
+      return loader
+    end
+  end
+  return nil
+end)
 
 local adapters = require("docket.adapters")
 local adf = require("docket.adf")
@@ -146,6 +199,34 @@ end)
 test("query: a complete jql is used as given", function()
   local binding = { kind = "jql", jql = "filter = 12345" }
   eq(repo.jql("<projects>" .. OPEN, binding), "filter = 12345")
+end)
+
+test("query: an epic narrows the project clause to its children, in every Jira section", function()
+  local binding = { kind = "projects", projects = { "PAY" }, epic = "PAY-10" }
+  eq(repo.clause(binding), "project IN (PAY) AND parent = PAY-10")
+  eq(repo.jql("<projects>" .. OPEN, binding), "project IN (PAY) AND parent = PAY-10" .. OPEN)
+  local shown = repo.sections(binding, config.defaults.sections, { adapter = "glab" })
+  local jira = vim.tbl_filter(function(section)
+    return section.adapter == "jira"
+  end, shown)
+  eq(#jira > 1, true, "every Jira section is shown")
+  for _, section in ipairs(jira) do
+    eq(section.query:find("^project IN %(PAY%) AND parent = PAY%-10 ") ~= nil, true, section.query)
+    eq(section.reason, nil, section.title)
+  end
+end)
+
+test("query: an epic beside a complete jql narrows nothing, and the section says so", function()
+  local binding = { kind = "jql", jql = "filter = 1", epic = "PAY-10" }
+  eq(repo.jql("<projects>" .. OPEN, binding), "filter = 1", "the query runs as written")
+  local shown = repo.sections(binding, config.defaults.sections, { adapter = "glab" })
+  eq(shown[1].query, "filter = 1")
+  eq(
+    shown[1].reason,
+    "dotfiles.jira.epic is PAY-10, and dotfiles.jira.jql runs as written, so the epic narrows nothing; put parent = PAY-10 into the query"
+  )
+  local plain = repo.sections({ kind = "jql", jql = "filter = 1" }, config.defaults.sections, { adapter = "glab" })
+  eq(plain[1].reason, nil, "with no epic there is nothing to say")
 end)
 
 test("sections: the defaults carry a title, an adapter and a query each", function()
@@ -284,26 +365,135 @@ test("window: the editor command carries the review identifier as one argument",
   eq(env.editor_command("!482"), { "nvim", "-c", "Docket review !482" })
 end)
 
-test("window: inside tmux every target is an exact name and nothing spawns but tmux", function()
+-- Opens the windows for PROJ-1-x inside tmux with every tmux call recorded,
+-- `list-windows` answered with `windows` and every other call succeeding.
+-- `answer`, when given, is asked first for each call and answers it with the
+-- result it returns; a nil return leaves the call to the rule above.
+local function tmux_launch(windows, answer)
   local saved_tmux, saved_wait = vim.env.TMUX, spawn.wait
   local calls = {}
   vim.env.TMUX = "/tmp/tmux-1/default,1,0"
   spawn.wait = function(argv)
     calls[#calls + 1] = argv
-    return { argv = argv, ok = true, code = 0, stdout = "", stderr = "", timed_out = false }
+    local answered = answer and answer(argv)
+    if answered then
+      return vim.tbl_extend("keep", answered, { argv = argv, stdout = "", stderr = "", timed_out = false })
+    end
+    local stdout = argv[2] == "list-windows" and windows or ""
+    return { argv = argv, ok = true, code = 0, stdout = stdout, stderr = "", timed_out = false }
   end
-  local ok, opened = pcall(env.open_windows, "/w/p", "PROJ-1-x", env.editor_command("!4"))
+  local ok, opened, err = pcall(env.open_windows, "/w/p", "PROJ-1-x", env.editor_command("!4"))
   spawn.wait = saved_wait
   vim.env.TMUX = saved_tmux
   assert(ok, opened)
+  return opened, err, calls
+end
+
+-- The calls that make both windows and list them, which every launch inside
+-- tmux starts with.
+local TMUX_MADE = {
+  { "tmux", "new-window", "-S", "-n", "PROJ-1-x", "-c", "/w/p", "nvim", "-c", "Docket review !4" },
+  { "tmux", "new-window", "-S", "-d", "-n", "PROJ-1-x-sh", "-c", "/w/p" },
+  { "tmux", "list-windows", "-F", "#{window_id} #{window_name}" },
+}
+
+test("window: inside tmux every target after creation is a window id, and nothing spawns but tmux", function()
+  local opened, err, calls = tmux_launch("@3 PROJ-1-x\n@4 PROJ-1-x-sh\n")
+  eq(err, nil)
   eq(opened, { how = "tmux", editor = "PROJ-1-x", shell = "PROJ-1-x-sh" })
-  eq(calls, {
-    { "tmux", "new-window", "-S", "-n", "PROJ-1-x", "-c", "/w/p", "nvim", "-c", "Docket review !4" },
-    { "tmux", "new-window", "-S", "-d", "-n", "PROJ-1-x-sh", "-c", "/w/p" },
-    { "tmux", "set-option", "-w", "-t", "=PROJ-1-x", "allow-rename", "off" },
-    { "tmux", "set-option", "-w", "-t", "=PROJ-1-x-sh", "allow-rename", "off" },
-    { "tmux", "select-window", "-t", "=PROJ-1-x" },
+  eq(
+    calls,
+    vim.list_extend(vim.deepcopy(TMUX_MADE), {
+      { "tmux", "set-option", "-w", "-t", "@3", "allow-rename", "off" },
+      { "tmux", "set-option", "-w", "-t", "@4", "allow-rename", "off" },
+      { "tmux", "select-window", "-t", "@3" },
+    })
+  )
+end)
+
+test("window: a companion the listing does not hold once is a warning naming it, and is not settled", function()
+  for _, case in ipairs({
+    {
+      listing = "@1 dash\n@3 PROJ-1-x\n",
+      warning = "tmux lists no window named PROJ-1-x-sh after new-window -S made it; tmux list-windows -F '#{window_id} #{window_name}' prints what the session holds",
+    },
+    {
+      listing = "@3 PROJ-1-x\n@4 PROJ-1-x-sh\n@9 PROJ-1-x-sh\n",
+      warning = "tmux lists more than one window named PROJ-1-x-sh: @4, @9; tmux list-windows -F '#{window_id} #{window_name}' prints what the session holds",
+    },
+  }) do
+    local opened, err, calls = tmux_launch(case.listing)
+    eq(err, nil)
+    eq(opened, { how = "tmux", editor = "PROJ-1-x", warning = case.warning }, "no companion to switch to")
+    eq(
+      calls,
+      vim.list_extend(vim.deepcopy(TMUX_MADE), {
+        { "tmux", "set-option", "-w", "-t", "@3", "allow-rename", "off" },
+        { "tmux", "select-window", "-t", "@3" },
+      }),
+      "the editor's window is still settled and selected"
+    )
+  end
+end)
+
+test("window: an editor's window the listing does not hold once fails the launch with the listing's ids", function()
+  for _, case in ipairs({
+    {
+      listing = "@1 dash\n@4 PROJ-1-x-sh\n",
+      err = "tmux lists no window named PROJ-1-x after new-window -S made it; tmux list-windows -F '#{window_id} #{window_name}' prints what the session holds",
+    },
+    {
+      listing = "@3 PROJ-1-x\n@4 PROJ-1-x-sh\n@7 PROJ-1-x\n",
+      err = "tmux lists more than one window named PROJ-1-x: @3, @7; tmux list-windows -F '#{window_id} #{window_name}' prints what the session holds",
+    },
+  }) do
+    local opened, err, calls = tmux_launch(case.listing)
+    eq(opened, nil)
+    eq(err, case.err)
+    eq(calls, TMUX_MADE, "nothing is addressed once the editor's window has no single id")
+  end
+end)
+
+test("window: a listing tmux refuses fails the launch with tmux's words, and nothing is addressed", function()
+  local opened, err, calls = tmux_launch("", function(argv)
+    if argv[2] == "list-windows" then
+      return { ok = false, code = 1, stderr = "no server running" }
+    end
+  end)
+  eq(opened, nil)
+  eq(err, "tmux exited 1\nno server running")
+  eq(calls, TMUX_MADE)
+end)
+
+test("window: a companion that closes after the listing is a warning, and is not named", function()
+  local opened, err, calls = tmux_launch("@3 PROJ-1-x\n@4 PROJ-1-x-sh\n", function(argv)
+    if argv[2] == "set-option" and argv[5] == "@4" then
+      return { ok = false, code = 1, stderr = "can't find window: @4" }
+    end
+  end)
+  eq(err, nil)
+  eq(opened, { how = "tmux", editor = "PROJ-1-x", warning = "tmux exited 1\ncan't find window: @4" }, "no companion to switch to")
+  eq(
+    calls,
+    vim.list_extend(vim.deepcopy(TMUX_MADE), {
+      { "tmux", "set-option", "-w", "-t", "@3", "allow-rename", "off" },
+      { "tmux", "set-option", "-w", "-t", "@4", "allow-rename", "off" },
+      { "tmux", "select-window", "-t", "@3" },
+    }),
+    "the editor's window is still selected"
+  )
+end)
+
+test("window: a listing is read into ids and names, a name with a space included, and an empty one holds no window", function()
+  eq(env.parse_windows(""), {})
+  eq(env.parse_windows("\n"), {})
+  eq(env.parse_windows("@1 dash\n@12 my notes\n@3 \n"), {
+    { id = "@1", name = "dash" },
+    { id = "@12", name = "my notes" },
+    { id = "@3", name = "" },
   })
+  eq({ env.window_id(env.parse_windows("@1 a\n@2 ab\n"), "a") }, { "@1", { "@1" } }, "the whole name, not a prefix")
+  eq({ env.window_id(env.parse_windows(""), "a") }, { nil, {} })
 end)
 
 test("window: away from tmux a tab of this editor opens at the path and runs a review's command, and a tab already there is reused", function()
@@ -360,10 +550,11 @@ test("window: the pasteable script quotes the path, names both windows, and read
   local lines = vim.split(script, "\n")
   eq(lines[1], "tmux new-window -S -n 'PROJ-1-x' -c '/w/my repo/PROJ-1-x' 'nvim' '-c' 'Docket review !4'")
   eq(lines[2], "tmux new-window -S -d -n 'PROJ-1-x-sh' -c '/w/my repo/PROJ-1-x'")
-  eq(lines[3], "tmux set-option -w -t '=PROJ-1-x' allow-rename off")
-  eq(lines[4], "tmux set-option -w -t '=PROJ-1-x-sh' allow-rename off")
+  eq(lines[3], "tmux set-window-option -t '=PROJ-1-x' allow-rename off")
+  eq(lines[4], "tmux set-window-option -t '=PROJ-1-x-sh' allow-rename off")
   eq(lines[#lines], "tmux select-window -t '=PROJ-1-x'")
-  -- Pasted at a fish prompt, which has neither `var=value` nor `$(...)`.
+  -- Pasted at a fish or a bash prompt, which spell a variable differently, so
+  -- no line sets one or reads one back.
   for _, line in ipairs(lines) do
     eq(line:find("$(", 1, true), nil, "no substitution: " .. line)
     eq(line:find("=$", 1, true), nil, "no assignment: " .. line)
@@ -1239,6 +1430,16 @@ test("item: fields are normalised, a null is nil, and a comment id is a string",
     { pcall(item.new, { source = "jira", id = "PROJ-1", title = "t", comments = { { body = doc() } } }) },
     { false, "item: comment 1 of PROJ-1 has no id" }
   )
+end)
+
+test("item: a merge request keeps its source branch and its fork mark, each only when it is one", function()
+  local it = item.new({ source = "glab", id = "!1", title = "t", branch = "feature/x", fork = true })
+  eq({ it.branch, it.fork }, { "feature/x", true })
+  for _, given in ipairs({ { branch = "", fork = false }, { branch = vim.NIL, fork = vim.NIL }, {} }) do
+    local bare = item.new(vim.tbl_extend("force", { source = "glab", id = "!1", title = "t" }, given))
+    eq({ bare.branch, bare.fork }, {}, vim.inspect(given))
+  end
+  eq({ ticket().branch, ticket().fork }, {}, "a ticket carries neither")
 end)
 
 test("item: a truncated thread is the difference between total and what came", function()
@@ -2645,7 +2846,8 @@ test("jira: states refuses an identifier that is not a key, because a query reac
   eq(calls, {}, "nothing was searched")
   -- The shape is env.KEY_PATTERN's read the other way, so the two accept the
   -- same identifiers; `A-1` is refused by both, since the prefix wants two
-  -- characters at least.
+  -- characters at least. repo.KEY, which an epic is held to, is the same
+  -- shape again.
   calls, restore = stub_run(function(argv)
     return done(argv, {})
   end)
@@ -2655,6 +2857,7 @@ test("jira: states refuses an identifier that is not a key, because a query reac
       refused = err ~= nil
     end)
     eq(refused, env.key_of(id) ~= id, id .. ": states and env.key_of agree")
+    eq(id:match(repo.KEY) == nil, env.key_of(id) ~= id, id .. ": repo.KEY and env.key_of agree")
   end
   restore()
   eq(#calls, 3, "the three keys were searched")
@@ -3297,6 +3500,48 @@ local function loaded_buffer(overrides)
   return buf
 end
 
+-- An item buffer of that name before anything has prepared or read it:
+-- named, unlisted and empty, so a window showing it carries none of
+-- buffer.WINDOW. An earlier test's buffer of the name is deleted first.
+local function unread_buffer(id)
+  local name = buffer.name("jira", id)
+  local previous = buffer.named(name)
+  if previous then
+    vim.api.nvim_buf_delete(previous, { force = true })
+  end
+  local buf = vim.api.nvim_create_buf(false, false)
+  vim.api.nvim_buf_set_name(buf, name)
+  return buf
+end
+
+-- `wrap`, `linebreak` and `breakindent` in a window, which are buffer.WINDOW.
+local function wrapping(win)
+  return { vim.wo[win].wrap, vim.wo[win].linebreak, vim.wo[win].breakindent }
+end
+local WRAPS, NO_WRAP = { true, true, true }, { false, false, false }
+
+-- Runs `body` in a tab of its own and closes the tab after, answering as
+-- pcall does. With `nowrap` set it runs under the global `nowrap` the
+-- configuration sets, and puts back the value it found. A window showing a
+-- buffer for the first time takes the global value, and the suite's `-u NONE`
+-- leaves it on, so a window asserted to wrap under it wraps whatever docket
+-- does. The value is set before the tab opens, because a new window takes
+-- its global values from the window it was made from.
+local function in_tab(body, nowrap)
+  local saved = vim.o.wrap
+  if nowrap then
+    vim.o.wrap = false
+  end
+  vim.cmd.tabnew()
+  local tab = vim.api.nvim_get_current_tabpage()
+  local ok, err = pcall(body)
+  if vim.api.nvim_tabpage_is_valid(tab) and #vim.api.nvim_list_tabpages() > 1 then
+    vim.cmd("tabclose! " .. vim.api.nvim_tabpage_get_number(tab))
+  end
+  vim.o.wrap = saved
+  return ok, err
+end
+
 -- The region marks as `{ [id] = { first_row, end_row } }`, 0-based, end
 -- exclusive, with `invalid` where the mark is.
 local function ranges(buf)
@@ -3369,11 +3614,11 @@ test("repo: the remotes are read off `git remote -v` by their fetch URLs, and th
   eq(repo.set_url_remedy("acme/payments!482", "acme/payments"), nil, "nor from a reference with no site")
 end)
 
-test("buffer: the options that route :w, keep the buffer switchable and out of a session", function()
+test("buffer: the options that route :w, keep the buffer switchable and list it", function()
   local buf = loaded_buffer()
   eq(vim.bo[buf].buftype, "acwrite")
   eq(vim.bo[buf].bufhidden, "hide")
-  eq(vim.bo[buf].buflisted, false)
+  eq(vim.bo[buf].buflisted, true)
   eq(vim.bo[buf].swapfile, false)
   eq(vim.bo[buf].filetype, "docket")
   eq(vim.bo[buf].modified, false, "the read is not an edit")
@@ -3395,26 +3640,151 @@ test("buffer: the options that route :w, keep the buffer switchable and out of a
   eq(vim.b[bare].minicompletion_config, nil)
   vim.api.nvim_buf_delete(bare, { force = true })
 
-  -- A buffer `:e docket://…` makes is listed, and the read unlists it. It
-  -- turns undo off for the lines it sets and back on after, so the edits
-  -- that follow the read can be undone.
+  -- A buffer made unlisted, as nvim_create_buf() makes one, is listed by the
+  -- read. It turns undo off for the lines it sets and back on after, so the
+  -- edits that follow the read can be undone.
   local previous = buffer.named(buffer.name("jira", "PROJ-77"))
   if previous then
     vim.api.nvim_buf_delete(previous, { force = true })
   end
-  local listed = vim.api.nvim_create_buf(true, false)
-  vim.api.nvim_buf_set_name(listed, buffer.name("jira", "PROJ-77"))
-  eq(vim.bo[listed].buflisted, true)
-  local undolevels = vim.bo[listed].undolevels
-  buffer.populate(listed, ticket({ id = "PROJ-77" }), { now = NOW })
-  eq(vim.bo[listed].buflisted, false)
-  eq(vim.bo[listed].undolevels, undolevels, "the read turns undo off for itself alone")
-  vim.api.nvim_buf_set_text(listed, 3, 0, 3, 0, { "X" })
-  vim.api.nvim_buf_call(listed, function()
+  local fresh = vim.api.nvim_create_buf(false, false)
+  vim.api.nvim_buf_set_name(fresh, buffer.name("jira", "PROJ-77"))
+  eq(vim.bo[fresh].buflisted, false)
+  local undolevels = vim.bo[fresh].undolevels
+  buffer.populate(fresh, ticket({ id = "PROJ-77" }), { now = NOW })
+  eq(vim.bo[fresh].buflisted, true)
+  eq(vim.bo[fresh].undolevels, undolevels, "the read turns undo off for itself alone")
+  vim.api.nvim_buf_set_text(fresh, 3, 0, 3, 0, { "X" })
+  vim.api.nvim_buf_call(fresh, function()
     vim.cmd("silent! undo")
   end)
-  eq(vim.api.nvim_buf_get_lines(listed, 3, 4, false), { "The retry loop re-enters" }, "an edit after the read is undone")
-  vim.api.nvim_buf_delete(listed, { force = true })
+  eq(vim.api.nvim_buf_get_lines(fresh, 3, 4, false), { "The retry loop re-enters" }, "an edit after the read is undone")
+  vim.api.nvim_buf_delete(fresh, { force = true })
+end)
+
+test("buffer: the read turns on wrap, linebreak and breakindent in every window showing the buffer, and the options stay with the buffer", function()
+  local made = {}
+  local ok, err = in_tab(function()
+    local file = vim.api.nvim_get_current_buf()
+    local item = unread_buffer("PROJ-901")
+    made[#made + 1] = item
+    local a = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(a, item)
+    vim.cmd("split")
+    local b = vim.api.nvim_get_current_win()
+    vim.cmd("split")
+    local c = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(c, file)
+    eq(wrapping(a), NO_WRAP, "unread, the item's window has the editor's nowrap")
+    buffer.populate(item, ticket({ id = "PROJ-901" }), { now = NOW })
+    eq({ wrapping(a), wrapping(b), wrapping(c) }, { WRAPS, WRAPS, NO_WRAP }, "both of the item's windows, and not the file's")
+    eq(vim.go.wrap, false, "the global value is left as it was")
+
+    vim.api.nvim_set_current_win(a)
+    vim.cmd("buffer " .. file)
+    eq(wrapping(a), NO_WRAP, "the file shown in the item's window keeps nowrap")
+    vim.cmd("buffer " .. item)
+    eq(wrapping(a), WRAPS, "and the item shown there again wraps")
+    vim.cmd("split")
+    local d = vim.api.nvim_get_current_win()
+    eq(wrapping(d), WRAPS, ":split from the item's window")
+    vim.cmd("buffer " .. file)
+    eq(wrapping(d), NO_WRAP, "the file in that split")
+    -- A buffer shown before takes the values it had where it was last shown,
+    -- so the file's nowrap above is its own; a new buffer has none, and
+    -- takes the window's.
+    vim.cmd("enew")
+    eq(wrapping(d), NO_WRAP, "a new buffer in a window that showed the item")
+    vim.cmd("new")
+    local e = vim.api.nvim_get_current_win()
+    vim.cmd("buffer " .. item)
+    eq(wrapping(e), WRAPS, "a window that never showed the item takes the values from where it was shown last")
+    eq(wrapping(c), NO_WRAP, "the file's window is untouched throughout")
+    vim.api.nvim_win_close(d, true)
+    vim.api.nvim_win_close(e, true)
+
+    -- A window that showed the item before its read gets back the values it
+    -- had then, nowrap, until the next read.
+    local unread = unread_buffer("PROJ-902")
+    made[#made + 1] = unread
+    vim.api.nvim_win_set_buf(c, unread)
+    eq(wrapping(c), NO_WRAP, "shown unread")
+    vim.api.nvim_set_current_win(c)
+    vim.cmd("buffer " .. file)
+    vim.cmd("new")
+    local f = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(f, unread)
+    buffer.populate(unread, ticket({ id = "PROJ-902" }), { now = NOW })
+    eq(wrapping(f), WRAPS, "read in another window")
+    vim.api.nvim_set_current_win(c)
+    vim.cmd("buffer " .. unread)
+    eq(wrapping(c), NO_WRAP, "the first window has the nowrap it had before the read")
+  end, true)
+  for _, buf in ipairs(made) do
+    if vim.api.nvim_buf_is_valid(buf) then
+      vim.api.nvim_buf_delete(buf, { force = true })
+    end
+  end
+  assert(ok, err)
+end)
+
+test("buffer: a restored session's item window wraps, and a read turns wrapping on where the session did not", function()
+  local name = buffer.name("jira", "PROJ-903")
+  local saved = vim.o.sessionoptions
+  local session, file = vim.fn.tempname(), vim.fn.tempname()
+  vim.fn.writefile({ "a file" }, file)
+  local ok, err = in_tab(function()
+    vim.cmd("edit " .. vim.fn.fnameescape(file))
+    vim.cmd("split")
+    local item = unread_buffer("PROJ-903")
+    vim.api.nvim_win_set_buf(0, item)
+    buffer.populate(item, ticket({ id = "PROJ-903" }), { now = NOW })
+    -- The session is written for this tab alone and without `curdir`, so
+    -- that sourcing it closes no other tab and moves no directory. `blank`
+    -- is what records the item's window at all: the editor writes a window
+    -- whose buffer names no file, which an `acwrite` buffer counts as, only
+    -- under it. The item buffer is wiped before the session is sourced,
+    -- because the session names a new buffer after it, which E95 refuses
+    -- while it exists.
+    local function restored(options)
+      vim.o.sessionoptions = options
+      vim.cmd("mksession! " .. vim.fn.fnameescape(session))
+      vim.api.nvim_buf_delete(buffer.named(name), { force = true })
+      vim.cmd("source " .. vim.fn.fnameescape(session))
+      local item_win, file_win
+      for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+        if vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win)) == name then
+          item_win = win
+        else
+          file_win = win
+        end
+      end
+      return item_win, file_win
+    end
+    local item_win, file_win = restored("blank,winsize,localoptions")
+    eq(item_win ~= nil and file_win ~= nil, true, "both windows are restored")
+    eq(vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(item_win), 0, -1, false), { "" }, "the item is not read")
+    eq(wrapping(item_win), WRAPS, "localoptions restores the item window's wrap options")
+    eq(wrapping(file_win), NO_WRAP, "and the file's nowrap")
+
+    item_win, file_win = restored("blank,winsize")
+    eq(wrapping(item_win), NO_WRAP, "without localoptions the item window has the editor's nowrap")
+    buffer.populate(vim.api.nvim_win_get_buf(item_win), ticket({ id = "PROJ-903" }), { now = NOW })
+    eq(wrapping(item_win), WRAPS, "until the item is read")
+    eq(wrapping(file_win), NO_WRAP)
+  end, true)
+  vim.o.sessionoptions = saved
+  local left = buffer.named(name)
+  if left then
+    vim.api.nvim_buf_delete(left, { force = true })
+  end
+  local file_buf = vim.fn.bufnr(file)
+  if file_buf ~= -1 then
+    vim.api.nvim_buf_delete(file_buf, { force = true })
+  end
+  vim.fn.delete(session)
+  vim.fn.delete(file)
+  assert(ok, err)
 end)
 
 test("buffer: named finds the buffer of exactly that name, where bufnr would match a prefix", function()
@@ -4136,6 +4506,19 @@ test("buffer: editable lines carry DocketEditable one mark per line, and the run
   })
 end)
 
+test("buffer: the header's state is a configured status's group when setup{} colours it", function()
+  highlight.define({ ["In Review"] = "#f9e2af" })
+  local buf = loaded_buffer({ state = "In Review" })
+  highlight.define({})
+  local found
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, buffer.DECOR, { 0, 0 }, { 0, -1 }, { details = true })) do
+    if mark[4].hl_group == "DocketStatusIn_Review" then
+      found = { mark[2], mark[4].end_col - mark[3] }
+    end
+  end
+  eq(found, { 0, #"In Review" }, "over the category the ticket carries")
+end)
+
 test("highlight: a Jira state is coloured by its category alone, and a review's by its fixed word", function()
   -- The category decides, whatever the name holds: `Renewal` carries `new`
   -- and `Newly done` carries both `new` and `done`.
@@ -4156,40 +4539,265 @@ test("highlight: a Jira state is coloured by its category alone, and a review's 
   end
 end)
 
-test("highlight: the groups link to Octo* when octo is loaded and defines them, else to built-ins", function()
-  eq(vim.tbl_map(function(group)
-    return group[1]
-  end, highlight.GROUPS), {
-    "DocketEditable",
-    "DocketUser",
-    "DocketLabel",
-    "DocketStateOpen",
-    "DocketStateClosed",
-    "DocketStateMerged",
-    "DocketStatePending",
-  })
-  local saved = package.loaded["octo"]
-  package.loaded["octo"] = nil
-  highlight.define()
-  local function link(name)
-    return vim.api.nvim_get_hl(0, { name = name, link = true }).link
+-- Runs `:highlight clear` on each group named. `:highlight clear` empties a
+-- group that holds a value of its own, and puts back the default link of one
+-- that had one, so a linked group comes back as an earlier define() left it;
+-- a test asserting what define() links records the nvim_set_hl() call
+-- instead. DocketEditable holds a value of its own, and a test clears it so
+-- that define() chooses it from the colour scheme as it stands, whatever an
+-- earlier test left there. nvim_set_hl(0, group, {}) does not serve: a group
+-- that has held a link refuses a `default` definition afterwards.
+local function clear_groups(groups)
+  for _, group in ipairs(groups) do
+    vim.cmd.highlight("clear", group)
   end
-  eq(link("DocketEditable"), "NormalFloat")
-  eq(link("DocketUser"), "Identifier")
-  eq(link("DocketLabel"), "Label")
-  eq(link("DocketStateOpen"), "DiagnosticOk")
-  eq(link("DocketStateClosed"), "DiagnosticError")
-  eq(link("DocketStateMerged"), "Special")
-  eq(link("DocketStatePending"), "DiagnosticWarn")
+end
+
+-- A group's own definition, links not followed.
+local function own_hl(name)
+  return vim.api.nvim_get_hl(0, { name = name, link = true })
+end
+
+-- A group's background, links followed.
+local function bg_of(name)
+  return vim.api.nvim_get_hl(0, { name = name, link = false }).bg
+end
+
+test("highlight: each group links to a built-in group whether or not octo.nvim is loaded, and keeps a definition made before define()", function()
+  local linked = {
+    DocketUser = "Identifier",
+    DocketLabel = "Label",
+    DocketStateOpen = "DiagnosticOk",
+    DocketStateClosed = "DiagnosticError",
+    DocketStateMerged = "Special",
+    DocketStatePending = "DiagnosticWarn",
+  }
+  local saved = package.loaded["octo"]
   package.loaded["octo"] = {}
+  vim.api.nvim_set_hl(0, "OctoStateOpen", { fg = "#00ff00" })
   vim.api.nvim_set_hl(0, "OctoEditable", { bg = "#222222" })
-  vim.api.nvim_set_hl(0, "OctoUser", { fg = "#aaaaaa" })
+  clear_groups({ "DocketEditable" })
+  -- Each definition this define() makes, recorded as it is made: reading the
+  -- groups afterwards finds the links an earlier define() left whether or not
+  -- this one set any.
+  local set, real = {}, vim.api.nvim_set_hl
+  vim.api.nvim_set_hl = function(ns, name, spec)
+    set[name] = spec
+    return real(ns, name, spec)
+  end
+  local ok, err = pcall(highlight.define)
+  vim.api.nvim_set_hl = real
+  assert(ok, err)
+  local got, want = {}, {}
+  for name, target in pairs(linked) do
+    got[name], want[name] = set[name], { link = target, default = true }
+  end
+  local editable = own_hl("DocketEditable")
+  vim.api.nvim_set_hl(0, "DocketStateOpen", { fg = "#ff0000" })
   highlight.define()
-  eq(link("DocketEditable"), "OctoEditable")
-  eq(link("DocketUser"), "OctoUser")
-  eq(link("DocketLabel"), "Label", "a group octo has not defined is not linked to")
+  local kept = own_hl("DocketStateOpen")
   package.loaded["octo"] = saved
+  clear_groups({ "OctoStateOpen", "OctoEditable", "DocketStateOpen" })
   highlight.define()
+  eq(got, want, "the octo.nvim loaded and its groups defined")
+  eq(editable, { bg = bg_of("NormalFloat") }, "DocketEditable follows no Octo* group")
+  eq(kept, { fg = tonumber("ff0000", 16) }, "a group defined before define() keeps its definition")
+end)
+
+test("highlight: DocketEditable takes the first background that differs from Normal's, with its terminal colour, and links to CursorLine when none does", function()
+  local normal = bg_of("Normal")
+  local float, cursorline, column = bg_of("NormalFloat"), bg_of("CursorLine"), bg_of("ColorColumn")
+  if
+    normal == nil
+    or float == nil
+    or float == normal
+    or cursorline == nil
+    or cursorline == normal
+    or column == nil
+    or column == normal
+  then
+    error("the default colour scheme no longer gives NormalFloat, CursorLine and ColorColumn backgrounds of their own")
+  end
+  local function pick()
+    clear_groups({ "DocketEditable" })
+    highlight.define()
+    return own_hl("DocketEditable")
+  end
+  local picked = {}
+  picked.float = pick()
+  vim.api.nvim_set_hl(0, "NormalFloat", { bg = float, ctermbg = 237 })
+  picked.terminal = pick()
+  vim.api.nvim_set_hl(0, "NormalFloat", { bg = normal })
+  picked.cursorline = pick()
+  vim.api.nvim_set_hl(0, "CursorLine", { bg = normal })
+  picked.column = pick()
+  vim.api.nvim_set_hl(0, "ColorColumn", { bg = normal })
+  picked.none = pick()
+  vim.cmd.colorscheme("default")
+  local restored = { bg_of("NormalFloat"), bg_of("CursorLine"), bg_of("ColorColumn") }
+  clear_groups({ "DocketEditable" })
+  highlight.define()
+  eq(picked, {
+    float = { bg = float },
+    terminal = { bg = float, ctermbg = 237 },
+    cursorline = { bg = cursorline },
+    column = { bg = column },
+    none = { link = "CursorLine" },
+  })
+  eq(restored, { float, cursorline, column }, "the colour scheme puts the backgrounds back")
+end)
+
+test("highlight: define() chooses DocketEditable again while it holds define()'s own choice, and keeps a definition it did not make", function()
+  clear_groups({ "DocketEditable" })
+  highlight.define()
+  local float = bg_of("NormalFloat")
+  -- What a colour scheme that loads without :hi clear leaves: NormalFloat
+  -- changed, and DocketEditable as define() set it.
+  vim.api.nvim_set_hl(0, "NormalFloat", { bg = "#123456" })
+  highlight.define()
+  local followed = own_hl("DocketEditable")
+  vim.api.nvim_set_hl(0, "DocketEditable", { bg = "#ff00ff" })
+  vim.api.nvim_set_hl(0, "NormalFloat", { bg = "#654321" })
+  highlight.define()
+  local kept = own_hl("DocketEditable")
+  -- A colour scheme's :hi clear empties it, and define() chooses it again.
+  vim.cmd.colorscheme("default")
+  highlight.define()
+  local cleared = own_hl("DocketEditable")
+  eq(followed, { bg = tonumber("123456", 16) }, "the background chosen before is replaced")
+  eq(kept, { bg = tonumber("ff00ff", 16) }, "the configuration's own is kept")
+  eq(cleared, { bg = float }, "after :hi clear")
+end)
+
+test("highlight: a status setup{} colours has a group of its own, set from a colour, a group's name or a table", function()
+  eq(highlight.status_group("In Review"), "DocketStatusIn_Review")
+  eq(highlight.status_group("Won't do / État"), "DocketStatusWon_t_do_tat", "each run of other characters is one _")
+  local function hl(name)
+    return vim.api.nvim_get_hl(0, { name = name, link = true })
+  end
+  eq(highlight.define({ ["In Review"] = { fg = "#f9e2af", bold = true }, Blocked = "DiagnosticError" }), {})
+  local set = hl("DocketStatusIn_Review")
+  eq({ set.fg, set.bold }, { tonumber("f9e2af", 16), true }, "a table as it is")
+  eq(hl("DocketStatusBlocked"), { link = "DiagnosticError" }, "a group's name as a link")
+  eq(highlight.state_group("Blocked", "indeterminate", "jira"), "DocketStatusBlocked")
+  eq(highlight.define({ ["In Review"] = "#f9e2af" }), {})
+  eq(hl("DocketStatusIn_Review"), { fg = tonumber("f9e2af", 16) }, "a # string as the foreground, not as a link")
+  eq(highlight.state_group("Blocked", "indeterminate", "jira"), "DocketStatePending", "the table given replaces the last one")
+  eq(({ highlight.configured() })[1], { { name = "In Review", group = "DocketStatusIn_Review" } })
+  highlight.define({})
+end)
+
+test("highlight: a Jira state of a configured status renders in its group whatever its category, and no other source's does", function()
+  highlight.define({ ["In Review"] = "#f9e2af", Closed = "DiagnosticHint" })
+  eq(highlight.state_group("In Review", "indeterminate", "jira"), "DocketStatusIn_Review", "over its category")
+  eq(highlight.state_group("in review", nil, "jira"), "DocketStatusIn_Review", "in any case")
+  eq(highlight.state_group("In Review", nil, "jira"), "DocketStatusIn_Review", "with no category")
+  eq(highlight.state_group("In Progress", "indeterminate", "jira"), "DocketStatePending", "a status not configured keeps its category's")
+  eq(highlight.state_group("Closed", "done", "jira"), "DocketStatusClosed")
+  eq(highlight.state_group("closed", nil, "glab"), "DocketStateClosed", "GitLab's closed is its own fixed word")
+  eq(highlight.state_group("In Review", "indeterminate"), "DocketStatePending", "with no source, the category")
+  -- With no argument, as the ColorScheme autocommand calls it, the statuses
+  -- are kept and set again.
+  vim.cmd("highlight clear DocketStatusIn_Review")
+  eq(highlight.define(), {})
+  eq(vim.api.nvim_get_hl(0, { name = "DocketStatusIn_Review" }).fg, tonumber("f9e2af", 16), "set again")
+  eq(highlight.state_group("In Review", nil, "jira"), "DocketStatusIn_Review", "kept")
+  highlight.define({})
+end)
+
+test("highlight: a status whose value cannot be set is named and keeps its category's group", function()
+  -- A table's link to a name neovim cannot use, as to a colour, prints E5248
+  -- from nvim_set_hl() without raising, and a number is taken as a group's id.
+  local problems = highlight.define({
+    Bad = "#zzz",
+    Spaced = "Diagnostic Error",
+    Number = 5,
+    Typo = { fgg = "#ffffff" },
+    Linked = { link = "Diagnostic Error" },
+    Hashed = { link = "#f9e2af" },
+    Numbered = { link = 5 },
+    Fine = "#ffffff",
+  })
+  local because = "the status %s keeps its category's colour, because "
+  eq(problems, {
+    because:format("Bad") .. "nvim_set_hl() refused it: Invalid highlight color: '#zzz'",
+    because:format("Hashed") .. "its link is not a highlight group's name",
+    because:format("Linked") .. "its link is not a highlight group's name",
+    because:format("Number") .. "its value is a number, where a colour, a group's name or a table goes",
+    because:format("Numbered") .. "its link is not a highlight group's name",
+    because:format("Spaced") .. "its value is neither a #rrggbb colour nor a highlight group's name",
+    because:format("Typo") .. "nvim_set_hl() refused it: invalid key: fgg",
+  })
+  for _, name in ipairs({ "Bad", "Spaced", "Number", "Typo", "Linked", "Hashed", "Numbered" }) do
+    eq(highlight.state_group(name, "new", "jira"), "DocketStateOpen", name)
+  end
+  eq({ highlight.configured() }, { { { name = "Fine", group = "DocketStatusFine" } }, problems })
+  eq(highlight.define(), {}, "a define() that keeps the table reports nothing new")
+  eq(({ highlight.configured() })[2], problems, "and leaves the last report in place")
+  eq(
+    highlight.define({ "In Review" }),
+    { "the status 1 keeps its category's colour, because its key is no status name; each key is the status as Jira prints it" },
+    "a list where a table of names goes"
+  )
+  highlight.define({})
+  eq({ highlight.configured() }, { {}, {} })
+end)
+
+test("highlight: of two statuses that would share a group, the first in byte order takes it, and keeps it after a colour scheme change", function()
+  -- status_group() makes each pair one group, and neovim matches a group's
+  -- name in any case. Several pairs, so that an order other than the sorted
+  -- one shows in at least one of them.
+  local configured = {
+    ["To Do"] = "#111111",
+    ["To-Do"] = "#222222",
+    Done = "#444444",
+    DONE = "#333333",
+    ["In Review"] = "#111111",
+    ["In-Review"] = "#222222",
+    ["Ready for QA"] = "#111111",
+    ["Ready-for-QA"] = "#222222",
+    ["Won't do"] = "#111111",
+    ["Won t do"] = "#222222",
+  }
+  local because = "the status %s keeps its category's colour, because %s already renders in %s"
+  eq(highlight.define(configured), {
+    because:format("Done", "DONE", "DocketStatusDONE"),
+    because:format("In-Review", "In Review", "DocketStatusIn_Review"),
+    because:format("Ready-for-QA", "Ready for QA", "DocketStatusReady_for_QA"),
+    because:format("To-Do", "To Do", "DocketStatusTo_Do"),
+    because:format("Won't do", "Won t do", "DocketStatusWon_t_do"),
+  })
+  local groups = { "DocketStatusTo_Do", "DocketStatusDONE", "DocketStatusIn_Review", "DocketStatusReady_for_QA", "DocketStatusWon_t_do" }
+  local function colours()
+    local found = {}
+    for _, group in ipairs(groups) do
+      found[#found + 1] = ("%06x"):format(vim.api.nvim_get_hl(0, { name = group }).fg or 0)
+    end
+    return found
+  end
+  local expected = { "111111", "333333", "111111", "111111", "222222" }
+  eq(colours(), expected)
+  eq(
+    vim.tbl_map(function(status)
+      return status.name
+    end, ({ highlight.configured() })[1]),
+    { "DONE", "In Review", "Ready for QA", "To Do", "Won t do" },
+    "one name for each group"
+  )
+  eq(highlight.state_group("To-Do", "new", "jira"), "DocketStateOpen", "the name refused keeps its category's group")
+  eq(highlight.state_group("To Do", "new", "jira"), "DocketStatusTo_Do")
+  eq(highlight.state_group("done", "done", "jira"), "DocketStatusDONE", "matched in any case")
+  for _, group in ipairs(groups) do
+    vim.cmd.highlight("clear", group)
+  end
+  eq(highlight.define(), {})
+  eq(colours(), expected, "the ColorScheme re-set gives each group the colour setup gave it")
+  -- A value nvim_set_hl() refuses takes no group, so the next name does.
+  eq(highlight.define({ ["To Do"] = "#zzz", ["To-Do"] = "#222222" }), {
+    "the status To Do keeps its category's colour, because nvim_set_hl() refused it: Invalid highlight color: '#zzz'",
+  })
+  eq(vim.api.nvim_get_hl(0, { name = "DocketStatusTo_Do" }).fg, tonumber("222222", 16))
+  highlight.define({})
 end)
 
 test("buffer: open reads the item through its adapter after the state check, and clears modified", function()
@@ -4344,16 +4952,29 @@ test("commands: the launcher's warning is printed beside the path, never dropped
   local message, level = commands.describe(vim.tbl_extend("force", base, { how = "tmux", editor = "PROJ-1-x", shell = "PROJ-1-x-sh" }))
   eq(message, "worktree /w/PROJ-1-x on PROJ-1-x\ntmux windows PROJ-1-x and PROJ-1-x-sh")
   eq(level, vim.log.levels.INFO)
-  message, level = commands.describe(vim.tbl_extend("force", base, {
-    how = "tmux",
-    editor = "PROJ-1-x",
-    shell = nil,
-    warning = "tmux exited 1\ncan't find window: =PROJ-1-x-sh",
-  }))
-  eq(message:find("worktree /w/PROJ-1-x", 1, true), 1)
-  eq(message:find("the companion window closed", 1, true) ~= nil, true, message)
-  eq(message:find("warning: tmux exited 1\ncan't find window: =PROJ-1-x-sh", 1, true) ~= nil, true, message)
-  eq(level, vim.log.levels.WARN)
+  -- Every warning a launch with no companion comes back with: the listing held
+  -- none, it held two, or a step addressed to it failed. The line before the
+  -- warning holds for each, so none of them is contradicted.
+  for _, warning in ipairs({
+    "tmux lists no window named PROJ-1-x-sh after new-window -S made it; tmux list-windows -F '#{window_id} #{window_name}' prints what the session holds",
+    "tmux lists more than one window named PROJ-1-x-sh: @4, @9; tmux list-windows -F '#{window_id} #{window_name}' prints what the session holds",
+    "tmux exited 1\ncan't find window: @4",
+  }) do
+    message, level = commands.describe(vim.tbl_extend("force", base, {
+      how = "tmux",
+      editor = "PROJ-1-x",
+      shell = nil,
+      warning = warning,
+    }))
+    eq(
+      message,
+      "worktree /w/PROJ-1-x on PROJ-1-x\n"
+        .. "tmux window PROJ-1-x; the companion window is not confirmed, and the warning below names what went wrong first\n"
+        .. "warning: "
+        .. warning
+    )
+    eq(level, vim.log.levels.WARN)
+  end
   message, level = commands.describe(vim.tbl_extend("force", base, {
     how = "tab",
     script = "tmux new-window -S -n 'PROJ-1-x' -c '/w/PROJ-1-x' 'nvim'",
@@ -4430,15 +5051,17 @@ test("commands: an item asks the client for the state once, and a backend not si
   vim.api.nvim_buf_delete(buf, { force = true })
 end)
 
-test("commands: the launcher from an item buffer takes a ticket and refuses a merge request", function()
+test("commands: the launcher from an item buffer refuses a merge request whose read stored no branch, and a buffer with nothing loaded, before git runs", function()
   local buf = vim.api.nvim_create_buf(false, false)
   vim.b[buf].docket = { source = "glab", id = "!482", title = "Bump the pin" }
   local notices, restore = stub_notify()
   commands.work(buf)
+  commands.review_item(buf)
   commands.work(vim.api.nvim_create_buf(false, false))
   restore()
   eq(notices, {
-    { message = "!482 is not a ticket; the launcher takes a ticket here", level = vim.log.levels.ERROR },
+    { message = "!482 carries no branch, so no worktree is made for it", level = vim.log.levels.ERROR },
+    { message = "!482 carries no branch, so no worktree is made for it", level = vim.log.levels.ERROR },
     { message = "nothing loaded in this buffer; :e reads the item", level = vim.log.levels.ERROR },
   })
 end)
@@ -5163,7 +5786,35 @@ test("list: the lines carry each section's count, age, reason, error and warning
   eq(groups.WarningMsg, 1)
 end)
 
-test("list: open shows cached rows at once with their age and refreshes behind them, in a nofile buffer wiped when hidden and unlisted", function()
+test("list: a row's state is a configured status's group on a Jira row alone", function()
+  local state = {
+    root = "/w/repo",
+    sections = {
+      {
+        def = { title = "Tickets", query = "q" },
+        key = "k",
+        rows = { row.new({ source = "jira", id = "PAY-9", state = "In Review", title = "Nine", category = "indeterminate" }) },
+        written = 0,
+      },
+      { def = { title = "Reviews", query = "q" }, key = "k", rows = { row.new({ source = "glab", id = "!4", state = "In Review", title = "Four" }) }, written = 0 },
+    },
+  }
+  highlight.define({ ["In Review"] = "#f9e2af" })
+  local lines, _, marks = list.lines(state, 0)
+  highlight.define({})
+  local states = {}
+  for _, mark in ipairs(marks) do
+    if lines[mark[1] + 1]:sub(mark[2] + 1, mark[3]) == "In Review" then
+      states[#states + 1] = { lines[mark[1] + 1], mark[4] }
+    end
+  end
+  eq(states, {
+    { "  PAY-9   In Review   Nine", "DocketStatusIn_Review" },
+    { "  !4   In Review   Four", "DocketLabel" },
+  })
+end)
+
+test("list: open shows cached rows at once with their age and refreshes behind them, in a nofile buffer kept when hidden and listed", function()
   jira.forget()
   local _, restore_cache = scratch_cache()
   local restore_clone = stub_clone({ kind = "projects", projects = { "PAY" } }, "git@gitlab.example.test:acme/payments.git")
@@ -5203,8 +5854,8 @@ test("list: open shows cached rows at once with their age and refreshes behind t
   eq(vim.api.nvim_get_current_buf(), buf)
   eq(vim.api.nvim_buf_get_name(buf), list.NAME, "the name the editor keeps verbatim, which no file can take")
   eq(vim.bo[buf].buftype, "nofile")
-  eq(vim.bo[buf].bufhidden, "wipe")
-  eq(vim.bo[buf].buflisted, false)
+  eq(vim.bo[buf].bufhidden, "hide")
+  eq(vim.bo[buf].buflisted, true)
   eq(vim.bo[buf].swapfile, false)
   eq(vim.bo[buf].modifiable, false)
   eq(vim.bo[buf].filetype, list.FILETYPE)
@@ -5409,7 +6060,11 @@ test("commands: :Docket opens the dashboard, <CR> opens the row's item, R refuse
   restore_cache()
 
   eq(vim.api.nvim_buf_get_name(opened), "docket://jira/PAY-3")
-  eq(vim.api.nvim_buf_is_valid(buf), false, "the dashboard is wiped once hidden")
+  eq(
+    { vim.api.nvim_buf_is_valid(buf), vim.fn.win_findbuf(buf), vim.bo[buf].buflisted },
+    { true, {}, true },
+    "the dashboard is kept, hidden and listed"
+  )
   eq(#notices, 1)
   eq(notices[1].message, "PAY-3 is a ticket; R starts a review on a merge request")
   eq(notices[1].level, vim.log.levels.ERROR)
@@ -5654,18 +6309,475 @@ test("list: a restored session's dashboard buffer is taken over rather than name
       vim.api.nvim_buf_delete(other, { force = true })
     end
   end
-  -- What :mksession writes for a dashboard on screen.
+  -- What :mksession writes for a dashboard on screen, under 'sessionoptions'
+  -- holding localoptions, while before_session_save() has it off the list.
   vim.cmd("enew")
   vim.cmd("file " .. list.NAME)
+  vim.cmd("setlocal nobuflisted")
   local restored = vim.api.nvim_get_current_buf()
   local ok, buf = pcall(list.buffer)
   eq(ok, true, "no E95: " .. tostring(buf))
   eq(buf, restored)
   eq(
     { vim.bo[buf].buftype, vim.bo[buf].bufhidden, vim.bo[buf].buflisted, vim.bo[buf].filetype },
-    { "nofile", "wipe", false, list.FILETYPE }
+    { "nofile", "hide", true, list.FILETYPE },
+    "taken over, and listed again"
   )
   vim.api.nvim_buf_delete(buf, { force = true })
+end)
+
+-- Wipes the dash an earlier test left, so that the next open() makes one no
+-- window has shown, which carries no window option of an earlier test's.
+local function no_dash()
+  for _, other in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_get_name(other) == list.NAME then
+      vim.api.nvim_buf_delete(other, { force = true })
+    end
+  end
+end
+
+-- The dash's fold options in a window, and its `wrap`.
+local function dash_window(win)
+  local wo = vim.wo[win]
+  return { wo.foldmethod, wo.foldexpr, wo.foldtext, wo.foldlevel, wo.wrap }
+end
+
+-- Whether each section of the dash is closed in the current window, in the
+-- order the state holds them, read at each one's header line.
+local function closed_sections(buf)
+  local state = list.state(buf)
+  local heads = select(4, list.lines(state, os.time()))
+  return vim.tbl_map(function(st)
+    return vim.fn.foldclosed(heads[st]) == heads[st]
+  end, state.sections)
+end
+
+-- Closes one section of the dash in the current window, as `za` on its
+-- header does.
+local function close_section(buf, index)
+  local state = list.state(buf)
+  local heads = select(4, list.lines(state, os.time()))
+  vim.cmd(heads[state.sections[index]] .. "foldclose")
+end
+
+test("list: the lines give each line its fold level: a section from its header to the blank line that ends it, the title and the footer in none", function()
+  local now = 10000
+  local state = {
+    root = "/w/repo",
+    sections = {
+      { def = { title = "Mine", query = "q", reason = "a note\nof two lines" }, key = "k", rows = { ROWS[1] }, written = now },
+      { def = { title = "Reviews", query = "q" }, key = "k", rows = { ROWS[2] }, written = now, warning = "row: PAY-8 needs a non-empty string for state" },
+    },
+  }
+  local lines, _, _, heads, folds = list.lines(state, now)
+  eq(lines, {
+    "Docket · /w/repo",
+    "",
+    "Mine (1) · just now",
+    "  a note",
+    "  of two lines",
+    "  PAY-9   To Do   Nine",
+    "",
+    "Reviews (1) · just now",
+    "  PAY-10   In Progress   Ten",
+    "  warning: row: PAY-8 needs a non-empty string for state",
+    "",
+    list.KEYS,
+  })
+  eq(folds, { "0", "0", ">1", "1", "1", "1", "1", ">1", "1", "1", "1", "0" })
+  eq({ folds[heads[state.sections[1]]], folds[heads[state.sections[2]]] }, { ">1", ">1" }, "each header opens its section's fold")
+  eq(list.KEYS:find("za fold", 1, true) ~= nil, true, "the footer names the key")
+end)
+
+test("list: the footer names every dash key", function()
+  -- Each entry's first word, as a set: a substring check would pass with a
+  -- key missing, since `R` occurs inside `<CR>` and `w` inside `review`.
+  local named = {}
+  for _, entry in ipairs(vim.split(list.KEYS, "   ", { plain = true })) do
+    named[entry:match("^(%S+)")] = true
+  end
+  local expected = { za = true, ["g?"] = true }
+  for _, key in ipairs(commands.DASH_KEYS) do
+    expected[key.lhs] = true
+  end
+  eq(named, expected)
+end)
+
+test("list: the dash's windows do not wrap", function()
+  jira.forget()
+  no_dash()
+  local _, restore_cache = scratch_cache()
+  local restore_clone = stub_clone({ kind = "projects", projects = { "PAY" } }, "https://bitbucket.example.test/acme/payments.git")
+  local _, restore_checks = stub_checks({ signed_in = true })
+  local hands, restore_rows = stub_jira_rows()
+  local notices, restore_notify = stub_notify()
+  local ok, err = in_tab(function()
+    local file = vim.api.nvim_get_current_buf()
+    local a = vim.api.nvim_get_current_win()
+    vim.cmd("split")
+    local b = vim.api.nvim_get_current_win()
+    -- A buffer of the dash's name as a restored session leaves it, which
+    -- open() takes over: it carries none of the dash's autocommands yet, so
+    -- what dresses this window is open() alone.
+    local restored = vim.api.nvim_create_buf(true, false)
+    vim.api.nvim_buf_set_name(restored, list.NAME)
+    vim.api.nvim_win_set_buf(b, restored)
+    local before = vim.wo[b].wrap
+    vim.api.nvim_set_current_win(a)
+    local buf = list.open({ root = "/w/repo", bare = true })
+    local opened = { vim.wo[a].wrap, vim.wo[b].wrap }
+    vim.cmd("buffer " .. file)
+    local file_wraps = vim.wo[a].wrap
+    vim.cmd("enew")
+    local new_wraps = vim.wo[a].wrap
+    -- Answered before anything is asserted, so that a failure leaves no
+    -- request in flight for a later test to join.
+    eq(drained(), true)
+    for index, hand in ipairs(hands) do
+      hand(one_row("PAY-" .. index))
+    end
+    eq(settled(buf), true)
+    eq(before, true, "shown before open(), under the suite's global wrap")
+    eq(opened, { false, false }, "every window showing the dash")
+    eq(file_wraps, true, "a file then shown in one of them wraps, as the global value has it")
+    eq(new_wraps, true, "and so does a new buffer there")
+  end)
+  restore_notify()
+  restore_rows()
+  restore_checks()
+  restore_clone()
+  restore_cache()
+  assert(ok, err)
+  eq(notices, {})
+end)
+
+test("list: the dash's window carries the fold options and nowrap, and :enew in that window carries none of them", function()
+  jira.forget()
+  no_dash()
+  local _, restore_cache = scratch_cache()
+  local restore_clone = stub_clone({ kind = "projects", projects = { "PAY" } }, "https://bitbucket.example.test/acme/payments.git")
+  local _, restore_checks = stub_checks({ signed_in = true })
+  local hands, restore_rows = stub_jira_rows()
+  local notices, restore_notify = stub_notify()
+  local ok, err = in_tab(function()
+    local win = vim.api.nvim_get_current_win()
+    local before = dash_window(win)
+    local buf = list.open({ root = "/w/repo", bare = true })
+    local opened = dash_window(win)
+    local levels = { list.fold(buf, 1), list.fold(buf, 3), list.fold(buf, 10000) }
+    vim.cmd("enew")
+    local elsewhere = dash_window(win)
+    vim.api.nvim_set_current_buf(buf)
+    local again = dash_window(win)
+    -- Answered before anything is asserted, so that a failure leaves no
+    -- request in flight for a later test to join.
+    eq(drained(), true)
+    for index, hand in ipairs(hands) do
+      hand(one_row("PAY-" .. index))
+    end
+    eq(settled(buf), true)
+    local dash_values = { "expr", ("v:lua.require'docket.list'.fold(%d, v:lnum)"):format(buf), "", 99, false }
+    eq(opened, dash_values, "a fold per section through fold(), a closed one shown as its header line, every section open, and no wrap")
+    eq(levels, { "0", ">1", "0" }, "fold() answers the last paint's level: the title line, the first header, and past the last line")
+    eq(elsewhere, before, "another buffer in that window has the window's own values")
+    eq(again, dash_values, "and the dash has its own again")
+  end)
+  restore_notify()
+  restore_rows()
+  restore_checks()
+  restore_clone()
+  restore_cache()
+  assert(ok, err)
+  eq(notices, {})
+end)
+
+test("list: a paint that adds a row to a section keeps the sections a window had closed closed, and every other open", function()
+  jira.forget()
+  no_dash()
+  local _, restore_cache = scratch_cache()
+  local restore_clone = stub_clone({ kind = "projects", projects = { "PAY" } }, "https://bitbucket.example.test/acme/payments.git")
+  local _, restore_checks = stub_checks({ signed_in = true })
+  local hands, restore_rows = stub_jira_rows()
+  local notices, restore_notify = stub_notify()
+  local ok, err = in_tab(function()
+    local buf = list.open({ root = "/w/repo", bare = true })
+    eq(drained(), true)
+    for index, hand in ipairs(hands) do
+      hand(one_row("PAY-" .. index))
+    end
+    eq(settled(buf), true)
+    local state = list.state(buf)
+    eq(closed_sections(buf), { false, false, false, false }, "every section starts open")
+    close_section(buf, 1)
+    eq(closed_sections(buf), { true, false, false, false })
+    table.insert(state.sections[2].rows, one_row("PAY-20")[1])
+    list.render(buf)
+    eq(closed_sections(buf), { true, false, false, false }, "the paint moved the closed fold onto the second section, and the record put it back")
+    -- Each line's level is the one lines() gives it, which needs the levels
+    -- stored before the lines are replaced: the paint evaluates them as it
+    -- replaces the lines.
+    local folds = select(5, list.lines(state, os.time()))
+    local want, have = {}, {}
+    for lnum, level in ipairs(folds) do
+      want[lnum] = level == "0" and 0 or 1
+      have[lnum] = vim.fn.foldlevel(lnum)
+    end
+    eq(have, want, "every line at its level after the paint")
+
+    -- Two sections carrying one title are told apart by their order.
+    vim.cmd("%foldopen!")
+    state.sections[3].def = vim.tbl_extend("force", state.sections[3].def, { title = state.sections[2].def.title })
+    list.render(buf)
+    close_section(buf, 2)
+    table.insert(state.sections[1].rows, one_row("PAY-21")[1])
+    list.render(buf)
+    eq(closed_sections(buf), { false, true, false, false }, "the second of two sections with one title stays open")
+  end)
+  restore_notify()
+  restore_rows()
+  restore_checks()
+  restore_clone()
+  restore_cache()
+  assert(ok, err)
+  eq(notices, {})
+end)
+
+test("list: a second :Docket whose cached rows add a row to a section leaves the closed section closed and every other open", function()
+  jira.forget()
+  no_dash()
+  local _, restore_cache = scratch_cache()
+  local restore_clone = stub_clone({ kind = "projects", projects = { "PAY" } }, "https://bitbucket.example.test/acme/payments.git")
+  local _, restore_checks = stub_checks({ signed_in = true })
+  local hands, restore_rows = stub_jira_rows()
+  local notices, restore_notify = stub_notify()
+  local found = { root = "/w/repo", bare = true }
+  -- Puts one row more in the first section's cache than the screen shows,
+  -- which the cache can hold because it keeps a Jira query's rows for every
+  -- clone and editor, then opens the dash again and answers its requests
+  -- with one row each. Answered before anything is asserted, so that a
+  -- failure leaves no request in flight for a later test to join.
+  local function reopen(buf)
+    local answered, shown = #hands, #lines_of(buf)
+    cache.write(list.state(buf).sections[1].key, { one_row("PAY-1")[1], one_row("PAY-30")[1] }, os.time())
+    local again = list.open(found)
+    local seen = {
+      buf = again,
+      added = #lines_of(buf) - shown,
+      checked = drained(),
+      painted = closed_sections(buf),
+    }
+    for index = answered + 1, #hands do
+      hands[index](one_row("PAY-" .. index))
+    end
+    seen.settled = settled(buf)
+    seen.answered = closed_sections(buf)
+    return seen
+  end
+  local ok, err = in_tab(function()
+    local buf = list.open(found)
+    eq(drained(), true)
+    for index, hand in ipairs(hands) do
+      hand(one_row("PAY-" .. index))
+    end
+    eq(settled(buf), true)
+    close_section(buf, 2)
+    local below = reopen(buf)
+    vim.cmd("%foldopen!")
+    close_section(buf, 1)
+    local within = reopen(buf)
+    eq({ below.buf, below.added, below.checked, below.settled }, { buf, 1, true, true }, "the cached rows add a row to the first section")
+    eq(below.painted, { false, true, false, false }, "a row above the closed section leaves it closed and the others open")
+    eq(below.answered, { false, true, false, false }, "and so after the answers that drop the row again")
+    eq({ within.buf, within.added, within.checked, within.settled }, { buf, 1, true, true })
+    eq(within.painted, { true, false, false, false }, "a row in the closed section leaves it closed and the others open")
+    eq(within.answered, { true, false, false, false })
+  end)
+  restore_notify()
+  restore_rows()
+  restore_checks()
+  restore_clone()
+  restore_cache()
+  assert(ok, err)
+  eq(notices, {})
+end)
+
+test("list: a paint keeps a window's cursor on the header of the section it was on, closed or open", function()
+  jira.forget()
+  no_dash()
+  local _, restore_cache = scratch_cache()
+  local restore_clone = stub_clone({ kind = "projects", projects = { "PAY" } }, "https://bitbucket.example.test/acme/payments.git")
+  local _, restore_checks = stub_checks({ signed_in = true })
+  local hands, restore_rows = stub_jira_rows()
+  local notices, restore_notify = stub_notify()
+  local ok, err = in_tab(function()
+    local buf = list.open({ root = "/w/repo", bare = true })
+    eq(drained(), true)
+    for index, hand in ipairs(hands) do
+      hand(one_row("PAY-" .. index))
+    end
+    eq(settled(buf), true)
+    local state = list.state(buf)
+    -- A section's header line as the state stands now.
+    local function head(index)
+      return select(4, list.lines(state, os.time()))[state.sections[index]]
+    end
+    -- Adds a row to the first section, above the third, and paints.
+    local added = 0
+    local function grow()
+      added = added + 1
+      table.insert(state.sections[1].rows, one_row("PAY-" .. (40 + added))[1])
+      list.render(buf)
+    end
+
+    close_section(buf, 3)
+    vim.cmd("normal! gg" .. (head(3) - 1) .. "j")
+    eq(vim.fn.line("."), head(3), "j onto the closed section stops on its header")
+    grow()
+    eq(vim.fn.line("."), head(3), "a closed section reached with j")
+    eq(closed_sections(buf), { false, false, true, false })
+    vim.cmd("normal! za")
+    eq(closed_sections(buf), { false, false, false, false }, "and za there opens that section")
+
+    local blank = head(4) - 1
+    vim.api.nvim_win_set_cursor(0, { blank, 0 })
+    vim.cmd("normal! zc")
+    eq({ vim.fn.line("."), vim.fn.foldclosed(blank) }, { blank, head(3) }, "zc leaves the cursor on the closing blank line, inside the fold")
+    grow()
+    eq(vim.fn.line("."), head(3), "a closed section the cursor is inside")
+    eq(closed_sections(buf), { false, false, true, false })
+
+    vim.cmd("%foldopen!")
+    vim.api.nvim_win_set_cursor(0, { head(3), 0 })
+    grow()
+    eq(vim.fn.line("."), head(3), "an open section's header")
+  end)
+  restore_notify()
+  restore_rows()
+  restore_checks()
+  restore_clone()
+  restore_cache()
+  assert(ok, err)
+  eq(notices, {})
+end)
+
+test("list: a paint keeps the sections closed in each window showing the dash, whichever window is current", function()
+  jira.forget()
+  no_dash()
+  local _, restore_cache = scratch_cache()
+  local restore_clone = stub_clone({ kind = "projects", projects = { "PAY" } }, "https://bitbucket.example.test/acme/payments.git")
+  local _, restore_checks = stub_checks({ signed_in = true })
+  local hands, restore_rows = stub_jira_rows()
+  local notices, restore_notify = stub_notify()
+  local seen, other_tab = {}, nil
+  local ok, err = in_tab(function()
+    local file = vim.api.nvim_get_current_buf()
+    vim.cmd("split")
+    local a = vim.api.nvim_get_current_win()
+    local buf = list.open({ root = "/w/repo", bare = true })
+    eq(drained(), true)
+    for index, hand in ipairs(hands) do
+      hand(one_row("PAY-" .. index))
+    end
+    eq(settled(buf), true)
+    close_section(buf, 1)
+    -- A second window on the dash, in a tab of its own, with another section
+    -- closed. A window the dash enters while another shows it copies that
+    -- window's folds, so this one opens them before closing its own.
+    vim.cmd("tabnew")
+    other_tab = vim.api.nvim_get_current_tabpage()
+    local b = vim.api.nvim_get_current_win()
+    vim.api.nvim_set_current_buf(buf)
+    vim.cmd("%foldopen!")
+    close_section(buf, 3)
+    -- The paint happens from the file's window below the first one.
+    vim.api.nvim_set_current_win(a)
+    vim.cmd("wincmd j")
+    seen.current = vim.api.nvim_win_get_buf(0) == file
+    table.insert(list.state(buf).sections[2].rows, one_row("PAY-20")[1])
+    list.render(buf)
+    local function closed_in(win)
+      return vim.api.nvim_win_call(win, function()
+        return closed_sections(buf)
+      end)
+    end
+    seen.a, seen.b = closed_in(a), closed_in(b)
+  end)
+  if other_tab and vim.api.nvim_tabpage_is_valid(other_tab) then
+    vim.cmd("tabclose! " .. vim.api.nvim_tabpage_get_number(other_tab))
+  end
+  restore_notify()
+  restore_rows()
+  restore_checks()
+  restore_clone()
+  restore_cache()
+  assert(ok, err)
+  eq(seen.current, true, "the window current at the paint shows the file")
+  eq(seen.a, { true, false, false, false }, "the first window keeps its first section closed")
+  eq(seen.b, { false, false, true, false }, "and the window in the other tab its third")
+  eq(notices, {})
+end)
+
+test("list: a window that showed the dash before :Docket dressed it carries its options when the dash returns to it", function()
+  jira.forget()
+  no_dash()
+  local _, restore_cache = scratch_cache()
+  local restore_clone = stub_clone({ kind = "projects", projects = { "PAY" } }, "https://bitbucket.example.test/acme/payments.git")
+  local _, restore_checks = stub_checks({ signed_in = true })
+  local hands, restore_rows = stub_jira_rows()
+  local notices, restore_notify = stub_notify()
+  local seen = {}
+  local ok, err = in_tab(function()
+    local a = vim.api.nvim_get_current_win()
+    local file = vim.api.nvim_get_current_buf()
+    -- A buffer of the dash's name as a restored session leaves it, shown in
+    -- two windows that then move to the file: one with the window's own
+    -- values, and one with the fold options the session recorded, whose
+    -- 'foldexpr' names the buffer number the dash had before the restore.
+    local restored = vim.api.nvim_create_buf(true, false)
+    vim.api.nvim_buf_set_name(restored, list.NAME)
+    vim.cmd("split")
+    local c = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(c, restored)
+    vim.api.nvim_win_set_buf(c, file)
+    vim.cmd("split")
+    local d = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(d, restored)
+    vim.wo[d][0].foldmethod = "expr"
+    vim.wo[d][0].foldexpr = "v:lua.require'docket.list'.fold(9999, v:lnum)"
+    vim.wo[d][0].foldlevel = 0
+    vim.api.nvim_win_set_buf(d, file)
+
+    vim.api.nvim_set_current_win(a)
+    local buf = list.open({ root = "/w/repo", bare = true })
+    eq(drained(), true)
+    for index, hand in ipairs(hands) do
+      hand(one_row("PAY-" .. index))
+    end
+    eq(settled(buf), true)
+    seen.buf, seen.taken = buf, buf == restored
+    vim.api.nvim_set_current_win(c)
+    vim.cmd("buffer " .. buf)
+    seen.c = dash_window(c)
+    local first = select(4, list.lines(list.state(buf), os.time()))[list.state(buf).sections[1]]
+    local folded, why = pcall(vim.cmd, "normal! " .. first .. "Gza")
+    seen.za = folded or why
+    seen.closed = closed_sections(buf)
+    vim.api.nvim_win_set_buf(d, buf)
+    seen.d = dash_window(d)
+  end)
+  restore_notify()
+  restore_rows()
+  restore_checks()
+  restore_clone()
+  restore_cache()
+  assert(ok, err)
+  eq(seen.taken, true, "open() took the restored buffer over")
+  local dash_values = { "expr", ("v:lua.require'docket.list'.fold(%d, v:lnum)"):format(seen.buf), "", 99, false }
+  eq(seen.c, dash_values, ":b in the window that showed the restored buffer")
+  eq(seen.za, true, "where za folds")
+  eq(seen.closed, { true, false, false, false })
+  eq(seen.d, dash_values, "and the window whose 'foldexpr' named the old number, with every section open")
+  eq(notices, {})
 end)
 
 test("list: a review adapter whose module fails to load is the section's error, in the registry's words", function()
@@ -5929,6 +7041,206 @@ test("list: a dash wiped while its state checks are out is left alone when they 
   assert(ok, err)
 end)
 
+-- A dashboard whose every call answers before spawn.run returns: the Jira
+-- searches with one row, PAY-7, and the review client not signed in.
+local function answered_dash()
+  jira.forget()
+  glab.forget()
+  local _, restore_cache = scratch_cache()
+  local restore_clone = stub_clone({ kind = "projects", projects = { "PAY" } }, "git@gitlab.example.test:acme/payments.git")
+  local _, restore_wait = stub_wait(function(argv)
+    error("the dashboard held the editor for " .. table.concat(argv, " "))
+  end)
+  local _, restore_run = stub_run(checked({ signed_in = true }, function(argv)
+    return done(argv, { dash_row("PAY-7", "To Do", "Seven") })
+  end))
+  local notices, restore_notify = stub_notify()
+  return notices, function()
+    restore_notify()
+    restore_run()
+    restore_wait()
+    restore_clone()
+    restore_cache()
+  end
+end
+
+test("list: a deleted dash is remade, and a hidden one is painted", function()
+  local notices, restore = answered_dash()
+  local found = { root = "/w/repo", bare = true }
+  local other = vim.api.nvim_create_buf(true, false)
+  local made = { other }
+  local ok, err = pcall(function()
+    local function painted(buf)
+      return vim.tbl_contains(lines_of(buf), "  PAY-7   To Do   Seven")
+    end
+    -- The answers are painted from scheduled callbacks, after the window has
+    -- moved to another buffer.
+    local buf = list.open(found)
+    made[#made + 1] = buf
+    vim.api.nvim_set_current_buf(other)
+    eq(settled(buf), true)
+    eq({ vim.api.nvim_buf_is_valid(buf), vim.fn.win_findbuf(buf) }, { true, {} }, "kept while hidden")
+    eq(painted(buf), true, "and painted there")
+    vim.cmd("buffer " .. buf)
+    eq(
+      { vim.api.nvim_get_current_buf(), painted(buf), list.state(buf) ~= nil },
+      { buf, true, true },
+      ":b lands on it as it was"
+    )
+
+    -- :bdelete leaves it valid and unloaded; open() wipes it and makes the
+    -- dash afresh.
+    vim.api.nvim_set_current_buf(other)
+    vim.cmd("bdelete " .. buf)
+    eq({ vim.api.nvim_buf_is_valid(buf), vim.api.nvim_buf_is_loaded(buf) }, { true, false })
+    eq(drained(), true)
+    eq(list.state(buf), nil, "its state goes with the unload")
+    local remade = list.open(found)
+    made[#made + 1] = remade
+    eq(settled(remade), true)
+    eq(remade ~= buf, true, "a dash made afresh")
+    eq(vim.api.nvim_buf_is_valid(buf), false, "the deleted one is wiped")
+    eq(
+      { vim.bo[remade].buftype, vim.bo[remade].bufhidden, vim.bo[remade].buflisted, vim.bo[remade].modified },
+      { "nofile", "hide", true, false }
+    )
+    eq(painted(remade), true)
+
+    -- Entered after :bdelete, it loads as an empty buffer with no buftype,
+    -- and the next open() takes it over.
+    vim.api.nvim_set_current_buf(other)
+    vim.cmd("bdelete " .. remade)
+    local own = dash_window(0)
+    vim.cmd("buffer " .. remade)
+    eq({ vim.api.nvim_buf_is_loaded(remade), vim.bo[remade].buftype }, { true, "" }, "loaded, its options reset")
+    eq(dash_window(0), own, "and the window's own values, though the BufWinEnter autocommand :bdelete left still fires")
+    eq(drained(), true)
+    eq(list.state(remade), nil, "its state goes, though :b loaded it again")
+    local taken = list.open(found)
+    eq(settled(taken), true)
+    eq(taken, remade, "the buffer of that name, taken over")
+    local events = vim.tbl_map(function(autocmd)
+      return autocmd.event
+    end, vim.api.nvim_get_autocmds({ group = "docket/dash", buffer = taken }))
+    table.sort(events)
+    eq(events, { "BufUnload", "BufWinEnter", "BufWipeout" }, "the take-over replaces the autocommands :bdelete left on it")
+    eq(
+      { vim.bo[taken].buftype, vim.bo[taken].buflisted, vim.bo[taken].modified },
+      { "nofile", true, false },
+      "a paint leaves it unmodified"
+    )
+    eq(painted(taken), true)
+    eq(notices, {})
+  end)
+  restore()
+  for _, buf in ipairs(made) do
+    if vim.api.nvim_buf_is_valid(buf) then
+      vim.api.nvim_buf_delete(buf, { force = true })
+    end
+  end
+  assert(ok, err)
+end)
+
+test("list: a callback paints nothing into an unloaded dash, and the next open makes it the dash again", function()
+  -- :bdelete drops the state through BufUnload. An unload that skips
+  -- autocommands, as `:noautocmd bdelete` does, leaves it, and so does
+  -- :bunload, which keeps the options; the tests in current() are then what
+  -- stop the paint.
+  for _, how in ipairs({ "bdelete", "noautocmd bdelete", "bunload", "noautocmd bunload" }) do
+    local dash = held_dash()
+    local other = vim.api.nvim_create_buf(true, false)
+    local made = { dash.buf, other }
+    local ok, err = pcall(function()
+      eq(drained(), true)
+      vim.api.nvim_set_current_buf(other)
+      vim.cmd(how .. " " .. dash.buf)
+      eq(drained(), true)
+      eq(list.state(dash.buf) == nil, how == "bdelete", how .. ": the state")
+      dash.answer(1, done(dash.held[1].argv, STATUS_SIGNED_IN))
+      dash.answer(2, done(dash.held[2].argv, "✓ Logged in"))
+      eq(drained(), true)
+      eq(vim.api.nvim_buf_is_loaded(dash.buf), false, how .. ": nothing loaded it")
+      eq(#dash.held, 2, how .. ": no rows are asked for")
+      eq(dash.notices, {}, how .. ": and nothing raised")
+      local buf = list.open({ root = "/w/repo", bare = true })
+      made[#made + 1] = buf
+      eq(drained(), true)
+      eq(
+        { vim.bo[buf].buftype, vim.bo[buf].modified, list.state(buf) ~= nil },
+        { "nofile", false, true },
+        how .. ": the next open shows a dash"
+      )
+    end)
+    dash.restore()
+    for _, buf in ipairs(made) do
+      if vim.api.nvim_buf_is_valid(buf) then
+        vim.api.nvim_buf_delete(buf, { force = true })
+      end
+    end
+    assert(ok, err)
+  end
+end)
+
+test("list: a callback queued before :bdelete paints nothing into the dash :b then loaded", function()
+  -- The answers are queued first, so they run before the look BufUnload
+  -- schedules, while the state is still the dash's.
+  local dash = held_dash()
+  local other = vim.api.nvim_create_buf(true, false)
+  local ok, err = pcall(function()
+    eq(drained(), true)
+    dash.answer(1, done(dash.held[1].argv, STATUS_SIGNED_IN))
+    dash.answer(2, done(dash.held[2].argv, "✓ Logged in"))
+    vim.api.nvim_set_current_buf(other)
+    vim.cmd("bdelete " .. dash.buf)
+    vim.cmd("buffer " .. dash.buf)
+    eq(drained(), true)
+    eq(
+      { vim.bo[dash.buf].buftype, vim.bo[dash.buf].modified, lines_of(dash.buf) },
+      { "", false, { "" } },
+      "loaded by :b, empty and unmodified"
+    )
+    eq(#dash.held, 2, "no rows are asked for")
+    eq(list.state(dash.buf), nil, "and the state is gone")
+    eq(dash.notices, {})
+  end)
+  dash.restore()
+  for _, buf in ipairs({ dash.buf, other }) do
+    if vim.api.nvim_buf_is_valid(buf) then
+      vim.api.nvim_buf_delete(buf, { force = true })
+    end
+  end
+  assert(ok, err)
+end)
+
+test("list: :e in the dash keeps it the dash, and r paints it again", function()
+  for _, how in ipairs({ "edit", "edit!" }) do
+    local notices, restore = answered_dash()
+    local buf
+    local ok, err = pcall(function()
+      buf = commands.dash()
+      eq(settled(buf), true)
+      local painted = lines_of(buf)
+      vim.cmd(how)
+      eq(drained(), true)
+      eq(
+        { lines_of(buf), list.state(buf) ~= nil, vim.bo[buf].buftype },
+        { { "" }, true, "nofile" },
+        how .. ": blank, and still the dash"
+      )
+      vim.api.nvim_feedkeys("r", "x", false)
+      eq(settled(buf), true)
+      eq(lines_of(buf), painted, how .. ": r paints the rows again")
+      eq({ vim.bo[buf].modified, list.buffer() }, { false, buf }, how .. ": unmodified, and the one :Docket reuses")
+      eq(notices, {})
+    end)
+    restore()
+    if buf and vim.api.nvim_buf_is_valid(buf) then
+      vim.api.nvim_buf_delete(buf, { force = true })
+    end
+    assert(ok, err)
+  end
+end)
+
 test("list: a review section's rows are asked in the clone the dash shows, whichever directory a later state check took", function()
   local saved_getcwd = vim.fn.getcwd
   local dash = held_dash()
@@ -6077,7 +7389,7 @@ test("init: the help tags are written beside the file, skipped when current, and
   eq(absent, false)
   eq(outcome_absent:find("E150", 1, true) ~= nil, true, "an absent directory is helptags' own E150: " .. outcome_absent)
   eq(#notices, 1, "a later failure is not reported again")
-  eq({ docket.helptags() }, { false, "missing" }, "under -u NONE the package is not on the runtime path")
+  eq({ docket.helptags() }, { false, "missing" }, "isolate() keeps every copy of the package off the runtime path")
   eq(vim.uv.fs_stat(vim.fs.dirname(source) .. "/tags"), nil, "nothing is written in the source tree")
 end)
 
@@ -6089,65 +7401,154 @@ test("init: help_files names the help file and the tags beside it, once they exi
   eq(docket.help_files(help), { help = help })
   eq({ docket.helptags(help) }, { true, "written" })
   eq(docket.help_files(help), { help = help, tags = dir .. "/tags" })
-  eq(docket.help_files(), {}, "under -u NONE the package is not on the runtime path")
+  eq(docket.help_files(), {}, "isolate() keeps every copy of the package off the runtime path")
 end)
 
 test("init: setup takes the options, defines the groups, and keeps them across a colour scheme change", function()
-  local saved = package.loaded["octo"]
-  package.loaded["octo"] = nil
+  clear_groups({ "DocketEditable" })
   local options = docket.setup({ timeouts = { tmux = 1 } })
   eq(options.timeouts.tmux, 1)
   eq(options.timeouts.client, 30000)
-  eq(vim.api.nvim_get_hl(0, { name = "DocketEditable", link = true }).link, "NormalFloat")
+  local float = bg_of("NormalFloat")
+  eq(bg_of("DocketEditable"), float)
   local autocmds = vim.api.nvim_get_autocmds({ group = "docket/highlights", event = "ColorScheme" })
   eq(#autocmds, 1)
-  vim.api.nvim_set_hl(0, "DocketEditable", {})
+  eq(#vim.api.nvim_get_autocmds({ group = "docket/highlights", event = "OptionSet", pattern = "background" }), 1)
+  eq(#vim.api.nvim_get_autocmds({ group = "docket/highlights", event = "VimEnter" }), 1)
+  vim.cmd("highlight clear DocketEditable")
   vim.api.nvim_exec_autocmds("ColorScheme", { group = "docket/highlights" })
-  eq(vim.api.nvim_get_hl(0, { name = "DocketEditable", link = true }).link, "NormalFloat", "defined again")
+  eq(bg_of("DocketEditable"), float, "defined again")
   docket.setup({})
   eq(#vim.api.nvim_get_autocmds({ group = "docket/highlights", event = "ColorScheme" }), 1, "a second setup adds no second autocommand")
-  package.loaded["octo"] = saved
+  -- :hi clear puts each default link back by itself and empties
+  -- DocketEditable, so this is the assertion that needs the autocommand.
+  vim.cmd.colorscheme("default")
+  eq(bg_of("DocketEditable"), float, "a colour scheme's :hi clear, then the autocommand")
   config.configure()
+end)
+
+test("init: setup keeps DocketEditable on the colours shown when 'background' changes, after startup, and after a colour scheme that skips :hi clear", function()
+  clear_groups({ "DocketEditable" })
+  docket.setup({})
+  -- With no colour scheme loaded, neovim's own colours change with
+  -- 'background' and no ColorScheme event fires; with one loaded, setting
+  -- 'background' loads it again, which fires one.
+  vim.g.colors_name = nil
+  local fired = 0
+  local counter = vim.api.nvim_create_autocmd("ColorScheme", {
+    callback = function()
+      fired = fired + 1
+    end,
+  })
+  vim.o.background = "light"
+  local light = { float = bg_of("NormalFloat"), editable = bg_of("DocketEditable"), fired = fired }
+  -- Twice, so that an autocommand deleted after its first run shows.
+  vim.o.background = "dark"
+  local dark = { float = bg_of("NormalFloat"), editable = bg_of("DocketEditable") }
+  vim.api.nvim_del_autocmd(counter)
+  -- OptionSet does not fire during startup; VimEnter, at its end, is what
+  -- catches a 'background' set after setup by the rest of the configuration's
+  -- init.lua. No event fires for the nvim_set_hl() that stands in for it here.
+  vim.api.nvim_set_hl(0, "NormalFloat", { bg = "#123456" })
+  vim.api.nvim_exec_autocmds("VimEnter", { group = "docket/highlights" })
+  local entered = bg_of("DocketEditable")
+  -- A colour scheme that runs :hi clear only when another one is loaded.
+  local dir = vim.fn.tempname()
+  vim.fn.mkdir(dir .. "/colors", "p")
+  vim.fn.writefile({
+    "if vim.g.colors_name then vim.cmd.highlight('clear') end",
+    "vim.g.colors_name = 'noclear'",
+    "vim.api.nvim_set_hl(0, 'NormalFloat', { bg = '#181825' })",
+  }, dir .. "/colors/noclear.lua")
+  vim.opt.runtimepath:prepend(dir)
+  vim.g.colors_name = nil
+  vim.cmd.colorscheme("noclear")
+  local noclear = bg_of("DocketEditable")
+  vim.opt.runtimepath:remove(dir)
+  vim.cmd.colorscheme("default")
+  config.configure()
+  eq(light.fired, 0, "no ColorScheme event")
+  eq(light.float ~= dark.float, true, "neovim's light colours give NormalFloat another background")
+  eq(light.editable, light.float, "'background' set to light")
+  eq(dark.editable, dark.float, "and back to dark")
+  eq(entered, tonumber("123456", 16), "at the end of startup")
+  eq(noclear, tonumber("181825", 16), "a colour scheme loaded without :hi clear")
+end)
+
+test("init: setup sets the configured statuses, reports one it cannot set, and sets them again after a colour scheme", function()
+  local notices, restore = stub_notify()
+  docket.setup({ statuses = { ["In Review"] = "#f9e2af", Bad = 5 } })
+  restore()
+  eq(notices, {
+    {
+      message = "docket: the status Bad keeps its category's colour, because its value is a number, where a colour, a group's name or a table goes",
+      level = vim.log.levels.WARN,
+    },
+  })
+  vim.cmd.colorscheme("default")
+  local fg = vim.api.nvim_get_hl(0, { name = "DocketStatusIn_Review" }).fg
+  local after = highlight.state_group("In Review", nil, "jira")
+  docket.setup({})
+  local replaced = highlight.state_group("In Review", nil, "jira")
+  config.configure()
+  eq(fg, tonumber("f9e2af", 16), "the colour scheme's :hi clear emptied it, and the autocommand set it again")
+  eq(after, "DocketStatusIn_Review")
+  eq(replaced, "DocketLabel", "a second setup replaces the statuses")
 end)
 
 -- the health report -----------------------------------------------------------------------
 
-test("health: each backend's state, with the login command as the fix", function()
-  local report = {}
-  local saved = {}
+-- vim.health's report functions replaced by a recorder, so a test reads the
+-- report health.check() makes without running :checkhealth. Returns the
+-- report, one `{ kind, message, advice }` per call, and the restore.
+local function stub_health()
+  local report, saved = {}, {}
   for _, name in ipairs({ "start", "ok", "warn", "error", "info" }) do
     saved[name] = vim.health[name]
     vim.health[name] = function(message, advice)
       report[#report + 1] = { name, message, advice }
     end
   end
-  local _, restore_wait = stub_acli({ signed_in = false })
+  return report, function()
+    for name, fn in pairs(saved) do
+      vim.health[name] = fn
+    end
+  end
+end
+
+test("health: each backend a configured section needs here, with the login command as the fix, and the rest not run", function()
+  local report, restore_health = stub_health()
+  -- The default sections: Jira's, and the review sections, which take the
+  -- client origin selects, glab here.
+  local restore_clone = stub_clone({ kind = "projects", projects = { "PAY" } }, "git@gitlab.example.test:acme/payments.git")
+  local calls, restore_wait = stub_acli({ signed_in = false })
   health.check()
   restore_wait()
-  for name, fn in pairs(saved) do
-    vim.health[name] = fn
-  end
+  restore_clone()
+  restore_health()
   eq(report[1], { "start", "docket: backends" })
   eq(report[2][1], "error")
   eq(report[2][2], "jira: not signed in")
   eq(report[2][3][1], "run :Docket login jira")
   eq(report[3], { "error", "glab: not signed in", { "run :Docket login glab", "glab exited 1\nx glab: no token" } })
-  eq(report[4], { "error", "gh: not signed in", { "run :Docket login gh", "gh exited 1\nx gh: no token" } })
+  eq(report[4], { "info", "gh: no configured section needs it here; not checked" })
+  eq(
+    vim.tbl_map(function(call)
+      return call.argv[1]
+    end, calls),
+    { "acli", "glab" },
+    "gh is not run"
+  )
   eq(report[5], { "start", "docket: help" })
-  eq(report[6][1], "error", "under -u NONE the help file is not on the runtime path")
+  eq(report[6][1], "error", "isolate() keeps every copy of the help file off the runtime path")
   eq(report[7], { "start", "docket: configuration" })
   eq(report[8][2]:find("^sections: All open tickets %(jira%)") ~= nil, true, report[8][2])
   eq(report[9][2]:find("^cache directory: ") ~= nil, true, report[9][2])
 
   -- The help file found, with and without the tags beside it: health reads
   -- init's lookup, so the one lookup is replaced.
-  report = {}
+  report, restore_health = stub_health()
   local saved_files = docket.help_files
-  for _, name in ipairs({ "start", "ok", "warn", "error", "info" }) do
-    vim.health[name] = function(message, advice)
-      report[#report + 1] = { name, message, advice }
-    end
-  end
   local _, restore_all = stub_acli({ signed_in = true, glab = true, gh = true })
   docket.help_files = function()
     return { help = "/p/doc/docket.txt" }
@@ -6159,9 +7560,7 @@ test("health: each backend's state, with the login command as the fix", function
   health.check()
   docket.help_files = saved_files
   restore_all()
-  for name, fn in pairs(saved) do
-    vim.health[name] = fn
-  end
+  restore_health()
   local helps = vim.tbl_filter(function(entry)
     return entry[2]:find("/p/doc/", 1, true) ~= nil
   end, report)
@@ -6173,6 +7572,175 @@ test("health: each backend's state, with the login command as the fix", function
     },
     { "ok", "help tags beside /p/doc/docket.txt" },
   })
+end)
+
+test("health: a section naming a client has it checked, and a review section that selects none says why", function()
+  local NOT_A_CLONE = "fatal: not a git repository (or any of the parent directories): .git\n"
+  config.configure({
+    sections = {
+      { title = "Tickets", adapter = "jira", query = "<projects>" },
+      { title = "Reviews", adapter = "review", query = { glab = { "mr", "list" }, gh = { "pr", "list" } } },
+      { title = "Tools", adapter = "gh", query = { "pr", "list" } },
+      { title = "Typo", adapter = "jria", query = "<projects>" },
+    },
+  })
+  -- Outside a clone: git's own answer, run in the window's directory.
+  local outside, restore_health = stub_health()
+  local calls, restore_wait = stub_wait(function(argv)
+    if argv[1] == "git" then
+      return failed(argv, 128, NOT_A_CLONE)
+    end
+    return status_answer({ signed_in = true, gh = true }, argv)
+  end)
+  health.check()
+  restore_wait()
+  restore_health()
+  -- In a clone whose origin names no host: adapter_for()'s reason.
+  local no_host
+  no_host, restore_health = stub_health()
+  local restore_clone = stub_clone({ kind = "projects", projects = { "PAY" } }, "/srv/git/payments.git")
+  _, restore_wait = stub_acli({ signed_in = true, gh = true })
+  health.check()
+  restore_wait()
+  restore_clone()
+  restore_health()
+  -- In a clone with no origin: remote_url()'s reason.
+  local no_origin
+  no_origin, restore_health = stub_health()
+  restore_clone = stub_clone({ kind = "projects", projects = { "PAY" } }, nil)
+  local saved_url = repo.remote_url
+  repo.remote_url = function()
+    return nil, "git exited 2\nerror: No such remote 'origin'\n"
+  end
+  _, restore_wait = stub_acli({ signed_in = true, gh = true })
+  health.check()
+  restore_wait()
+  repo.remote_url = saved_url
+  restore_clone()
+  restore_health()
+  config.configure()
+
+  eq(calls[1].argv[1], "git")
+  eq(calls[1].opts.cwd, vim.fn.getcwd(), "the clone is the one the working directory is in")
+  local backends = vim.list_slice(outside, 1, 6)
+  eq(backends[1], { "start", "docket: backends" })
+  eq(backends[2], { "info", "the review sections select no client here: git exited 128\n" .. NOT_A_CLONE })
+  eq(backends[3][1], "ok", vim.inspect(backends[3]))
+  eq(backends[3][2]:find("^jira: signed in") ~= nil, true, backends[3][2])
+  eq(backends[4], { "info", "glab: no configured section needs it here; not checked" })
+  eq(backends[5], { "ok", "gh: signed in\n✓ Logged in to gh.example.test as me" }, "named by a section, so checked")
+  eq(backends[6], { "error", "no adapter named jria; the adapters are jira, glab, gh" }, "a name the registry refuses")
+  eq(no_host[2], {
+    "info",
+    "the review sections select no client here: origin is /srv/git/payments.git, which names no host, so there are no review sections",
+  })
+  eq(no_origin[2], { "info", "the review sections select no client here: git exited 2\nerror: No such remote 'origin'\n" })
+end)
+
+test("health: a backend no section names is not run, Jira's included, and with no review section git is not run either", function()
+  local function argv0(calls)
+    return vim.tbl_map(function(call)
+      return call.argv[1]
+    end, calls)
+  end
+  -- Review sections alone, in a GitLab clone: glab is checked, and acli is
+  -- not run.
+  config.configure({
+    sections = { { title = "Reviews", adapter = "review", query = { glab = { "mr", "list" }, gh = { "pr", "list" } } } },
+  })
+  local reviews, restore_health = stub_health()
+  local restore_clone = stub_clone({ kind = "projects", projects = { "PAY" } }, "git@gitlab.example.test:acme/payments.git")
+  local review_calls, restore_wait = stub_acli({ signed_in = true, glab = true })
+  health.check()
+  restore_wait()
+  restore_clone()
+  restore_health()
+  -- A Jira section alone, outside a clone: the clone is never looked for.
+  config.configure({ sections = { { title = "Tickets", adapter = "jira", query = "<projects>" } } })
+  local tickets
+  tickets, restore_health = stub_health()
+  local ticket_calls
+  ticket_calls, restore_wait = stub_wait(function(argv)
+    if argv[1] == "git" then
+      return failed(argv, 128, "fatal: not a git repository (or any of the parent directories): .git\n")
+    end
+    return status_answer({ signed_in = true }, argv)
+  end)
+  health.check()
+  restore_wait()
+  restore_health()
+  config.configure()
+
+  eq(argv0(review_calls), { "glab" }, "acli is not run")
+  eq(vim.list_slice(reviews, 1, 4), {
+    { "start", "docket: backends" },
+    { "info", "jira: no configured section needs it here; not checked" },
+    { "ok", "glab: signed in\n✓ Logged in to glab.example.test as me" },
+    { "info", "gh: no configured section needs it here; not checked" },
+  })
+  eq(argv0(ticket_calls), { "acli" }, "git is not run")
+  eq(tickets[1], { "start", "docket: backends" })
+  eq(tickets[2][1], "ok", vim.inspect(tickets[2]))
+  eq(tickets[2][2]:find("^jira: signed in") ~= nil, true, tickets[2][2])
+  eq(vim.list_slice(tickets, 3, 5), {
+    { "info", "glab: no configured section needs it here; not checked" },
+    { "info", "gh: no configured section needs it here; not checked" },
+    { "start", "docket: help" },
+  }, "no line says the review sections select no client")
+end)
+
+test("health: the configuration names each status with a colour of its own and its group, and warns of one not set", function()
+  local report, restore_health = stub_health()
+  local _, restore_wait = stub_acli({ signed_in = true, glab = true, gh = true })
+  highlight.define({})
+  health.check()
+  highlight.define({ ["In Review"] = "#f9e2af", Blocked = "DiagnosticError", Bad = 5 })
+  local from = #report
+  health.check()
+  highlight.define({})
+  restore_wait()
+  restore_health()
+  local function lines_after(first)
+    local found = {}
+    for index = first + 1, #report do
+      if report[index][2]:find("status", 1, true) then
+        found[#found + 1] = { report[index][1], report[index][2] }
+      end
+    end
+    return found
+  end
+  eq(lines_after(0)[1], { "info", "statuses with a colour of their own: none" })
+  eq(lines_after(from), {
+    { "info", "statuses with a colour of their own: Blocked (DocketStatusBlocked), In Review (DocketStatusIn_Review)" },
+    { "warn", "the status Bad keeps its category's colour, because its value is a number, where a colour, a group's name or a table goes" },
+  })
+end)
+
+test("health: a status linked to a group that sets nothing is warned of, directly or through the target's own link", function()
+  vim.api.nvim_set_hl(0, "DocketTestChain", { link = "DocketTestNoSuchGroup" })
+  highlight.define({
+    Typo = "DocketTestNoSuchGroup",
+    Chained = { link = "DocketTestChain", bold = true },
+    Blocked = "DiagnosticError",
+    Coloured = "#f9e2af",
+  })
+  local report, restore_health = stub_health()
+  local _, restore_wait = stub_acli({ signed_in = true, glab = true, gh = true })
+  health.check()
+  restore_wait()
+  restore_health()
+  highlight.define({})
+  vim.cmd.highlight("clear", "DocketTestChain")
+  local advice = { "correct the name in setup{}'s statuses; :highlight lists the groups there are" }
+  eq(
+    vim.tbl_filter(function(entry)
+      return entry[1] == "warn" and entry[2]:find("status", 1, true) ~= nil
+    end, report),
+    {
+      { "warn", "the status Chained renders uncoloured: it links to DocketTestChain, which sets nothing here", advice },
+      { "warn", "the status Typo renders uncoloured: it links to DocketTestNoSuchGroup, which sets nothing here", advice },
+    }
+  )
 end)
 
 -- the plugin file -------------------------------------------------------------------------
@@ -6264,6 +7832,235 @@ test("plugin: the command, the map and the autocommands are declared, and :e rea
   vim.g.loaded_docket = nil
   -- Its edits would make a later read of the same item refuse.
   vim.api.nvim_buf_delete(buf, { force = true })
+end)
+
+-- Every BufReadCmd that fires on a `docket://` buffer, counted.
+local function count_reads()
+  local count = { reads = 0 }
+  local id = vim.api.nvim_create_autocmd("BufReadCmd", {
+    pattern = "docket://*",
+    callback = function()
+      count.reads = count.reads + 1
+    end,
+  })
+  return count, function()
+    vim.api.nvim_del_autocmd(id)
+  end
+end
+
+test("buffer: a deleted buffer is remade, so the item is read once", function()
+  vim.g.loaded_docket = nil
+  dofile(root .. "/dot_local/share/private_nvim/private_site/pack/docket/start/docket/plugin/docket.lua")
+  local name = buffer.name("jira", "TIG-1002")
+  local previous = buffer.named(name)
+  if previous then
+    vim.api.nvim_buf_delete(previous, { force = true })
+  end
+  jira.forget()
+  local waits, restore_wait = stub_acli({ signed_in = true })
+  local runs, restore_run = stub_run(function(argv)
+    if argv[4] == "search" then
+      return done(argv, { found("TIG-7", { assignee = user("acc-me", "Me Myself") }) })
+    end
+    return done(argv, view_payload())
+  end)
+  local notices, restore_notify = stub_notify()
+  local count, restore_count = count_reads()
+  local function views()
+    return #vim.tbl_filter(function(call)
+      return call.argv[4] == "view"
+    end, runs)
+  end
+  local function checks()
+    return #vim.tbl_filter(is_status, waits)
+  end
+  local ok, err = pcall(function()
+    local first = buffer.open("jira", "TIG-1002")
+    vim.wait(1000, function()
+      return vim.b[first].docket ~= nil
+    end)
+    vim.api.nvim_set_current_buf(vim.api.nvim_create_buf(true, false))
+    vim.cmd("bdelete " .. first)
+    eq(
+      { vim.api.nvim_buf_is_valid(first), vim.api.nvim_buf_is_loaded(first), vim.bo[first].buflisted },
+      { true, false, false },
+      ":bdelete leaves the buffer, unloaded and off the list"
+    )
+    count.reads = 0
+    local checked_before, viewed_before = checks(), views()
+    local second = buffer.open("jira", "TIG-1002")
+    vim.wait(1000, function()
+      return vim.b[second].docket ~= nil
+    end)
+    eq(vim.api.nvim_buf_is_valid(first), false, "the deleted buffer is wiped")
+    eq(second ~= first, true, "and the item opens in a buffer made afresh")
+    eq(vim.api.nvim_get_current_buf(), second)
+    eq(vim.api.nvim_buf_get_name(second), name)
+    eq({ vim.bo[second].buftype, vim.bo[second].buflisted }, { "acwrite", true })
+    eq(count.reads, 0, "showing it fires no BufReadCmd")
+    eq(checks() - checked_before, 1, "one state check")
+    eq(views() - viewed_before, 1, "and one read of the item")
+    eq(notices, {})
+    vim.api.nvim_buf_delete(second, { force = true })
+  end)
+  restore_count()
+  restore_notify()
+  restore_run()
+  restore_wait()
+  vim.api.nvim_del_user_command("Docket")
+  vim.g.loaded_docket = nil
+  assert(ok, err)
+end)
+
+test("plugin: a restored session's item buffer carries the keys and reads nothing", function()
+  vim.g.loaded_docket = nil
+  dofile(root .. "/dot_local/share/private_nvim/private_site/pack/docket/start/docket/plugin/docket.lua")
+  local name = buffer.name("jira", "PROJ-1")
+  local previous = buffer.named(name)
+  if previous then
+    vim.api.nvim_buf_delete(previous, { force = true })
+  end
+  local waits, restore_wait = stub_wait(function(argv)
+    error("the restore reached spawn.wait: " .. table.concat(argv, " "))
+  end)
+  local runs, restore_run = stub_run(function(argv)
+    error("the restore reached spawn.run: " .. table.concat(argv, " "))
+  end)
+  local notices, restore_notify = stub_notify()
+  local count, restore_count = count_reads()
+  local ok, err = pcall(function()
+    -- The lines :mksession writes for an item buffer on screen, under
+    -- 'sessionoptions' holding localoptions, while before_session_save() has
+    -- it off the list.
+    vim.cmd("enew")
+    vim.cmd("file " .. name)
+    vim.cmd("setlocal nobuflisted")
+    vim.cmd("setlocal buftype=acwrite")
+    vim.cmd("setlocal filetype=docket")
+    local buf = vim.api.nvim_get_current_buf()
+    eq(vim.bo[buf].buflisted, true, "the FileType autocommand lists it again")
+    eq(vim.fn.maparg("gx", "n", false, true).buffer, 1, "the item buffer's keymap")
+    eq(vim.fn.maparg("<leader>dw", "n", false, true).buffer, 1)
+    vim.cmd.write()
+    eq(notices, { { message = "nothing loaded in this buffer; :e reads the item", level = vim.log.levels.WARN } })
+    eq(count.reads, 0, "no BufReadCmd")
+    eq({ #runs, #waits }, { 0, 0 }, "nothing spawned")
+
+    -- A new ticket's draft on screen is written the same way.
+    vim.cmd("enew")
+    vim.cmd("file " .. commands.DRAFT .. "jira")
+    vim.cmd("setlocal nobuflisted")
+    vim.cmd("setlocal buftype=acwrite")
+    vim.cmd("setlocal filetype=docket")
+    local draft = vim.api.nvim_get_current_buf()
+    eq(vim.bo[draft].buflisted, true, "the FileType autocommand lists a draft again")
+    eq(vim.fn.maparg("gx", "n", false, true).buffer == 1, false, "a draft carries no item keymap")
+    eq(lines_of(draft), { "" }, "and nothing filled it")
+    eq({ #runs, #waits }, { 0, 0 }, "nothing spawned for the draft")
+  end)
+  -- Left behind by a failed assertion, either name would make the next
+  -- test's buffer of that name raise E95.
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.tbl_contains({ name, commands.DRAFT .. "jira" }, vim.api.nvim_buf_get_name(buf)) then
+      vim.api.nvim_buf_delete(buf, { force = true })
+    end
+  end
+  restore_count()
+  restore_notify()
+  restore_run()
+  restore_wait()
+  vim.api.nvim_del_user_command("Docket")
+  vim.g.loaded_docket = nil
+  assert(ok, err)
+end)
+
+test("docket: before_session_save keeps every docket buffer out of the session and lists it again", function()
+  eq(docket.NAMES, { buffer.SCHEME, commands.DRAFT, list.NAME }, "the names the modules that make the buffers give them")
+  local made = {}
+  local function item(id)
+    local buf = loaded_buffer({ id = id })
+    made[#made + 1] = buf
+    return buf
+  end
+  local saved = { sessionoptions = vim.o.sessionoptions, current = vim.api.nvim_get_current_buf() }
+  local session = vim.fn.tempname()
+  local ok, err = pcall(function()
+    local shown = item("PROJ-801")
+    local hidden = item("PROJ-802")
+    local deleted = item("PROJ-803")
+    local draft = vim.api.nvim_create_buf(false, false)
+    made[#made + 1] = draft
+    vim.api.nvim_buf_set_name(draft, commands.DRAFT .. "jira")
+    buffer.prepare(draft)
+    local dash = list.buffer()
+    made[#made + 1] = dash
+    local file = vim.fn.tempname()
+    vim.fn.writefile({ "a file" }, file)
+    vim.cmd("badd " .. vim.fn.fnameescape(file))
+    local file_buf = vim.fn.bufnr(file)
+    made[#made + 1] = file_buf
+    vim.api.nvim_set_current_buf(deleted)
+    vim.api.nvim_set_current_buf(shown)
+    vim.cmd("bdelete " .. deleted)
+    eq(vim.bo[deleted].buflisted, false, ":bdelete took it off the list")
+
+    vim.o.sessionoptions = saved.sessionoptions .. ",localoptions"
+    local unlisted = docket.before_session_save()
+    local during = {}
+    for _, buf in ipairs({ shown, hidden, draft, dash }) do
+      during[#during + 1] = vim.bo[buf].buflisted
+    end
+    vim.cmd("mksession! " .. vim.fn.fnameescape(session))
+    local lines = vim.fn.readfile(session)
+    vim.wait(1000, function()
+      return vim.bo[shown].buflisted
+    end)
+
+    for _, buf in ipairs({ shown, hidden, draft, dash }) do
+      eq(vim.tbl_contains(unlisted, buf), true, vim.api.nvim_buf_get_name(buf) .. " was taken off the list")
+    end
+    eq(vim.tbl_contains(unlisted, deleted), false, "one already off the list is not touched")
+    eq(during, { false, false, false, false }, "off the list while the session is written")
+    eq(
+      vim.tbl_filter(function(line)
+        return line:find("^badd %+%d+ docket[%w-]*://") ~= nil
+      end, lines),
+      {},
+      "no docket buffer is on the session's buffer list"
+    )
+    eq(
+      #vim.tbl_filter(function(line)
+        return line:find("^badd ") ~= nil and vim.endswith(line, vim.fn.fnamemodify(file, ":t"))
+      end, lines),
+      1,
+      "a file is, as before"
+    )
+    local file_line
+    for index, line in ipairs(lines) do
+      if line == "file " .. buffer.name("jira", "PROJ-801") then
+        file_line = index
+      end
+    end
+    eq(file_line ~= nil, true, "the shown buffer's window is recorded")
+    eq(lines[file_line - 1], "enew")
+    eq(vim.tbl_contains(lines, "setlocal nobuflisted"), true, "with the option as the hook left it")
+    for _, buf in ipairs({ shown, hidden, draft, dash }) do
+      eq(vim.bo[buf].buflisted, true, vim.api.nvim_buf_get_name(buf) .. " is listed again")
+    end
+    eq(vim.bo[deleted].buflisted, false, "and the deleted one stays off the list")
+    eq(vim.bo[file_buf].buflisted, true)
+  end)
+  vim.o.sessionoptions = saved.sessionoptions
+  if vim.api.nvim_buf_is_valid(saved.current) then
+    vim.api.nvim_set_current_buf(saved.current)
+  end
+  for _, buf in ipairs(made) do
+    if vim.api.nvim_buf_is_valid(buf) then
+      vim.api.nvim_buf_delete(buf, { force = true })
+    end
+  end
+  vim.fn.delete(session)
+  assert(ok, err)
 end)
 
 -- the GitLab adapter ------------------------------------------------------------------------
@@ -6808,6 +8605,26 @@ test("glab: an item holds markdown as text, its comments in discussion order, an
   eq(regions[4].editable, true, "the account's own note is editable")
   eq(regions[2].editable, false)
   eq(regions[2].reason, "written by Ana")
+end)
+
+test("glab: an item carries the source branch and whether it comes from a fork, from mr view", function()
+  glab.forget()
+  local function read(overrides)
+    local got
+    local _, restore = stub_glab(overrides)
+    glab.item("!482", function(it, err)
+      got = { it, err }
+    end)
+    restore()
+    eq(got[2], nil)
+    return got[1]
+  end
+  local own = read({ source_project_id = 77, target_project_id = 77 })
+  eq({ own.branch, own.fork }, { "feature/acli.bump" }, "within its own project")
+  local forked = read({ source_branch = "main", source_project_id = 91, target_project_id = 77 })
+  eq({ forked.branch, forked.fork }, { "main", true }, "from a fork")
+  local unmarked = read()
+  eq({ unmarked.branch, unmarked.fork }, { "feature/acli.bump" }, "an answer naming neither project is not marked")
 end)
 
 test("glab: an item still opens when the identity is unknown, with the reason beside it", function()
@@ -8123,8 +9940,8 @@ test("plugin: :e on a pull request's name hands it to octo.nvim with no error, a
   vim.g.loaded_docket = nil
   dofile(root .. "/dot_local/share/private_nvim/private_site/pack/docket/start/docket/plugin/docket.lua")
   -- `enew` stands in for the buffer octo.nvim's `pr edit` shows the pull
-  -- request in, in the current window. UNVERIFIED: that octo.nvim takes the
-  -- current window is not observed, and it is what wipes the buffer :e made.
+  -- request in, in the current window, which is what wipes the buffer :e
+  -- made; the suite loads no octo.nvim.
   local edited = {}
   vim.api.nvim_create_user_command("Octo", function(command)
     edited[#edited + 1] = command.args
@@ -8186,17 +10003,27 @@ local WORKTREES = table.concat({
   "",
 }, "\n")
 
+-- What `list-windows` prints for the window names given, the first as `@1`
+-- and each after it one higher.
+local function listing(names)
+  local lines = {}
+  for index, name in ipairs(names) do
+    lines[#lines + 1] = ("@%d %s\n"):format(index, name)
+  end
+  return table.concat(lines)
+end
+
 -- The launcher's counterpart, inside tmux: every process call recorded, with
--- tmux answering from `windows` -- the session's windows, the current one
--- first -- the worktree listing from WORKTREES, a clean tree from `git status`,
--- and `git wt-rm` from `removal`.
+-- tmux answering from `windows` -- the session's window names, the current one
+-- first, listed with ids from `@1` -- the worktree listing from WORKTREES, a
+-- clean tree from `git status`, and `git wt-rm` from `removal`.
 local function stub_teardown(windows, removal)
   return stub_wait(function(argv, opts)
     if argv[1] == "tmux" and argv[2] == "display-message" then
       return done(argv, windows[1] .. "\n")
     end
     if argv[1] == "tmux" and argv[2] == "list-windows" then
-      return done(argv, table.concat(windows, "\n") .. "\n")
+      return done(argv, listing(windows))
     end
     if argv[1] == "tmux" then
       return done(argv, "")
@@ -8228,9 +10055,9 @@ test("teardown: inside tmux the windows present are closed, in order, and then t
     { "git", "worktree", "list", "--porcelain" },
     { "git", "status", "--porcelain" },
     { "tmux", "display-message", "-p", "#{window_name}" },
-    { "tmux", "list-windows", "-F", "#{window_name}" },
-    { "tmux", "kill-window", "-t", "=PROJ-1-x" },
-    { "tmux", "kill-window", "-t", "=PROJ-1-x-sh" },
+    { "tmux", "list-windows", "-F", "#{window_id} #{window_name}" },
+    { "tmux", "kill-window", "-t", "@2" },
+    { "tmux", "kill-window", "-t", "@3" },
     { "git", "wt-rm", "PROJ-1-x" },
   }, "what git wt-rm needs comes first, then both windows, then the worktree")
   eq(calls[1].opts.cwd, "/w/repo", "the listing runs at the clone's root")
@@ -8312,9 +10139,26 @@ test("teardown: a window already gone is not closed again, a review branch's nam
   eq(err, nil)
   eq(removed.closed, { "feature-acli-bump-sh" }, "only the window that was there")
   eq(removed.window, "feature-acli-bump")
-  eq(calls[4].argv, { "tmux", "kill-window", "-t", "=feature-acli-bump-sh" })
+  eq(calls[4].argv, { "tmux", "kill-window", "-t", "@2" })
   eq(calls[5].argv, { "git", "wt-rm", "feature/acli.bump", "--force" }, "git takes the ref, not the window name")
   eq(#calls, 5, "force skips the clean-tree check")
+end)
+
+test("teardown: a name two windows carry stops the removal with their ids before any window is closed", function()
+  local saved_tmux = vim.env.TMUX
+  vim.env.TMUX = "/tmp/tmux-1/default,1,0"
+  local calls, restore = stub_teardown({ "dash", "PROJ-1-x", "PROJ-1-x-sh", "PROJ-1-x-sh" }, function(argv)
+    error("git wt-rm must not run: " .. table.concat(argv, " "))
+  end)
+  local removed, err = env.teardown({ root = "/w/repo", branch = "PROJ-1-x" })
+  restore()
+  vim.env.TMUX = saved_tmux
+  eq(removed, nil)
+  eq(
+    err,
+    "tmux lists more than one window named PROJ-1-x-sh: @3, @4; tmux list-windows -F '#{window_id} #{window_name}' prints what the session holds"
+  )
+  eq(#calls, 4, "the listing is the last call: the editor's window is not closed either")
 end)
 
 test("teardown: a window that cannot be closed stops the removal, and so does running it from either window", function()
@@ -8331,7 +10175,7 @@ test("teardown: a window that cannot be closed stops the removal, and so does ru
       return done(argv, "dash\n")
     end
     if argv[2] == "list-windows" then
-      return done(argv, "dash\nPROJ-1-x\nPROJ-1-x-sh\n")
+      return done(argv, listing({ "dash", "PROJ-1-x", "PROJ-1-x-sh" }))
     end
     if argv[2] == "kill-window" then
       return failed(argv, 1, "server exited unexpectedly")
@@ -8509,6 +10353,9 @@ test("launcher: a ticket and a review each reuse the worktree already on their b
     if argv[1] == "git" and argv[2] == "worktree" then
       return done(argv, porcelain)
     end
+    if argv[1] == "tmux" and argv[2] == "list-windows" then
+      return done(argv, listing({ "dash", "PROJ-1-old-summary", "PROJ-1-old-summary-sh", "feature-x", "feature-x-sh" }))
+    end
     if argv[1] == "tmux" then
       return done(argv, "")
     end
@@ -8597,7 +10444,7 @@ test("launcher: git killed at the timeout is reported as killed, ahead of the pr
   eq(err, "git: killed after 60000 ms without exiting", "a git wt-rm that printed nothing is still said to be killed")
 end)
 
-test("binding: jql first, then the projects, then ignore, and a config git cannot read is the error", function()
+test("binding: jql with the epic beside it, then the projects and the epic, then ignore, and a config git cannot read is the error", function()
   -- Each key answers from `set`; one absent is `git config`'s exit 1 with
   -- nothing on stderr, which is how it reports a key that is not set.
   local function stub_config(set)
@@ -8609,30 +10456,60 @@ test("binding: jql first, then the projects, then ignore, and a config git canno
       return done(argv, value .. "\n")
     end)
   end
+  local JQL = { "git", "config", "--get", "dotfiles.jira.jql" }
+  local PROJECT = { "git", "config", "--get-all", "dotfiles.jira.project" }
+  local EPIC = { "git", "config", "--get", "dotfiles.jira.epic" }
+  local IGNORE = { "git", "config", "--type=bool", "dotfiles.jira.ignore" }
+  local malformed =
+    "dotfiles.jira.epic is pay-10, which is not a work item key such as PROJ-142; git config --unset dotfiles.jira.epic clears it"
+  -- What each configuration answers, and the keys git is asked for, in order.
   local cases = {
-    { { ["dotfiles.jira.jql"] = "filter = 1", ["dotfiles.jira.project"] = "PAY" }, { kind = "jql", jql = "filter = 1" } },
-    { { ["dotfiles.jira.project"] = "PAY\nOPS", ["dotfiles.jira.ignore"] = "true" }, { kind = "projects", projects = { "PAY", "OPS" } } },
-    { { ["dotfiles.jira.ignore"] = "true" }, { kind = "ignored" } },
-    { { ["dotfiles.jira.ignore"] = "false" }, { kind = "unbound" } },
-    { {}, { kind = "unbound" } },
+    { { ["dotfiles.jira.jql"] = "filter = 1", ["dotfiles.jira.project"] = "PAY" }, { { kind = "jql", jql = "filter = 1" } }, { JQL, EPIC } },
+    {
+      { ["dotfiles.jira.jql"] = "filter = 1", ["dotfiles.jira.epic"] = "PAY-10", ["dotfiles.jira.project"] = "OPS" },
+      { { kind = "jql", jql = "filter = 1", epic = "PAY-10" } },
+      { JQL, EPIC },
+    },
+    {
+      { ["dotfiles.jira.project"] = "PAY\nOPS", ["dotfiles.jira.ignore"] = "true" },
+      { { kind = "projects", projects = { "PAY", "OPS" } } },
+      { JQL, PROJECT, EPIC },
+    },
+    {
+      { ["dotfiles.jira.project"] = "PAY\nOPS", ["dotfiles.jira.epic"] = "PAY-10" },
+      { { kind = "projects", projects = { "PAY", "OPS" }, epic = "PAY-10" } },
+      { JQL, PROJECT, EPIC },
+    },
+    { { ["dotfiles.jira.epic"] = "PAY-10" }, { { kind = "projects", projects = { "PAY" }, epic = "PAY-10" } }, { JQL, PROJECT, EPIC } },
+    {
+      { ["dotfiles.jira.epic"] = "AB1-7", ["dotfiles.jira.ignore"] = "true" },
+      { { kind = "projects", projects = { "AB1" }, epic = "AB1-7" } },
+      { JQL, PROJECT, EPIC },
+    },
+    { { ["dotfiles.jira.epic"] = "pay-10" }, { nil, malformed }, { JQL, PROJECT, EPIC } },
+    { { ["dotfiles.jira.jql"] = "filter = 1", ["dotfiles.jira.epic"] = "pay-10" }, { nil, malformed }, { JQL, EPIC } },
+    -- `git config dotfiles.jira.epic ""` leaves a key that answers an empty
+    -- line with exit 0, and binds no epic.
+    { { ["dotfiles.jira.epic"] = "" }, { { kind = "unbound" } }, { JQL, PROJECT, EPIC, IGNORE } },
+    {
+      { ["dotfiles.jira.project"] = "PAY", ["dotfiles.jira.epic"] = "" },
+      { { kind = "projects", projects = { "PAY" } } },
+      { JQL, PROJECT, EPIC },
+    },
+    { { ["dotfiles.jira.ignore"] = "true" }, { { kind = "ignored" } }, { JQL, PROJECT, EPIC, IGNORE } },
+    { { ["dotfiles.jira.ignore"] = "false" }, { { kind = "unbound" } }, { JQL, PROJECT, EPIC, IGNORE } },
+    { {}, { { kind = "unbound" } }, { JQL, PROJECT, EPIC, IGNORE } },
   }
   for _, case in ipairs(cases) do
     local calls, restore = stub_config(case[1])
     local binding, err = repo.binding("/w/repo")
     restore()
-    eq({ binding, err }, { case[2] }, vim.inspect(case[1]))
+    eq({ binding, err }, case[2], vim.inspect(case[1]))
     eq(calls[1].opts.cwd, "/w/repo", "git config runs at the clone's root")
+    eq(vim.tbl_map(function(call)
+      return call.argv
+    end, calls), case[3], "the keys read for " .. vim.inspect(case[1]))
   end
-  local calls, restore = stub_config({})
-  repo.binding("/w/repo")
-  restore()
-  eq(vim.tbl_map(function(call)
-    return call.argv
-  end, calls), {
-    { "git", "config", "--get", "dotfiles.jira.jql" },
-    { "git", "config", "--get-all", "dotfiles.jira.project" },
-    { "git", "config", "--type=bool", "dotfiles.jira.ignore" },
-  })
   -- Exit 1 with something on stderr is git failing to read the file, not a
   -- key that is not set.
   _, restore = stub_wait(function(argv)
@@ -8643,6 +10520,309 @@ test("binding: jql first, then the projects, then ignore, and a config git canno
   eq(binding, nil)
   eq(err, "git exited 1\nerror: bad config line 3 in file .bare/config")
   eq(repo.LIST_COMMAND, "acli jira project list --paginate", "the listing stops at a page without --paginate")
+end)
+
+test("binding: a clone bound to an epic names it on the dash's first line and asks Jira for its children; under a complete jql the line names none", function()
+  jira.forget()
+  local _, restore_cache = scratch_cache()
+  local restore_clone = stub_clone({ kind = "projects", projects = { "PAY" }, epic = "PAY-10" }, "https://bitbucket.example.test/acme/payments.git")
+  local runs, restore_run = stub_run(checked({ signed_in = true }, function(argv)
+    return done(argv, {})
+  end))
+  local notices, restore_notify = stub_notify()
+  local buf = list.open({ root = "/w/repo", bare = true })
+  local settled_ok = settled(buf)
+  local first = lines_of(buf)[1]
+  restore_notify()
+  restore_run()
+  restore_clone()
+  restore_cache()
+  eq(settled_ok, true, "every section answered")
+  eq(first, "Docket · /w/repo · PAY-10")
+  local searched = {}
+  for _, run in ipairs(runs) do
+    if jql_of(run.argv) then
+      searched[#searched + 1] = jql_of(run.argv)
+    end
+  end
+  eq(#searched > 0, true, "the Jira sections were searched")
+  for _, jql in ipairs(searched) do
+    eq(jql:find("^project IN %(PAY%) AND parent = PAY%-10 ") ~= nil, true, jql)
+  end
+  eq(notices, {})
+  local lines = list.lines({ root = "/w/repo", binding = { kind = "jql", jql = "filter = 1", epic = "PAY-10" }, sections = {} }, 0)
+  eq(lines[1], "Docket · /w/repo", "a complete query is not narrowed, so the epic is not named")
+end)
+
+-- A merge request's item buffer as a read leaves it: named after its
+-- project, read in the worktree `/w/mr/feature-x` of the clone `/w/mr`,
+-- which its reference names, and keyed by commands.attach() before the item
+-- is stored, which is the order a read takes: read() calls prepare(), whose
+-- filetype fires the FileType autocommand that attaches the keys, and
+-- populate() stores the item after that. `fields` are the item's own, over a
+-- merge request on `feature/x` from no fork.
+local MR_URL = "https://gitlab.example.test/acme/payments/-/merge_requests/482"
+local function merge_request_buffer(fields)
+  local name = buffer.name("glab", "!482", "acme/payments")
+  local previous = buffer.named(name)
+  if previous then
+    vim.api.nvim_buf_delete(previous, { force = true })
+  end
+  local buf = vim.api.nvim_create_buf(false, false)
+  vim.api.nvim_buf_set_name(buf, name)
+  commands.attach(buf)
+  buffer.populate(
+    buf,
+    item.new(vim.tbl_extend("force", {
+      source = "glab",
+      id = "!482",
+      title = "Bump the pin",
+      state = "opened",
+      url = MR_URL,
+      body = "The pin moves.",
+      me = "me",
+      ref = { id = "!482", cwd = "/w/mr/feature-x" },
+      project = "acme/payments",
+      branch = "feature/x",
+    }, fields or {})),
+    { now = NOW }
+  )
+  return buf
+end
+
+-- A buffer's normal-mode map of `lhs`, as maparg() reports it: `buffer` is
+-- 1 for a map of that buffer's own, and `callback` the function it runs.
+local function buffer_map(buf, lhs)
+  return vim.api.nvim_buf_call(buf, function()
+    return vim.fn.maparg(lhs, "n", false, true)
+  end)
+end
+
+-- Runs `press` with the launcher's processes recorded inside tmux: the clone
+-- at `/w/mr`, whose origin is acme/payments, bound to PAY, with a worktree
+-- already on `feature/x`, and tmux answering every step. The progress line
+-- the launcher draws first is silenced. Answers the calls and the notices.
+local function launch_from_buffer(press)
+  local saved = { tmux = vim.env.TMUX, echo = vim.api.nvim_echo, redraw = vim.cmd.redraw }
+  vim.env.TMUX = "/tmp/tmux-1/default,1,0"
+  vim.api.nvim_echo = function() end
+  vim.cmd.redraw = function() end
+  local porcelain = "worktree /w/mr/.bare\nbare\n\nworktree /w/mr/feature-x\nbranch refs/heads/feature/x\n\n"
+  local calls, restore = stub_wait(function(argv)
+    if argv[1] == "git" and argv[2] == "rev-parse" then
+      return done(argv, "/w/mr/.bare\n")
+    end
+    if argv[1] == "git" and argv[2] == "remote" then
+      return done(argv, "git@gitlab.example.test:acme/payments.git\n")
+    end
+    if argv[1] == "git" and argv[2] == "config" then
+      return argv[#argv] == "dotfiles.jira.project" and done(argv, "PAY\n") or failed(argv, 1, "")
+    end
+    if argv[1] == "git" and argv[2] == "worktree" then
+      return done(argv, porcelain)
+    end
+    if argv[1] == "tmux" and argv[2] == "list-windows" then
+      return done(argv, listing({ "dash", "feature-x", "feature-x-sh" }))
+    end
+    if argv[1] == "tmux" then
+      return done(argv, "")
+    end
+    return failed(argv, 1, "unexpected: " .. table.concat(argv, " "))
+  end)
+  local notices, restore_notify = stub_notify()
+  local ok, err = pcall(press)
+  restore_notify()
+  restore()
+  vim.env.TMUX, vim.api.nvim_echo, vim.cmd.redraw = saved.tmux, saved.echo, saved.redraw
+  assert(ok, err)
+  return calls, notices
+end
+
+-- The argument list of each tmux window the launcher made.
+local function windows_made(calls)
+  return vim.tbl_map(
+    function(call)
+      return call.argv
+    end,
+    vim.tbl_filter(function(call)
+      return call.argv[2] == "new-window" and call.argv[4] == "-n"
+    end, calls)
+  )
+end
+
+test("commands: <leader>dR in a merge request's buffer builds its environment in the reference's clone and opens the review there; <leader>dw builds it with no review", function()
+  local buf = merge_request_buffer()
+  eq(vim.b[buf].docket.branch, "feature/x", "the read stored the branch")
+  local review_map, work_map = buffer_map(buf, "<leader>dR"), buffer_map(buf, "<leader>dw")
+  eq(review_map.desc, "Docket: review the merge request")
+  local calls, notices = launch_from_buffer(function()
+    review_map.callback()
+  end)
+  eq(calls[1].argv, { "git", "rev-parse", "--git-common-dir" })
+  eq(calls[1].opts.cwd, "/w/mr/feature-x", "the clone is the one the reference names, not the editor's")
+  local listed = vim.tbl_filter(function(call)
+    return call.argv[2] == "worktree"
+  end, calls)
+  eq(#listed, 1)
+  eq(listed[1].opts.cwd, "/w/mr", "git worktree list runs in the reference's clone")
+  eq(windows_made(calls)[1], { "tmux", "new-window", "-S", "-n", "feature-x", "-c", "/w/mr/feature-x", "nvim", "-c", "Docket review !482" })
+  eq(notices[#notices].message:find("^worktree /w/mr/feature%-x on feature/x\n") ~= nil, true, notices[#notices].message)
+
+  calls = launch_from_buffer(function()
+    work_map.callback()
+  end)
+  eq(windows_made(calls)[1], { "tmux", "new-window", "-S", "-n", "feature-x", "-c", "/w/mr/feature-x", "nvim" }, "w opens no review")
+  vim.api.nvim_buf_delete(buf, { force = true })
+end)
+
+test("commands: a merge request's buffer from a fork is refused with the dash's line, and a ticket's buffer carries no <leader>dR and refuses a review", function()
+  local buf = merge_request_buffer({ branch = "main", fork = true })
+  eq(vim.b[buf].docket.fork, true, "the read stored the fork mark")
+  for _, lhs in ipairs({ "<leader>dR", "<leader>dw" }) do
+    local calls, notices = launch_from_buffer(function()
+      buffer_map(buf, lhs).callback()
+    end)
+    eq(notices, {
+      {
+        message = "!482 comes from a fork, so origin's main is not its branch and no worktree is made for it",
+        level = vim.log.levels.ERROR,
+      },
+    }, lhs)
+    eq(vim.tbl_filter(function(call)
+      return call.argv[2] == "worktree" or call.argv[1] == "tmux"
+    end, calls), {}, lhs .. ": the launcher is not reached")
+  end
+  vim.api.nvim_buf_delete(buf, { force = true })
+
+  local ticket_buf = loaded_buffer()
+  commands.attach(ticket_buf)
+  eq(buffer_map(ticket_buf, "<leader>dR").buffer, nil, "a ticket's buffer has no key that always refuses")
+  local notices, restore_notify = stub_notify()
+  commands.review_item(ticket_buf)
+  restore_notify()
+  eq(notices, { { message = "PROJ-142 is a ticket; a review is of a merge request", level = vim.log.levels.ERROR } })
+end)
+
+test("commands: the FileType autocommand sets <leader>dR from a merge request's buffer name, with nothing stored yet, as a first read and a session restore run it", function()
+  vim.g.loaded_docket = nil
+  dofile(root .. "/dot_local/share/private_nvim/private_site/pack/docket/start/docket/plugin/docket.lua")
+  local name = buffer.name("glab", "!482", "acme/payments")
+  local previous = buffer.named(name)
+  if previous then
+    vim.api.nvim_buf_delete(previous, { force = true })
+  end
+  local buf = vim.api.nvim_create_buf(false, false)
+  vim.api.nvim_buf_set_name(buf, name)
+  -- read() runs prepare() before anything is stored, and a session restore
+  -- sets the filetype with nothing stored; either way FileType attaches.
+  buffer.prepare(buf)
+  local stored, map = vim.b[buf].docket, buffer_map(buf, "<leader>dR")
+  local notices, restore_notify = stub_notify()
+  local ok, err = pcall(function()
+    map.callback()
+  end)
+  restore_notify()
+  vim.api.nvim_buf_delete(buf, { force = true })
+  assert(ok, err)
+  eq(stored, nil, "nothing is stored before the read answers")
+  eq(map.buffer, 1, "the key is the buffer's own, from its name")
+  eq(notices, { { message = "nothing loaded in this buffer; :e reads the item", level = vim.log.levels.ERROR } })
+end)
+
+-- What `g?` in a buffer reports, once, at INFO.
+local function keys_reported(buf)
+  local map = buffer_map(buf, "g?")
+  eq({ map.buffer, map.desc }, { 1, commands.HELP.desc }, "g? is the buffer's own")
+  local notices, restore = stub_notify()
+  local ok, err = pcall(map.callback)
+  restore()
+  assert(ok, err)
+  eq(#notices, 1)
+  eq(notices[1].level, vim.log.levels.INFO)
+  return notices[1].message
+end
+
+-- Checks that `g?` in a buffer reports the description of every one of the
+-- buffer's normal-mode maps that is docket's, `g?` itself included and
+-- last, before `after` when one is given, and answers the report. The
+-- left-hand sides are not compared: nvim_buf_get_keymap reports them with the
+-- leader expanded.
+local function lists_every_map(buf, label, after)
+  local text = keys_reported(buf)
+  local descs = {}
+  for _, map in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
+    if map.desc and vim.startswith(map.desc, "Docket:") then
+      descs[#descs + 1] = map.desc
+    end
+  end
+  eq(#descs > 1, true, label .. " carries docket's maps")
+  for _, desc in ipairs(descs) do
+    eq(text:find(desc, 1, true) ~= nil, true, ("%s: %s is not listed in\n%s"):format(label, desc, text))
+  end
+  local lines = vim.split(text, "\n", { plain = true })
+  if after then
+    eq(table.remove(lines), after, label .. ": the line after the list")
+  end
+  eq(lines[#lines]:match("^g%?%s+(.*)$"), commands.HELP.desc, label .. ": the list ends with g? itself")
+  return text
+end
+
+-- The description a `g?` report gives a key: the rest of the line that
+-- starts with `lhs` and the two spaces at least that pad it, nil when no line
+-- does. A key can be several words, as `:Docket review abandon` is.
+local function listed_as(text, lhs)
+  for line in (text .. "\n"):gmatch("(.-)\n") do
+    if line:sub(1, #lhs) == lhs then
+      local desc = line:sub(#lhs + 1):match("^%s%s+(.*)$")
+      if desc then
+        return desc
+      end
+    end
+  end
+  return nil
+end
+
+test("commands: g? lists every key attach sets, in the dash, a ticket's buffer, a merge request's and a draft", function()
+  local made = {}
+  local ok, err = pcall(function()
+    local dash = vim.api.nvim_create_buf(false, true)
+    made[#made + 1] = dash
+    commands.attach_dash(dash)
+    eq(listed_as(lists_every_map(dash, "the dash"), "za"), "Docket: close the section under the cursor, or open it")
+
+    local ticket_buf = loaded_buffer()
+    commands.attach(ticket_buf)
+    local text = lists_every_map(ticket_buf, "a ticket's buffer")
+    eq(listed_as(text, ":w"), "Docket: send the regions that changed")
+    eq(listed_as(text, ":e"), "Docket: read the item again; :e! discards unsaved edits")
+    eq(listed_as(text, "<leader>dt"), "Docket: move the item to another state")
+    eq(listed_as(text, "<leader>dR"), nil, "a ticket's buffer lists no review key")
+
+    local mr = merge_request_buffer()
+    made[#made + 1] = mr
+    local approve = "Docket: approve, merge or close the merge request (reopen a closed one)"
+    text = lists_every_map(mr, "a merge request's buffer")
+    eq(listed_as(text, "<leader>dt"), approve, "where approving and merging are")
+    eq(listed_as(text, "<leader>dR"), "Docket: review the merge request")
+    eq(buffer_map(mr, "<leader>dt").desc, approve, "the map carries it too")
+
+    local draft = vim.api.nvim_create_buf(false, false)
+    made[#made + 1] = draft
+    vim.api.nvim_buf_set_name(draft, commands.DRAFT .. "keys")
+    commands.attach(draft)
+    text = keys_reported(draft)
+    eq(listed_as(text, ":w"), "Docket: create the ticket")
+    eq(listed_as(text, ":e!"), "Docket: start the draft afresh")
+    eq(buffer_map(draft, "<leader>dt").buffer, nil, "a draft acts on no item")
+  end)
+  -- Every buffer made here is deleted whether or not an assertion failed, so
+  -- a failure leaves no buffer whose name a later test makes again.
+  for _, buf in ipairs(made) do
+    if vim.api.nvim_buf_is_valid(buf) then
+      vim.api.nvim_buf_delete(buf, { force = true })
+    end
+  end
+  assert(ok, err)
 end)
 
 -- phase 6: the write path, completion, transitions, assignment, create
@@ -10127,7 +12307,7 @@ local function stub_select(pick)
   end
 end
 
-test("commands: an item buffer binds a new comment, a transition and an assignment, and a draft binds nothing", function()
+test("commands: an item buffer binds a new comment, a transition and an assignment, and a draft binds none of them", function()
   local buf = loaded_buffer()
   commands.attach(buf)
   for _, lhs in ipairs({ "<leader>dc", "<leader>dt", "<leader>da", "gx", "<leader>dw" }) do
@@ -10433,7 +12613,7 @@ test("create: :Docket create opens a draft, :w creates the ticket once, and the 
   eq(vim.api.nvim_buf_get_name(draft), "docket-new://jira")
   eq(vim.api.nvim_buf_get_lines(draft, 0, -1, false), { "Project: TIG", "Type: Task", "Summary: ", "Assignee: ", "", "" })
   eq(vim.api.nvim_win_get_cursor(0), { 3, 8 }, "at the summary")
-  eq({ vim.bo[draft].buftype, vim.bo[draft].bufhidden, vim.bo[draft].buflisted }, { "acwrite", "hide", false })
+  eq({ vim.bo[draft].buftype, vim.bo[draft].bufhidden, vim.bo[draft].buflisted }, { "acwrite", "hide", true })
   eq(vim.bo[draft].modified, false, "a blank draft is not an edit")
   vim.api.nvim_buf_set_text(draft, 2, 9, 2, 9, { "Follow up" })
   vim.api.nvim_buf_set_lines(draft, 5, 6, false, { "The body." })
@@ -10472,6 +12652,134 @@ test("create: :Docket create opens a draft, :w creates the ticket once, and the 
   eq(vim.b[item_buf].docket.id, "TIG-45")
   eq(notices[#notices], { message = "created TIG-45", level = vim.log.levels.INFO })
   vim.api.nvim_buf_delete(item_buf, { force = true })
+end)
+
+-- Whether a buffer is valid, loaded and listed, in that order.
+local function held(buf)
+  return {
+    vim.api.nvim_buf_is_valid(buf),
+    vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf),
+    vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].buflisted,
+  }
+end
+
+test("create: :Docket create after :bdelete of the draft makes the draft afresh, so it is filled once", function()
+  no_draft()
+  vim.g.loaded_docket = nil
+  dofile(root .. "/dot_local/share/private_nvim/private_site/pack/docket/start/docket/plugin/docket.lua")
+  jira.forget()
+  local _, restore_wait = stub_acli({ signed_in = true })
+  local notices, restore_notify = stub_notify()
+  local fills = 0
+  local counter = vim.api.nvim_create_autocmd("BufReadCmd", {
+    pattern = "docket-new://*",
+    callback = function()
+      fills = fills + 1
+    end,
+  })
+  local other = vim.api.nvim_create_buf(true, false)
+  local ok, err = pcall(function()
+    local first = commands.create("TIG")
+    vim.api.nvim_set_current_buf(other)
+    vim.cmd("bdelete " .. first)
+    eq(held(first), { true, false, false }, ":bdelete leaves the draft, unloaded and off the list")
+    fills = 0
+    local second = commands.create("PAY")
+    eq(vim.api.nvim_buf_is_valid(first), false, "the deleted draft is wiped")
+    eq(second ~= first, true, "and the draft is made afresh")
+    eq(vim.api.nvim_get_current_buf(), second)
+    eq(vim.api.nvim_buf_get_name(second), "docket-new://jira")
+    eq(vim.api.nvim_buf_get_lines(second, 0, -1, false), { "Project: PAY", "Type: Task", "Summary: ", "Assignee: ", "", "" })
+    eq({ vim.bo[second].buftype, vim.bo[second].buflisted, vim.bo[second].modified }, { "acwrite", true, false })
+    eq(fills, 0, "showing it fires no BufReadCmd")
+    eq(notices, {})
+  end)
+  vim.api.nvim_del_autocmd(counter)
+  restore_notify()
+  restore_wait()
+  no_draft()
+  vim.api.nvim_buf_delete(other, { force = true })
+  vim.api.nvim_del_user_command("Docket")
+  vim.g.loaded_docket = nil
+  assert(ok, err)
+end)
+
+test("create: a created ticket whose buffer :bdelete left takes the draft's place in a buffer made afresh, so it is read once", function()
+  no_draft()
+  vim.g.loaded_docket = nil
+  dofile(root .. "/dot_local/share/private_nvim/private_site/pack/docket/start/docket/plugin/docket.lua")
+  local name = buffer.name("jira", "TIG-46")
+  local previous = buffer.named(name)
+  if previous then
+    vim.api.nvim_buf_delete(previous, { force = true })
+  end
+  jira.forget()
+  local _, restore_wait = stub_acli({ signed_in = true })
+  local notices, restore_notify = stub_notify()
+  local calls, restore = stub_calls(jira, {
+    item_create = HOLD,
+    item = function()
+      return ticket({ id = "TIG-46" })
+    end,
+  })
+  local count, restore_count = count_reads()
+  local ok, err = pcall(function()
+    local old = buffer.open("jira", "TIG-46")
+    vim.wait(1000, function()
+      return vim.b[old].docket ~= nil
+    end)
+    local draft = commands.create("TIG")
+    vim.cmd("bdelete " .. old)
+    eq(held(old), { true, false, false }, ":bdelete leaves the ticket's buffer, unloaded and off the list")
+    vim.api.nvim_buf_set_text(draft, 2, 9, 2, 9, { "Follow up" })
+    count.reads = 0
+    local before = #calls
+    local finished
+    commands.save_draft(draft, function(saved, message)
+      finished = { saved, message }
+    end)
+    calls[#calls].release("TIG-46")
+    vim.wait(2000, function()
+      local buf = buffer.named(name)
+      return finished ~= nil and buf ~= nil and vim.b[buf].docket ~= nil
+    end)
+    drained()
+    local item_buf = buffer.named(name)
+    eq(finished, { true, "created TIG-46" })
+    eq(vim.api.nvim_buf_is_valid(old), false, "the deleted buffer is wiped")
+    eq(item_buf ~= old, true, "and the ticket opens in a buffer made afresh")
+    eq(vim.api.nvim_get_current_buf(), item_buf, "where the draft was")
+    eq({ vim.bo[item_buf].buftype, vim.bo[item_buf].buflisted }, { "acwrite", true })
+    eq(names(vim.list_slice(calls, before + 1)), { "item_create", "item" }, "one create, then one read of the ticket")
+    eq(count.reads, 0, "showing it fires no BufReadCmd")
+    eq(notices[#notices], { message = "created TIG-46", level = vim.log.levels.INFO })
+    vim.api.nvim_buf_delete(item_buf, { force = true })
+  end)
+  restore_count()
+  restore()
+  restore_notify()
+  restore_wait()
+  no_draft()
+  vim.api.nvim_del_user_command("Docket")
+  vim.g.loaded_docket = nil
+  assert(ok, err)
+end)
+
+test("commands: :Docket create's draft wraps in its window", function()
+  no_draft()
+  jira.forget()
+  local _, restore_wait = stub_acli({ signed_in = true })
+  local notices, restore_notify = stub_notify()
+  local ok, err = in_tab(function()
+    local draft = commands.create("TIG")
+    eq(vim.api.nvim_get_current_buf(), draft)
+    eq(wrapping(0), WRAPS, "draft() ran before the window showed the draft, and create() sets them there")
+  end, true)
+  restore_notify()
+  restore_wait()
+  no_draft()
+  assert(ok, err)
+  eq(notices, {})
 end)
 
 test("create: a create the client refuses keeps the draft and its text, and a missing field is the adapter's own refusal", function()
@@ -10655,6 +12963,9 @@ test("create: the project comes from the argument, the ticket in the current buf
   local first_from_binding = vim.api.nvim_buf_get_lines(from_binding, 0, 1, false)[1]
   vim.api.nvim_buf_delete(from_binding, { force = true })
   bound = { kind = "projects", projects = { "PAY", "OPS" } }
+  -- Deleting the draft put the item buffer, which is listed, back in the
+  -- window, and its ticket would name the project.
+  vim.api.nvim_set_current_buf(vim.api.nvim_create_buf(false, true))
   local ambiguous = commands.create()
   local first_ambiguous = vim.api.nvim_buf_get_lines(ambiguous, 0, 1, false)[1]
   vim.api.nvim_buf_delete(ambiguous, { force = true })
@@ -12040,6 +14351,9 @@ test("commands: R on a merge request row lands in the review mode, in the tab th
       end
       if argv[1] == "tmux" then
         tmux[#tmux + 1] = argv
+        if argv[2] == "list-windows" then
+          return done(argv, listing({ "dash", env.window_name(branch), env.window_name(branch) .. "-sh" }))
+        end
         return done(argv, "")
       end
       return failed(argv, 1, "unexpected: " .. table.concat(argv, " "))
@@ -12366,6 +14680,66 @@ test("commands: taking a review's keys off leaves a buffer's own maps, abandonin
       vim.api.nvim_create_autocmd("TabClosed", { group = "docket/review", callback = autocmd.callback })
     end
     assert(ok, err)
+  end)
+end)
+
+test("commands: g? in a review's diff lists its keys, the approving submit and diffview's help; a compose window's lists :w and :q!; a refused comment, diffview reopening a file and the tab closing each leave it right", function()
+  review_case(function(worktree)
+    -- The diff shows new lines 11 to 13, so a comment is refused on line 1.
+    local hunk = table.concat({ "diff --git a/x b/x", "@@ -10,2 +11,3 @@ function M.run()", " kept", "+added", " kept", "" }, "\n")
+    review_wait(worktree, {
+      ["diff -U3 --no-color " .. DIFF_REFS.base_sha .. " HEAD -- " .. REVIEW_FILE] = function(argv)
+        return done(argv, hunk)
+      end,
+    })
+    stub_run_fast(glab_answer())
+    stub_diffview(worktree)
+    stub_notify()
+    vim.cmd.cd(vim.fn.fnameescape(worktree))
+    local r = commands.review_open("!482")
+    vim.wait(2000, function()
+      return r.tab ~= nil
+    end)
+    local file, win = vim.api.nvim_get_current_buf(), vim.api.nvim_get_current_win()
+    vim.wait(1000, function()
+      return buffer_map(file, "g?").buffer == 1
+    end)
+    local text = lists_every_map(file, "a review's diff", commands.DIFFVIEW_HELP)
+    eq(listed_as(text, ":Docket review submit approve"), "Docket: submit the held comments, then approve")
+    eq(listed_as(text, ":Docket review abandon"), "Docket: discard every held comment and close the diff")
+    eq(commands.DIFFVIEW_HELP:find(":help diffview-maps", 1, true) ~= nil, true, "the list names where diffview's keys are")
+
+    -- A comment refused opens no window, and the diff's g? stays the review's.
+    vim.api.nvim_win_set_cursor(win, { 1, 0 })
+    local refused = stub_notify()
+    buffer_map(file, "<leader>dc").callback()
+    eq(drained(), true)
+    eq(refused[#refused].message:find("is not in the merge request's diff", 1, true) ~= nil, true, vim.inspect(refused))
+    eq(vim.api.nvim_get_current_buf(), file, "no compose window opened")
+    eq(listed_as(keys_reported(file), ":Docket review submit approve") ~= nil, true, "the diff's g? is the review's")
+
+    -- A compose window gets a g? of its own.
+    vim.api.nvim_win_set_cursor(win, { 12, 0 })
+    buffer_map(file, "<leader>dc").callback()
+    local compose = vim.api.nvim_get_current_buf()
+    eq(vim.startswith(vim.api.nvim_buf_get_name(compose), review.SCHEME), true, vim.api.nvim_buf_get_name(compose))
+    text = keys_reported(compose)
+    eq(listed_as(text, ":w"), "Docket: hold the comment; in a summary's window, submit the review")
+    eq(listed_as(text, ":q!"), "Docket: close the window and discard the text")
+    vim.api.nvim_win_close(0, true)
+    eq(drained(), true)
+
+    -- diffview reopening the file sets its own g? again and fires its event;
+    -- the review's is back once the schedule has run.
+    vim.keymap.set("n", "g?", "<Nop>", { buffer = file, desc = "diffview: open the help panel" })
+    vim.api.nvim_exec_autocmds("User", { pattern = "DiffviewDiffBufWinEnter" })
+    local inside = buffer_map(file, "g?").desc
+    eq(drained(), true)
+    eq(inside, "diffview: open the help panel", "the event runs before the keying")
+    eq(listed_as(keys_reported(file), ":Docket review submit approve") ~= nil, true, "the review's g? after the reopen")
+
+    vim.cmd.tabclose()
+    eq(buffer_map(file, "g?").buffer, nil, "the worktree's file keeps no g? once the review's tab is gone")
   end)
 end)
 
@@ -13884,6 +16258,55 @@ test("buffer: !482 from a clone whose origin spells the path in another case ope
   vim.o.fileignorecase = saved.fold
   repo.root, repo.remote_url = saved.root, saved.remote_url
   assert(ok, err)
+end)
+
+-- the suite's own isolation ---------------------------------------------------------------
+
+-- Last, so that every module a test required lazily is loaded by now.
+test("suite: every docket module is read from the source tree, and an installed copy is on neither path", function()
+  -- Each module file in the source tree is required, so the check covers
+  -- every one whichever tests ran.
+  for _, file in ipairs(vim.fn.globpath(lua, "docket/**/*.lua", false, true)) do
+    require((file:sub(#lua + 2, -5):gsub("/init$", ""):gsub("/", ".")))
+  end
+  local outside = {}
+  for name in pairs(package.loaded) do
+    if name == "docket" or vim.startswith(name, "docket.") then
+      local origin = origins[name]
+      if not origin or not vim.startswith(origin, lua .. "/") then
+        outside[#outside + 1] = ("%s from %s"):format(name, origin or "a path the recorder never saw")
+      end
+    end
+  end
+  table.sort(outside)
+  eq(outside, {}, "modules read from outside " .. lua)
+  eq(vim.api.nvim_get_runtime_file("lua/docket/*.lua", true), {}, "no docket module on the runtime search path")
+  eq(vim.api.nvim_get_runtime_file("doc/docket.txt", true), {}, "no help file on the runtime search path")
+
+  -- A copy in a package under another folder name, and one on the runtime
+  -- path itself, stand in for what a machine may have installed.
+  local fake = vim.fn.tempname()
+  local copies = { fake .. "/pack/plugins/start/docket.nvim", fake .. "/site" }
+  for _, copy in ipairs(copies) do
+    vim.fn.mkdir(copy .. "/lua/docket", "p")
+    vim.fn.mkdir(copy .. "/doc", "p")
+    vim.fn.writefile({ "return {}" }, copy .. "/lua/docket/config.lua")
+    vim.fn.writefile({ "*docket.txt*" }, copy .. "/doc/docket.txt")
+  end
+  local saved = { runtimepath = vim.o.runtimepath, packpath = vim.o.packpath }
+  vim.o.packpath = fake
+  vim.opt.runtimepath:prepend(fake .. "/site")
+  local seen = #vim.api.nvim_get_runtime_file("lua/docket/config.lua", true)
+  isolate()
+  local found = {
+    modules = vim.api.nvim_get_runtime_file("lua/docket/config.lua", true),
+    help = vim.api.nvim_get_runtime_file("doc/docket.txt", true),
+  }
+  local kept = vim.o.runtimepath:find(vim.env.VIMRUNTIME, 1, true) ~= nil
+  vim.o.runtimepath, vim.o.packpath = saved.runtimepath, saved.packpath
+  eq(seen, #copies, "both stand-in copies are where the editor looks before isolate()")
+  eq(found, { modules = {}, help = {} }, "neither is found after it")
+  eq(kept, true, "the editor's own runtime stays on the path")
 end)
 
 -- runner -----------------------------------------------------------------------------------

@@ -35,7 +35,7 @@ in place:
 | `acli`, `glab`, `gh`, and `tmux`, the terminal multiplexer, for the launcher's windows | `command -v acli glab gh tmux` | the bootstrap scripts; "Jira and reviews" in the repository's `README.md` says where each profile gets them |
 | `git wt-add`, which the launcher runs, and `git wt-clone`, which makes the clone layout it needs | `command -v git-wt-clone git-wt-add` | `dot_local/bin/` in the repository |
 | octo.nvim and diffview.nvim, where a pull request and a review's diff open | `:lua print(vim.fn.exists(":Octo") == 2, vim.fn.exists(":DiffviewOpen") == 2)` prints `true true` | the `vim.pack.add` call in `private_dot_config/nvim/init.lua`; "Editing" in the repository's `README.md` |
-| an account on each service in use: a Jira Cloud site, which is a Jira instance at `https://<name>.atlassian.net` run by the organisation whose tickets these are; a GitLab host; GitHub | `:checkhealth docket`, under `docket: backends` | the person; signing in is "Signing in" in the repository's `README.md` |
+| an account on each service in use: a Jira Cloud site, which is a Jira instance at `https://<name>.atlassian.net` run by the organisation whose tickets these are; a GitLab host; GitHub | `:checkhealth docket`, under `docket: backends`; Jira wherever a section names it, and a GitLab host or GitHub when run inside a clone whose `origin` is on it, or wherever a section's `adapter` is `glab` or `gh`; otherwise `glab` and `gh` read `no configured section needs it here; not checked` | the person; signing in is "Signing in" in the repository's `README.md` |
 
 Everything else docket runs on is neovim's own. Away from tmux the launcher
 opens a tab of the running editor instead of the two windows, `:help
@@ -87,7 +87,8 @@ These reach a service or the machine, and no docket command reverses them:
   `:Docket review resolve` resolves a thread at once, `:help
   docket-review-submit` and `:help docket-review-verbs`. A comment held with
   `:Docket review comment` is in the editor alone until then.
-- `w` and `R` on the dash make a worktree and, inside tmux, two windows;
+- `w` and `R` on the dash, `<leader>dw` in an item buffer, and `<leader>dR`
+  in a merge request's buffer make a worktree and, inside tmux, two windows;
   away from tmux, a tab of the running editor. Removing either is under
   "Removing an environment" in `:help docket-work`.
 
@@ -239,7 +240,10 @@ It prints `ok    <name>` for each test as it passes, ends with
 with the assertion's message indented under it, and the exit code is 1. A run
 takes about ten seconds. No client, git or tmux runs, and a test that reaches
 one without a stand-in fails rather than running it; "The suite" in
-`ARCHITECTURE.md` says how.
+`ARCHITECTURE.md` says how. The suite tests this source tree whether or not
+docket is deployed on the machine: it takes any installed copy off the
+runtime path and `'packpath'` before it loads a module, and its last test
+fails when a docket module was read from anywhere else.
 
 ### Where to read next
 

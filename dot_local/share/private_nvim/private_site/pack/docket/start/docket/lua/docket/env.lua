@@ -143,45 +143,118 @@ local function tmux(argv)
   return spawn.wait(vim.list_extend({ "tmux" }, argv), { timeout = config.options.timeouts.tmux })
 end
 
+-- The session's windows, one a line: the id, a space, then the name.
+M.LIST_WINDOWS = { "list-windows", "-F", "#{window_id} #{window_name}" }
+-- The same command as a person types it, for the messages that send them to it.
+local LIST_COMMAND = "tmux list-windows -F '#{window_id} #{window_name}'"
+
+--- Reads what LIST_WINDOWS prints into the session's windows, in the order
+--- tmux listed them. A line that does not start with an id is skipped.
+---@param text string
+---@return { id: string, name: string }[] windows
+function M.parse_windows(text)
+  local windows = {}
+  for _, line in ipairs(vim.split(text, "\n", { trimempty = true })) do
+    local id, name = line:match("^(@%d+) (.*)$")
+    if id then
+      windows[#windows + 1] = { id = id, name = name }
+    end
+  end
+  return windows
+end
+
+--- The id of the one window of that name.
+---
+--- A name two windows carry has no id here, because a step addressed to
+--- either one could land on a window the launcher did not make; `ids` lets the
+--- caller name them all.
+---@param windows { id: string, name: string }[] what parse_windows() returned
+---@param name string
+---@return string|nil id nil when no window or several carry the name
+---@return string[] ids every listed window of that name, in listing order
+function M.window_id(windows, name)
+  local ids = {}
+  for _, window in ipairs(windows) do
+    if window.name == name then
+      ids[#ids + 1] = window.id
+    end
+  end
+  return #ids == 1 and ids[1] or nil, ids
+end
+
+-- The report on a name the listing holds more than once.
+local function several(name, ids)
+  return ("tmux lists more than one window named %s: %s; %s prints what the session holds"):format(
+    name,
+    table.concat(ids, ", "),
+    LIST_COMMAND
+  )
+end
+
+-- The report on a window new-window -S made that the listing does not hold, or
+-- holds more than once.
+local function unlisted(name, ids)
+  if #ids > 1 then
+    return several(name, ids)
+  end
+  return ("tmux lists no window named %s after new-window -S made it; %s prints what the session holds"):format(
+    name,
+    LIST_COMMAND
+  )
+end
+
 --- Opens the two named windows in the current tmux session and selects the
 --- editor's.
 ---
 --- `-n` names the window, and a name given at creation is what holds against
 --- tmux's own renaming. `-S` finds or creates, which is the whole of choosing
---- the same item twice. `-d` on the companion keeps focus from moving to it.
---- `allow-rename off` is a guard against a future tmux configuration letting a
---- program in the pane rename the window; its default is off.
+--- the same item twice; it refuses a name two windows of the session already
+--- share with `multiple windows named <name>`, which fails the call there.
+--- `-d` on the companion keeps focus from moving to it. `allow-rename off` is
+--- a guard against a future tmux configuration letting a program in the pane
+--- rename the window; its default is off.
 ---
---- Every target is written `=<name>`, which is an exact name match. A bare
---- `-t <name>` matches a prefix and then a glob pattern, so a target
---- naming a window that does not exist can land on a shorter-named one. The
---- `=` form also removes any need for a window identifier: `new-window -S -d`
---- prints nothing when the window is already there, so `-P` cannot supply one,
---- and the name is already what a listing would resolve from.
+--- Every step after creation addresses its window by id, `@<n>`, read from one
+--- LIST_WINDOWS once both windows are made. tmux reads an id as a window under
+--- every target type, while how it reads a name depends on the command:
+--- `select-window` takes a window target, where `=<name>` is an exact match,
+--- but `set-option` takes a pane target, where the `=` stays part of the name,
+--- so `set-option -w -t =<name>` fails with `no such window: =<name>` even
+--- with the window present. `new-window -S -P` prints nothing for a window
+--- that is already there, so the listing is what supplies the ids.
 ---
---- tmux runs a shell-command given as several arguments directly, without
---- `sh -c`, so the editor command is appended as arguments and nothing here
---- is quoted.
+--- The editor command is appended to `new-window` as arguments, and nothing
+--- here is quoted. tmux runs a command of several arguments directly and a
+--- command of one argument as `<default-shell> -c <command>`, so a review's
+--- `{ "nvim", "-c", ... }` runs directly and a plain `{ "nvim" }` runs under
+--- the default shell, where `nvim` needs no quoting.
 ---
---- Creating the windows is what fails the call, and so is the focus move at the
---- end. Between them, both `allow-rename` steps are attempted rather than
---- stopping at the first failure: the option guards against a tmux
+--- Creating the windows fails the call, and so do a listing that cannot be
+--- read, a listing that does not hold the editor's window exactly once, and
+--- the focus move at the end. A window `new-window -S` made and the listing
+--- does not hold has closed: tmux closes a window when its command completes.
+--- An `nvim` missing from tmux's PATH closes the editor's window, and which
+--- step meets that depends on when the window closes against the tmux calls
+--- here, which nothing has measured: the listing can miss it, the focus move
+--- can fail on its id, or the launch can report both windows and the editor's
+--- close after it. A second window of the name, appearing after `-S` ran, is
+--- one the launcher did not make, so the launch names both ids rather than
+--- pick one.
+---
+--- The companion's window absent from the listing, or listed twice, is a
+--- warning, as a failed `allow-rename` step is: the editor's window is the one
+--- the caller is sent to. Both `allow-rename` steps are attempted rather than
+--- stopping at the first failure, because the option guards against a tmux
 --- configuration this repository does not ship, while `select-window` is the
 --- focus move the caller asked for, so a tmux that refuses the option must not
 --- cost it.
 ---
---- `select-window` is also what separates a survivable failure from an
---- unsurvivable one, which is why its result decides the return rather than
---- being folded in with the others. It addresses `=<window>`, so succeeding
---- proves the editor's window is there -- the window the caller is sent to --
---- and leaves an earlier failure as a warning beside it. It proves nothing about
---- the companion: tmux closes a window when its command completes, so a
---- companion whose shell exits at once is gone before `allow-rename` reaches it,
---- and a warning naming `=<name>-sh` is the report on that window. Failing
---- leaves nothing established about the window, the session or the server, so it
---- is a failed launch -- and the cause to check first is the editor's own window
---- having closed the same way, which is what an `nvim` missing from tmux's PATH
---- looks like from here.
+--- `select-window` separates a survivable failure from an unsurvivable one,
+--- which is why its result decides the return rather than being folded in
+--- with the others. Succeeding proves the editor's window is there and leaves
+--- an earlier failure as a warning beside it. Failing leaves nothing
+--- established about the window, the session or the server, so it is a failed
+--- launch.
 ---@param path string
 ---@param window string
 ---@param command string[] the editor command
@@ -202,23 +275,39 @@ function M.tmux_windows(path, window, command)
     end
   end
 
+  local listed = tmux(M.LIST_WINDOWS)
+  if not listed.ok then
+    return nil, spawn.message(listed)
+  end
+  local windows = M.parse_windows(listed.stdout)
+  local editor, editors = M.window_id(windows, window)
+  if not editor then
+    return nil, unlisted(window, editors)
+  end
+
   local names = { editor = window, shell = shell }
-  for _, settled in ipairs({
-    { window, { "set-option", "-w", "-t", "=" .. window, "allow-rename", "off" } },
-    { shell, { "set-option", "-w", "-t", "=" .. shell, "allow-rename", "off" } },
-  }) do
-    local result = tmux(settled[2])
-    if not result.ok then
-      if settled[1] == shell then
-        -- Each step names one window, so its failure is the report on that one:
-        -- a companion that is gone must not come back as a name to switch to.
-        names.shell = nil
+  local companion, companions = M.window_id(windows, shell)
+  if not companion then
+    -- A companion with no single id must not come back as a name to switch to.
+    names.shell = nil
+    names.warning = unlisted(shell, companions)
+  end
+  for _, settled in ipairs({ { window, editor }, { shell, companion } }) do
+    if settled[2] then
+      local result = tmux({ "set-option", "-w", "-t", settled[2], "allow-rename", "off" })
+      if not result.ok then
+        if settled[1] == shell then
+          -- Each step addresses one window, so its failure is the report on
+          -- that one: a companion that closed after the listing is not a
+          -- window to switch to.
+          names.shell = nil
+        end
+        names.warning = names.warning or spawn.message(result)
       end
-      names.warning = names.warning or spawn.message(result)
     end
   end
 
-  local selected = tmux({ "select-window", "-t", "=" .. window })
+  local selected = tmux({ "select-window", "-t", editor })
   if not selected.ok then
     -- An earlier failure is the first symptom of whatever also stopped the focus
     -- move, and it names the step that met it first, so it goes out in front.
@@ -242,11 +331,13 @@ end
 --- The shell lines that do what tmux_windows() does, for a machine where the
 --- launcher cannot: away from tmux.
 ---
---- What this returns is printed for somebody to paste at a prompt, where the
---- shell is fish, which has neither `var=value` assignment nor `$(...)`
---- substitution. So no line holds either: the `=`-prefixed exact-match targets
---- are what remove the need for a window identifier and therefore for any
---- intermediate variable.
+--- What this returns is printed for somebody to paste at a prompt, which may
+--- be fish or bash, and the two spell a variable differently. So no line
+--- carries a window id to the next, and every line that targets a window
+--- names it as `'=<name>'`, an exact match under a window target.
+--- The `allow-rename` lines run `set-window-option`, which takes a window
+--- target as `select-window` and `kill-window` do; `set-option -w` takes a pane
+--- target, where `=<name>` matches no window.
 ---@param path string
 ---@param window string
 ---@param command string[] the editor command
@@ -260,8 +351,8 @@ function M.tmux_script(path, window, command)
   return table.concat({
     ("tmux new-window -S -n %s -c %s %s"):format(quoted(window), quoted(path), table.concat(words, " ")),
     ("tmux new-window -S -d -n %s -c %s"):format(quoted(shell), quoted(path)),
-    ("tmux set-option -w -t %s allow-rename off"):format(quoted("=" .. window)),
-    ("tmux set-option -w -t %s allow-rename off"):format(quoted("=" .. shell)),
+    ("tmux set-window-option -t %s allow-rename off"):format(quoted("=" .. window)),
+    ("tmux set-window-option -t %s allow-rename off"):format(quoted("=" .. shell)),
     ("tmux select-window -t %s"):format(quoted("=" .. window)),
   }, "\n")
 end
@@ -309,10 +400,10 @@ end
 --- for the caller to print beside the path rather than as an error that hides
 --- the worktree it already made.
 ---
---- `warning` comes from the `allow-rename` steps inside tmux, or from a review
---- command that failed in the tab -- never both, since only one arm runs. A
---- failed focus move is an error rather than a warning, so it never arrives
---- here.
+--- `warning` comes from the companion's window or the `allow-rename` steps
+--- inside tmux, or from a review command that failed in the tab -- never
+--- both, since only one arm runs. A failed focus move is an error rather than
+--- a warning, so it never arrives here.
 ---@param path string
 ---@param window string
 ---@param command string[] the editor command
@@ -450,14 +541,18 @@ end
 --- Closes the two windows a branch's environment holds, where they are still
 --- open, and names the ones it closed.
 ---
---- The session's windows are listed first and only a name on the list is
---- killed, so a window already gone is not a failure: the point of closing is
---- that no window sits in the worktree when it is removed, and an absent one
---- sits nowhere. A `kill-window` that fails is an error rather than a warning,
---- because that window may still sit in the directory, which is what the
---- order exists to prevent. The listing is what settles presence rather than
---- the text of tmux's refusal, so nothing here depends on the wording of
---- `can't find window`.
+--- The session's windows are listed first with their ids, and each window is
+--- killed by the id the listing gives its name, so a window already gone is
+--- not a failure: the point of closing is that no window sits in the worktree
+--- when it is removed, and an absent one sits nowhere. A name the listing
+--- holds more than once is an error naming the ids, because at least one of
+--- those windows is not the launcher's and nothing here tells which. A
+--- `kill-window` that fails is an error rather than a warning, because that
+--- window may still sit in the directory, which is what the order exists to
+--- prevent. The listing is what settles presence rather than the text of
+--- tmux's refusal, so nothing here depends on the wording of `can't find
+--- window`. An id is read as a window under every target type, as
+--- tmux_windows() explains.
 ---
 --- The window the editor itself runs in is refused: killing it kills the
 --- editor running this, and the worktree would then never be removed. The name
@@ -485,23 +580,28 @@ function M.close_windows(window)
   if here == window or here == shell then
     return nil, ("this editor runs in tmux window %s, which the teardown closes; run it from another window"):format(here)
   end
-  local listed = tmux({ "list-windows", "-F", "#{window_name}" })
+  local listed = tmux(M.LIST_WINDOWS)
   if not listed.ok then
     return nil, spawn.message(listed)
   end
-  local present = {}
-  for _, name in ipairs(vim.split(listed.stdout, "\n", { trimempty = true })) do
-    present[name] = true
+  local windows = M.parse_windows(listed.stdout)
+  local targets = {}
+  for _, name in ipairs({ window, shell }) do
+    local id, ids = M.window_id(windows, name)
+    if #ids > 1 then
+      return nil, several(name, ids)
+    end
+    if id then
+      targets[#targets + 1] = { name = name, id = id }
+    end
   end
   local closed = {}
-  for _, name in ipairs({ window, shell }) do
-    if present[name] then
-      local result = tmux({ "kill-window", "-t", "=" .. name })
-      if not result.ok then
-        return nil, spawn.message(result)
-      end
-      closed[#closed + 1] = name
+  for _, target in ipairs(targets) do
+    local result = tmux({ "kill-window", "-t", target.id })
+    if not result.ok then
+      return nil, spawn.message(result)
     end
+    closed[#closed + 1] = target.name
   end
   return closed
 end

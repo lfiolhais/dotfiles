@@ -1,5 +1,6 @@
--- The repository in hand: where its root is, which Jira projects it is bound
--- to, which review client its remote implies and which project path it names,
+-- The repository in hand: where its root is, which Jira projects and which
+-- epic it is bound to, which review client its remote implies and which
+-- project path it names,
 -- which project paths its other remotes name, and which worktrees it has.
 -- Imports config and spawn. The lookups run git through spawn's blocking form,
 -- because the dashboard cannot draw its sections before it knows them and each
@@ -23,6 +24,10 @@ M.BARE_DIR = ".bare"
 M.BIND_COMMAND = "git config --add dotfiles.jira.project <KEY>"
 -- `--paginate` because the listing stops at 30 projects without it.
 M.LIST_COMMAND = "acli jira project list --paginate"
+-- A work item key, capturing its project: the shape jira.KEY and
+-- commands.KEY spell, which the suite holds to env.KEY_PATTERN. An epic is
+-- bound by its key, and the key names the epic's project.
+M.KEY = "^(%u[%u%d]+)%-%d+$"
 
 local function git(cwd, ...)
   return spawn.wait({ "git", ... }, { cwd = cwd, timeout = config.options.timeouts.git })
@@ -63,27 +68,58 @@ local function config_value(root, ...)
   return nil, spawn.message(result)
 end
 
+-- `dotfiles.jira.epic`: nil when it is not set or empty, the key when it is
+-- one, and an error naming the value and the command that clears it when it
+-- is not, because a value that is no key would reach a query as written.
+local function epic_of(root)
+  local epic, err = config_value(root, "--get", "dotfiles.jira.epic")
+  if err then
+    return nil, err
+  end
+  if not epic or epic == "" then
+    return nil
+  end
+  if not epic:match(M.KEY) then
+    return nil,
+      ("dotfiles.jira.epic is %s, which is not a work item key such as PROJ-142; git config --unset dotfiles.jira.epic clears it"):format(
+        epic
+      )
+  end
+  return epic
+end
+
 --- Reads the repository's Jira binding, in the resolution order:
 ---
----  1. `dotfiles.jira.jql`, a complete query used as given;
----  2. `dotfiles.jira.project`, one or more keys, assembled by clause();
+---  1. `dotfiles.jira.jql`, a complete query used as given, with
+---     `dotfiles.jira.epic` read beside it so that sections() can say the
+---     epic narrows nothing there;
+---  2. `dotfiles.jira.project`, one or more keys, and `dotfiles.jira.epic`,
+---     an epic's key, each alone or both together, assembled by clause();
+---     with the epic alone, the projects are the one its key names;
 ---  3. `dotfiles.jira.ignore`, set on a repository with no Jira, so that its
----     absence stops being reported;
+---     absence stops being reported; read only when neither the projects nor
+---     the epic is set, so either binds the clone whatever it says;
 ---  4. nothing set: unbound.
 ---
 --- A project key is never derived from the remote URL. A repository named
 --- `platform-utils` is not project `PLATFORM-UTILS`, and a query that returns
---- nothing is indistinguishable from a missing login.
+--- nothing is indistinguishable from a missing login. An epic that is not a
+--- work item key is the error, with the command that clears it.
 ---@param root string
----@return { kind: string, jql: string|nil, projects: string[]|nil }|nil binding
+---@return { kind: string, jql: string|nil, projects: string[]|nil, epic: string|nil }|nil binding
 ---@return string|nil err
 function M.binding(root)
   local jql, err = config_value(root, "--get", "dotfiles.jira.jql")
   if err then
     return nil, err
   end
+  local epic
   if jql and jql ~= "" then
-    return { kind = "jql", jql = jql }
+    epic, err = epic_of(root)
+    if err then
+      return nil, err
+    end
+    return { kind = "jql", jql = jql, epic = epic }
   end
 
   local projects
@@ -91,8 +127,15 @@ function M.binding(root)
   if err then
     return nil, err
   end
+  epic, err = epic_of(root)
+  if err then
+    return nil, err
+  end
   if projects and projects ~= "" then
-    return { kind = "projects", projects = vim.split(projects, "\n", { trimempty = true }) }
+    return { kind = "projects", projects = vim.split(projects, "\n", { trimempty = true }), epic = epic }
+  end
+  if epic then
+    return { kind = "projects", projects = { epic:match(M.KEY) }, epic = epic }
   end
 
   local ignore
@@ -107,12 +150,26 @@ function M.binding(root)
   return { kind = "unbound" }
 end
 
---- The clause a binding supplies for config.PLACEHOLDER.
+--- The clause a binding supplies for config.PLACEHOLDER:
+--- `project IN (PAY, OPS)`, and with an epic
+--- `project IN (PAY) AND parent = PAY-10`, which lists the epic's children.
+--- The project clause stays beside the epic so that every row is a ticket of
+--- a bound project, the only kind the launcher builds a worktree for: a child
+--- filed in another project is left off.
+--- UNVERIFIED against a Jira instance: that a child's sub-tasks, whose parent
+--- is the child, are left off too. This lists a row of a sub-task type when
+--- they are not:
+---
+---   acli jira workitem search --jql 'parent = <epic>' --fields key,issuetype,status --json
 ---@param binding table
 ---@return string|nil clause nil when the binding supplies none
 function M.clause(binding)
   if binding.kind == "projects" then
-    return "project IN (" .. table.concat(binding.projects, ", ") .. ")"
+    local clause = "project IN (" .. table.concat(binding.projects, ", ") .. ")"
+    if binding.epic then
+      clause = clause .. " AND parent = " .. binding.epic
+    end
+    return clause
   end
   return nil
 end
@@ -125,18 +182,18 @@ end
 
 --- One Jira section's query under a binding.
 ---
---- A binding by project fills the placeholder. A complete query is returned
---- as given. Unbound, the placeholder stands for a constraint being lifted,
---- so the correct rewrite sets it to true; `AND` binds tighter than `OR` in
---- JQL, so `x AND true` collapses to `x` at any position in an `AND` chain,
---- and the placeholder is dropped together with the `AND` joining it. The
---- query then spans every project the account can see; only a template
---- scoped to the account by `currentUser()` is allowed to, which is why the
---- section is labelled and the worktree action refuses there. A placeholder
---- joined by `OR` is refused: `a OR true` is every work item in the instance,
---- and dropping the disjunct gives `a`, which is not the query written
---- either, so nothing runs. JQL keywords are case-insensitive, so `and`
---- matches too.
+--- A binding by project, with its epic or without, fills the placeholder
+--- with clause(). A complete query is returned as given. Unbound, the
+--- placeholder stands for a constraint being lifted, so the correct rewrite
+--- sets it to true; `AND` binds tighter than `OR` in JQL, so `x AND true`
+--- collapses to `x` at any position in an `AND` chain, and the placeholder
+--- is dropped together with the `AND` joining it. The query then spans every
+--- project the account can see; only a template scoped to the account by
+--- `currentUser()` is allowed to, which is why the section is labelled and
+--- the worktree action refuses there. A placeholder joined by `OR` is
+--- refused: `a OR true` is every work item in the instance, and dropping the
+--- disjunct gives `a`, which is not the query written either, so nothing
+--- runs. JQL keywords are case-insensitive, so `and` matches too.
 ---@param template string
 ---@param binding table
 ---@return string|nil query nil for a binding that shows no ticket sections, or for a template whose placeholder cannot be dropped
@@ -196,7 +253,9 @@ end
 --- Bound by project, every section appears with its placeholder filled.
 --- Bound by a complete query, the first Jira section runs it as given and
 --- the others are left out: they differ only in the clause they add to the
---- placeholder, and a complete query has no placeholder to add it to.
+--- placeholder, and a complete query has no placeholder to add it to. An
+--- epic bound beside a complete query narrows nothing, so that section
+--- carries a `reason` saying so and naming the clause to put in the query.
 --- Ignored, the Jira sections are left out. Unbound, one Jira section shows
 --- the account's own tickets across every project, labelled as unbound and
 --- carrying the binding command as its `reason`.
@@ -234,12 +293,18 @@ function M.sections(binding, configured, review)
     if section.adapter == "jira" then
       if binding.kind == "projects" or (binding.kind == "jql" and not jql_taken) then
         jql_taken = true
-        local query, err = M.jql(section.query, binding)
+        local query, reason = M.jql(section.query, binding)
+        if not reason and binding.kind == "jql" and binding.epic then
+          reason = ("dotfiles.jira.epic is %s, and dotfiles.jira.jql runs as written, so the epic narrows nothing; put parent = %s into the query"):format(
+            binding.epic,
+            binding.epic
+          )
+        end
         shown[#shown + 1] = {
           title = section.title,
           adapter = "jira",
           query = query,
-          reason = err,
+          reason = reason,
         }
       end
     elseif section.adapter == "review" then

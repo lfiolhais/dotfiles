@@ -990,9 +990,12 @@ end
 -- The autocommands that keep the drawing current, made once, on the main
 -- loop. BufWinEnter and TabEnter cover every buffer diffview puts in a window
 -- and every return to the tab. The two User events are diffview's own, from
--- its help and UNVERIFIED here; nothing depends on them firing. TabClosed
--- takes the marks out of the files a closed diff drew into, since those
--- buffers outlive it.
+-- its help and UNVERIFIED here; the drawing does not depend on them firing.
+-- The review's keys do: commands.lua puts the review's `g?` back on
+-- `DiffviewDiffBufWinEnter`, after diffview has set its own again on a file
+-- it reopened in the window already showing it, and its review_autocommands()
+-- says why. TabClosed takes the marks out of the files a closed diff drew
+-- into, since those buffers outlive it.
 local function autocommands()
   if augroup ~= nil then
     return augroup
